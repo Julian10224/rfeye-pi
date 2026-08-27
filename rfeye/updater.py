@@ -35,10 +35,17 @@ def download_update(url, sha256="", timeout=20):
 
 def install_zip_bytes(data, app_root="/opt/rfeye/rfeye"):
     root = Path(app_root)
-    backup = root.parent / (root.name + ".backup")
+
+    # RF Eye normally runs as an unprivileged desktop user. /opt/rfeye is
+    # root-owned on the appliance, so a sibling backup such as
+    # /opt/rfeye/rfeye.backup cannot be created by the running application.
+    # Keep rollback data in the user's state directory instead.
+    state_root = Path.home() / ".local" / "state" / "rfeye"
+    state_root.mkdir(parents=True, exist_ok=True)
+    backup = state_root / (root.name + ".backup")
     if backup.exists():
         shutil.rmtree(backup)
-    shutil.copytree(root, backup)
+    shutil.copytree(root, backup, ignore=shutil.ignore_patterns("__pycache__"))
 
     with tempfile.TemporaryDirectory(prefix="rfeye-update-") as td:
         zpath = Path(td) / "update.zip"
