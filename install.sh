@@ -16,6 +16,10 @@ TARGET_UID="$(id -u "$TARGET_USER")"
 
 echo "[1/8] Installing packages..."
 apt-get update
+# Configure the Dutch Wi-Fi regulatory domain so 2.4/5 GHz scanning uses NL rules.
+if command -v raspi-config >/dev/null 2>&1; then
+  raspi-config nonint do_wifi_country NL || true
+fi
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   git python3 python3-venv python3-pip python3-numpy python3-pygame \
   python3-rpi.gpio rtl-sdr librtlsdr0 librtlsdr-dev usbutils curl unzip kanshi network-manager
