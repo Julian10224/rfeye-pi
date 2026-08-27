@@ -34,6 +34,7 @@ DEFAULTS = {
     "auto_demo_if_no_sdr": False,
     "audio_mode": "adaptive",
 
+    # GPIO buzzer
     "buzzer_gpio": 18,
     "buzzer_passive": True,
     "buzzer_active_high": True,
@@ -47,7 +48,7 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.3",
+    "app_version": "0.7.5",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -68,6 +69,7 @@ def load_config():
             cfg.update(json.loads(p.read_text()))
     except Exception:
         pass
+    # Release metadata belongs to the installed code, never to stale user settings.
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
     return cfg

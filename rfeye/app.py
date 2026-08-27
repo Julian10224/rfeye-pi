@@ -69,6 +69,9 @@ class App:
         self.wifi_selected = None
         self.wifi_password = ""
         self.wifi_message = ""
+        self.wifi_details = None
+        self.wifi_scan_busy = False
+        self.wifi_last_scan = 0.0
         self.buzzer = GPIOBuzzer(
             pin=self.cfg.get("buzzer_gpio", 18),
             passive=self.cfg.get("buzzer_passive", True),
@@ -221,6 +224,7 @@ class App:
                 self._toggle_mute()
             elif key == "demo_mode":
                 self._toggle_demo()
+                self.page = "main"
             elif key == "threshold_db":
                 v = float(self.cfg["threshold_db"]) + 3.0
                 self.cfg["threshold_db"] = 6.0 if v > 24.0 else v
@@ -244,28 +248,44 @@ class App:
                 self.page = "spectrum"
 
         elif self.page == "wifi":
+            if self.wifi_details:
+                if y < 100 or y > 700:
+                    self.wifi_details = None
+                return
             if y < 88:
                 self.page = "settings"
                 self.wifi_selected = None
                 self.wifi_password = ""
                 return
             if self.wifi_selected:
+                key = self._wifi_key_at(x, y)
+                if key:
+                    if key == "BACK": self.wifi_password = self.wifi_password[:-1]
+                    elif key == "SPACE": self.wifi_password += " "
+                    elif key == "ENTER": self._wifi_connect()
+                    elif len(self.wifi_password) < 63: self.wifi_password += key
+                    return
                 if 326 <= y <= 386:
                     self._wifi_connect()
                 elif 400 <= y <= 455:
                     self.wifi_selected = None
                     self.wifi_password = ""
                 return
+            if y >= 690:
+                self._wifi_scan()
+                return
             top = 150
             rh = 58
             idx = int((y - top) / rh)
             if 0 <= idx < len(self.wifi_networks):
-                self.wifi_selected = self.wifi_networks[idx][0]
+                ssid,sig,sec,active = self.wifi_networks[idx]
+                if active:
+                    self.wifi_details = self._wifi_details_for_connected(ssid)
+                    self.wifi_selected = None
+                    return
+                self.wifi_selected = ssid
                 self.wifi_password = ""
-                self.wifi_message = "Type password and press Enter"
-                return
-            if y >= 700:
-                self._wifi_scan()
+                self.wifi_message = "Enter Wi-Fi password"
                 return
 
         elif self.page == "spectrum":
@@ -273,28 +293,60 @@ class App:
                 self.page = "main"
 
     def _wifi_scan(self):
+        if self.wifi_scan_busy:
+            return
+        self.wifi_scan_busy = True
         self.wifi_message = "SCANNING..."
-        nets = []
+        threading.Thread(target=self._wifi_scan_worker, daemon=True).start()
+
+    def _wifi_scan_worker(self):
         try:
-            cp = subprocess.run(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY",
-                                 "dev", "wifi", "list", "ifname", "wlan0", "--rescan", "yes"],
-                                capture_output=True, text=True, timeout=12)
-            seen = set()
+            subprocess.run(["nmcli","dev","wifi","rescan","ifname","wlan0"], capture_output=True, text=True, timeout=12)
+            time.sleep(2.0)
+            cp = subprocess.run([
+                "nmcli","-t","--escape","no","-f","IN-USE,SSID,SIGNAL,SECURITY",
+                "dev","wifi","list","ifname","wlan0"
+            ], capture_output=True, text=True, timeout=12)
+            seen=set(); nets=[]
             for line in cp.stdout.splitlines():
-                parts = line.split(":", 3)
+                parts=line.split(":",3)
                 if len(parts) < 4: continue
-                active, ssid, signal, sec = parts
+                active,ssid,signal,sec=parts
+                ssid=ssid.strip()
                 if not ssid or ssid in seen: continue
                 seen.add(ssid)
-                try: sig = int(signal)
-                except: sig = 0
-                nets.append((ssid, sig, sec, active == "*"))
-            nets.sort(key=lambda x: (not x[3], -x[1]))
-            self.wifi_networks = nets[:8]
-            self.wifi_message = f"{len(self.wifi_networks)} NETWORKS" if nets else "NO NETWORKS"
-        except Exception as e:
-            self.wifi_networks = []
-            self.wifi_message = "SCAN ERROR"
+                try: sig=int(signal)
+                except: sig=0
+                nets.append((ssid,sig,sec.strip(),active.strip()=="*"))
+            nets.sort(key=lambda x:(not x[3],-x[1]))
+            self.wifi_networks=nets[:12]
+            self.wifi_last_scan=time.time()
+            self.wifi_message=f"SCAN DONE - {len(nets)} NETWORKS"
+        except Exception:
+            self.wifi_message="SCAN ERROR"
+        finally:
+            self.wifi_scan_busy=False
+
+    def _wifi_details_for_connected(self, ssid):
+        d={"ssid":ssid}
+        try:
+            cp=subprocess.run(["nmcli","-t","-f","GENERAL.CONNECTION,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS","dev","show","wlan0"],capture_output=True,text=True,timeout=8)
+            dns=[]
+            for line in cp.stdout.splitlines():
+                if ":" not in line: continue
+                k,v=line.split(":",1)
+                if k=="GENERAL.CONNECTION": d["connection"]=v
+                elif k=="IP4.ADDRESS[1]": d["ip"]=v
+                elif k=="IP4.GATEWAY": d["gateway"]=v
+                elif k.startswith("IP4.DNS"): dns.append(v)
+            d["dns"]=", ".join(dns)
+        except Exception:
+            pass
+        for n in self.wifi_networks:
+            if n[0]==ssid:
+                d["signal"]=n[1]; d["security"]=n[2]
+                break
+        return d
 
     def _wifi_connect(self):
         if not self.wifi_selected:
@@ -323,6 +375,20 @@ class App:
         self._text("WI-FI SETUP", 82, 24, self.font_l, WHITE)
         self._text(self.wifi_message or self._wifi_text(), 84, 61, self.font_s, DIM)
 
+        if self.wifi_details:
+            d=self.wifi_details
+            self._text("CONNECTED NETWORK",28,128,self.font_s,DIM)
+            self._text(d.get("ssid",""),28,160,self.font_l,GREEN)
+            rows=[("IP address",d.get("ip","-")),("Gateway",d.get("gateway","-")),("DNS",d.get("dns","-")),("Signal",f'{d.get("signal",0)}%'),("Security",d.get("security","-"))]
+            yy=230
+            for label,value in rows:
+                pygame.draw.rect(self.ui,(9,13,18),(20,yy,440,62),border_radius=12)
+                self._text(label,38,yy+10,self.font_s,DIM)
+                self._text(value,38,yy+33,self.font_s,WHITE)
+                yy+=72
+            self._text("Tap back to return",240,730,self.font_s,DIM,center=True)
+            return
+
         if self.wifi_selected:
             self._text("Network", 28, 132, self.font_s, DIM)
             self._text(self.wifi_selected, 28, 160, self.font_l, WHITE)
@@ -334,7 +400,7 @@ class App:
             self._text("CONNECT", 240, 356, self.font_m, WHITE, center=True)
             pygame.draw.rect(self.ui, (20,25,31), (24,400,432,55), border_radius=13)
             self._text("CANCEL", 240, 428, self.font_s, DIM, center=True)
-            self._text("Press Enter to connect", 240, 500, self.font_s, DIM, center=True)
+            self._draw_wifi_keyboard()
             return
 
         self._text("Available networks", 28, 112, self.font_s, DIM)
@@ -348,7 +414,41 @@ class App:
             if sec:
                 self._text("LOCK", 440, y+15, self.font_s, DIM, center=True)
         pygame.draw.rect(self.ui, (17,132,212), (20,708,440,54), border_radius=12)
-        self._text("RESCAN", 240, 735, self.font_s, WHITE, center=True)
+        self._text("SCANNING..." if self.wifi_scan_busy else "RESCAN", 240, 735, self.font_s, WHITE, center=True)
+
+    def _wifi_key_at(self, x, y):
+        rows = ["1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
+        top = 468
+        row_h = 48
+        for ri,row in enumerate(rows):
+            yy = top + ri*row_h
+            if yy <= y < yy+40:
+                n=len(row); total=420; kw=total/n; start=30
+                if start <= x < start+total:
+                    idx=int((x-start)//kw)
+                    if 0 <= idx < n: return row[idx]
+        if 660 <= y <= 704:
+            if 30 <= x <= 132: return "BACK"
+            if 146 <= x <= 334: return "SPACE"
+            if 348 <= x <= 450: return "ENTER"
+        return None
+
+    def _draw_wifi_keyboard(self):
+        rows = ["1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
+        top=468; row_h=48
+        for ri,row in enumerate(rows):
+            n=len(row); total=420; kw=total/n; start=30; y=top+ri*row_h
+            for i,ch in enumerate(row):
+                x=int(start+i*kw)
+                w=int(kw-4)
+                pygame.draw.rect(self.ui,(18,24,30),(x,y,w,40),border_radius=8)
+                self._text(ch,x+w//2,y+20,self.font_s,WHITE,center=True)
+        pygame.draw.rect(self.ui,(30,36,44),(30,660,102,44),border_radius=8)
+        pygame.draw.rect(self.ui,(30,36,44),(146,660,188,44),border_radius=8)
+        pygame.draw.rect(self.ui,(17,132,212),(348,660,102,44),border_radius=8)
+        self._text("BACK",81,682,self.font_s,WHITE,center=True)
+        self._text("SPACE",240,682,self.font_s,WHITE,center=True)
+        self._text("ENTER",399,682,self.font_s,WHITE,center=True)
 
     def _toggle_mute(self):
         self.cfg["muted"] = not self.cfg.get("muted", False)
@@ -441,21 +541,20 @@ class App:
         pygame.draw.circle(self.ui, BLUE_BRIGHT, (cx-8, cy-8), 5)
 
     def _gear(self, cx, cy, size=42):
-        # Blue rounded square with a clean light gear, matching the reference style.
         import math
-        rect = pygame.Rect(cx - size//2, cy - size//2, size, size)
-        pygame.draw.rect(self.ui, (17, 132, 212), rect, border_radius=9)
-        gc = (238, 246, 252)
-        r = 10
-        for a in range(0, 360, 45):
-            ang = math.radians(a)
-            x1 = cx + int(math.cos(ang) * 10)
-            y1 = cy + int(math.sin(ang) * 10)
-            x2 = cx + int(math.cos(ang) * 15)
-            y2 = cy + int(math.sin(ang) * 15)
-            pygame.draw.line(self.ui, gc, (x1, y1), (x2, y2), 5)
-        pygame.draw.circle(self.ui, gc, (cx, cy), r, 4)
-        pygame.draw.circle(self.ui, (17, 132, 212), (cx, cy), 4)
+        # Blue gear only, transparent background.
+        teeth = 8
+        outer = size * 0.46
+        inner = size * 0.34
+        pts=[]
+        for i in range(teeth*4):
+            a = -math.pi/2 + i * math.pi/(teeth*2)
+            phase = i % 4
+            r = outer if phase in (1,2) else inner
+            pts.append((cx + int(math.cos(a)*r), cy + int(math.sin(a)*r)))
+        pygame.draw.polygon(self.ui, BLUE_BRIGHT, pts)
+        pygame.draw.circle(self.ui, BLUE_BRIGHT, (cx,cy), int(size*0.29))
+        pygame.draw.circle(self.ui, BG, (cx,cy), int(size*0.12))
 
     def _speaker(self, cx, cy, muted):
         pygame.draw.polygon(
@@ -527,7 +626,7 @@ class App:
                     ftxt = f'{p["freq_hz"] / 1e6:.3f} MHz'
                     fcol = (132, 184, 210)
                 else:
-                    ftxt = '---.--- MHz'
+                    ftxt = ['381.000 MHz','382.500 MHz','384.000 MHz'][col]
                     fcol = (74, 96, 110)
                 self._text(ftxt, x + seg_w//2, 617, self.font_s, fcol, center=True)
 
@@ -624,6 +723,11 @@ class App:
                 pts.append((x, y))
             if len(pts) > 1:
                 pygame.draw.lines(self.ui, BLUE_BRIGHT, False, pts, 2)
+            threshold_abs = float(snap["noise"]) + float(self.cfg.get("threshold_db", 10.0))
+            tnorm = clamp((threshold_abs - pmin) / (pmax - pmin))
+            ty = plot.bottom - int(tnorm * (plot.height - 1))
+            pygame.draw.line(self.ui, YELLOW, (plot.left,ty), (plot.right,ty), 2)
+            self._text(f'THRESH {self.cfg.get("threshold_db",10):.0f} dB', plot.left+8, ty-24, self.font_s, YELLOW)
 
         self._text(f'{self.cfg["scan_start_hz"] / 1e6:.3f} MHz', 30, 446, self.font_s, DIM)
         self._text(f'{self.cfg["scan_end_hz"] / 1e6:.3f} MHz', 304, 446, self.font_s, DIM)
