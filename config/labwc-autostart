@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# RF Eye appliance session: no desktop panel or on-screen keyboard.
+/usr/bin/kanshi &
+sleep 2
+
+# Kill anything left from a previous graphical session.
+pkill -x wf-panel-pi 2>/dev/null || true
+pkill -x squeekboard 2>/dev/null || true
+
+XDG_RUNTIME_DIR=/run/user/1000 \
+WAYLAND_DISPLAY=wayland-0 \
+SDL_VIDEODRIVER=wayland \
+/opt/rfeye/.venv/bin/python /opt/rfeye/rfeye/app.py &
