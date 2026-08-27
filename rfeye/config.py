@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 
+
 def _kiosk_guard_worker():
     """Keep Raspberry Pi desktop chrome out of the RF Eye appliance session."""
     while True:
@@ -21,6 +22,7 @@ def _kiosk_guard_worker():
                 pass
         time.sleep(3.0)
 
+
 def _start_kiosk_guard():
     # Only run in the graphical appliance session. This keeps imports in shell
     # tools/install scripts side-effect free.
@@ -31,6 +33,7 @@ def _start_kiosk_guard():
         name="rfeye-kiosk-guard",
         daemon=True,
     ).start()
+
 
 _start_kiosk_guard()
 
@@ -56,10 +59,21 @@ DEFAULTS = {
     "min_burst_span_db": 9.0,
     "min_burst_duty": 0.035,
     "max_burst_duty": 0.65,
+    "preferred_burst_duty_min": 0.06,
+    "preferred_burst_duty_max": 0.45,
+    "mobile_min_rf_snr_db": 5.0,
     "site_min_snr_db": 5.0,
     "site_burst_snr_db": 8.0,
     "site_pair_memory_s": 4.0,
+    "site_pair_min_hits": 1,
+    "duplex_pair_tolerance_hz": 1000.0,
+    "duplex_pair_min_quality": 0.28,
     "require_duplex_pair": True,
+    "candidate_min_confidence": 0.48,
+    "confidence_attack": 0.58,
+    "confidence_release": 0.20,
+    "confidence_confirm": 0.62,
+    "confidence_clear": 0.30,
     "ui_fps": 20,
 
     "gain": "auto",
@@ -92,10 +106,11 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.10",
+    "app_version": "0.7.11",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
+
 
 def _config_path():
     env = os.getenv("RFEYE_CONFIG")
@@ -104,6 +119,7 @@ def _config_path():
     if os.geteuid() == 0:
         return Path("/var/lib/rfeye/config.json")
     return Path.home() / ".config" / "rfeye" / "config.json"
+
 
 def load_config():
     cfg = dict(DEFAULTS)
@@ -117,6 +133,7 @@ def load_config():
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
     return cfg
+
 
 def save_config(cfg):
     p = _config_path()

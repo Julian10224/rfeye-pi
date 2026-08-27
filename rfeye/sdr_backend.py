@@ -1,370 +1,184 @@
-import math
-import shutil
-import subprocess
-import os
-import signal
-import threading
-import time
+import math, os, shutil, signal, subprocess, threading, time
 import numpy as np
 
+def clamp(v, lo=0.0, hi=1.0): return max(lo, min(hi, float(v)))
+
 class SDRBackend:
-    """Passive C2000/TETRA RF activity monitor.
-
-    The mobile/uplink band is treated as burst activity. The site/downlink
-    band is measured separately so continuous infrastructure carriers do not
-    appear as mobile RF activity.
-    """
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.lock = threading.Lock()
-        self.running = False
-        self.thread = None
-        self.status = "STARTING"
-        self.error = ""
-        self.peaks = []
-        self.mobile_peaks = []
-        self.site_peaks = []
-        self.mobile_level = 0.0
-        self.site_level = 0.0
-        self.mobile_hits = 0
-        self.site_recent = {}
-        self.last_good_scan = 0.0
-        self.scan_failures = 0
-        self.last_usb_reset = 0.0
-        self.spectrum_freqs = np.array([], dtype=np.float32)
-        self.spectrum_db = np.array([], dtype=np.float32)
-        self.noise_floor_db = -100.0
-        self.last_update = 0.0
-        self.demo_active = False
-        self._demo_forced = bool(cfg.get("demo_mode", False))
-
-    def set_demo(self, enabled):
-        with self.lock:
-            self._demo_forced = bool(enabled)
-            self.cfg["demo_mode"] = bool(enabled)
-
+    """Passive generic TETRA/RF activity monitor; no identity or distance inference."""
+    def __init__(self,cfg):
+        self.cfg=cfg; self.lock=threading.Lock(); self.running=False; self.thread=None
+        self.status='STARTING'; self.error=''; self.peaks=[]; self.mobile_peaks=[]; self.site_peaks=[]
+        self.mobile_level=0.; self.site_level=0.; self.activity_confidence=0.; self.mobile_confirmed=False
+        self.site_recent={}; self.last_good_scan=0.; self.scan_failures=0; self.last_usb_reset=0.
+        self.spectrum_freqs=np.array([],dtype=np.float32); self.spectrum_db=np.array([],dtype=np.float32)
+        self.noise_floor_db=-100.; self.last_update=0.; self.demo_active=False
+        self._demo_forced=bool(cfg.get('demo_mode',False))
+    def set_demo(self,v):
+        with self.lock: self._demo_forced=bool(v); self.cfg['demo_mode']=bool(v)
     def start(self):
-        self.running = True
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
+        if self.running:return
+        self.running=True; self.thread=threading.Thread(target=self._run,daemon=True); self.thread.start()
     def stop(self):
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=2.0)
-
+        self.running=False
+        if self.thread:self.thread.join(timeout=2.)
     def snapshot(self):
         with self.lock:
-            return {
-                "status": self.status,
-                "error": self.error,
-                "peaks": [dict(p) for p in self.peaks],
-                "mobile_peaks": [dict(p) for p in self.mobile_peaks],
-                "site_peaks": [dict(p) for p in self.site_peaks],
-                "mobile_level": float(self.mobile_level),
-                "site_level": float(self.site_level),
-                "mobile_confirmed": self.mobile_hits >= int(self.cfg.get("confirm_hits", 2)),
-                "freqs": self.spectrum_freqs.copy(),
-                "spectrum": self.spectrum_db.copy(),
-                "noise": float(self.noise_floor_db),
-                "last_update": float(self.last_update),
-                "demo": bool(self.demo_active),
-            }
-
+            return {'status':self.status,'error':self.error,'peaks':[dict(p) for p in self.peaks],
+            'mobile_peaks':[dict(p) for p in self.mobile_peaks],'site_peaks':[dict(p) for p in self.site_peaks],
+            'mobile_level':float(self.mobile_level),'site_level':float(self.site_level),
+            'activity_confidence':float(self.activity_confidence),'mobile_confirmed':bool(self.mobile_confirmed),
+            'freqs':self.spectrum_freqs.copy(),'spectrum':self.spectrum_db.copy(),'noise':float(self.noise_floor_db),
+            'last_update':float(self.last_update),'demo':bool(self.demo_active)}
     def _run(self):
         while self.running:
-            with self.lock:
-                demo = self._demo_forced
-            if demo:
-                self._demo_once()
-            else:
-                ok = self._scan_cycle()
-                if not ok:
-                    if self.cfg.get("auto_demo_if_no_sdr", False):
-                        self._demo_once()
-                    else:
-                        time.sleep(0.5)
-
-    def _centers_for(self, start_hz, end_hz, sr):
-        # Use only the flatter middle of the RTL-SDR passband and overlap sweeps.
-        # Tune on 25 kHz channel *boundaries* so tuner DC lands between TETRA carriers.
-        usable = sr * 0.68
-        half = usable / 2.0
-        step = usable * 0.90
-        centers = []
-        c = start_hz + half
+            with self.lock: demo=self._demo_forced
+            if demo:self._demo_once();continue
+            if not self._scan_cycle():
+                if self.cfg.get('auto_demo_if_no_sdr',False):self._demo_once()
+                else:time.sleep(.5)
+    def _centers_for(self,a,b,sr):
+        usable=sr*.68; half=usable/2; step=usable*.9; out=[]; c=a+half
         while True:
-            snapped = start_hz + round((c - start_hz) / 25_000.0) * 25_000.0
-            if centers and snapped <= centers[-1]:
-                snapped = centers[-1] + 25_000.0
-            centers.append(snapped)
-            if snapped + half >= end_hz:
-                break
-            c = snapped + step
-        return centers
-
+            x=a+round((c-a)/25000.)*25000.
+            if out and x<=out[-1]:x=out[-1]+25000.
+            out.append(x)
+            if x+half>=b:return out
+            c=x+step
     def _recover_sdr_usb(self):
-        now = time.time()
-        if now - self.last_usb_reset < 5.0:
-            return False
-        self.last_usb_reset = now
-        exe = shutil.which("usbreset")
-        if not exe:
-            return False
+        now=time.time()
+        if now-self.last_usb_reset<5:return False
+        self.last_usb_reset=now; exe=shutil.which('usbreset')
+        if not exe:return False
         try:
-            cp = subprocess.run([exe, "0bda:2838"], capture_output=True, text=True, timeout=6)
-            if cp.returncode == 0:
-                time.sleep(1.5)
-                return True
-        except Exception:
-            pass
+            cp=subprocess.run([exe,'0bda:2838'],capture_output=True,text=True,timeout=6)
+            if cp.returncode==0:time.sleep(1.5);return True
+        except Exception:pass
         return False
-
-    def _capture(self, center, sr, fft_size, nblocks, transient=False):
-        exe = shutil.which("rtl_sdr")
-        if not exe:
-            raise RuntimeError("rtl_sdr command not found")
-        nsamp = fft_size * nblocks
-        cmd = [exe, "-f", str(int(center)), "-s", str(int(sr)),
-               "-p", str(int(self.cfg.get("ppm", 0)))]
-        gain = self.cfg.get("gain", "auto")
-        if gain != "auto":
-            cmd += ["-g", str(float(gain))]
-        cmd += ["-n", str(int(nsamp)), "-"]
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
-        )
-        try:
-            out, err = proc.communicate(timeout=3.0)
+    def _capture(self,center,sr,n,blocks,transient=False):
+        exe=shutil.which('rtl_sdr')
+        if not exe:raise RuntimeError('rtl_sdr command not found')
+        cmd=[exe,'-f',str(int(center)),'-s',str(int(sr)),'-p',str(int(self.cfg.get('ppm',0)))]
+        gain=self.cfg.get('gain','auto')
+        if gain!='auto':cmd+=['-g',str(float(gain))]
+        cmd+=['-n',str(int(n*blocks)),'-']
+        p=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+        try:out,err=p.communicate(timeout=3.)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                proc.kill()
-            out, err = proc.communicate()
-            raise RuntimeError("rtl_sdr capture timeout")
-        if proc.returncode != 0 or len(out) < fft_size * 2:
-            msg = err.decode("utf-8", "ignore").strip()[-240:]
-            raise RuntimeError(msg or f"rtl_sdr exit {proc.returncode}")
-        raw = np.frombuffer(out, dtype=np.uint8).astype(np.float32)
-        iq = (raw[0::2] - 127.5) + 1j * (raw[1::2] - 127.5)
-        window = np.hanning(fft_size).astype(np.float32)
-        actual = min(nblocks, len(iq) // fft_size)
-        blocks = []
-        for i in range(actual):
-            blk = iq[i*fft_size:(i+1)*fft_size]
-            blk = blk - np.mean(blk)
-            spec = np.fft.fftshift(np.fft.fft(blk * window))
-            blocks.append(20.0 * np.log10(np.abs(spec) + 1e-12))
-        if not blocks:
-            raise RuntimeError("no complete FFT blocks")
-        stack = np.vstack(blocks)
-        percentile = float(self.cfg.get("mobile_percentile", 95.0))
-        psd = np.percentile(stack, percentile, axis=0) if transient else np.mean(stack, axis=0)
-        mid = len(psd) // 2
-        lo, hi = max(0, mid-2), min(len(psd), mid+3)
-        if lo > 0 and hi < len(psd):
-            fill = np.median(np.concatenate((psd[max(0,lo-8):lo], psd[hi:min(len(psd),hi+8)])))
-            psd[lo:hi] = fill
-            stack[:, lo:hi] = fill
-        freqs = np.fft.fftshift(np.fft.fftfreq(fft_size, 1.0/sr)) + center
-        return freqs, psd, stack
-
-    def _scan_band(self, start_hz, end_hz, label):
-        sr = int(self.cfg.get("sample_rate", 2048000))
-        fft_size = int(self.cfg.get("fft_size", 1024))
-        base_blocks = int(self.cfg.get("fft_blocks", 8))
-        capture_ms = float(self.cfg.get(
-            "mobile_capture_ms" if label == "MOBILE" else "site_capture_ms", 72.0
-        ))
-        nblocks = max(base_blocks, int(math.ceil((sr * capture_ms / 1000.0) / fft_size)))
-        usable_half = sr * 0.68 / 2.0
-        chan_half = float(self.cfg.get("tetra_channel_half_width_hz", 9000.0))
-        gate_db = float(self.cfg.get("burst_gate_db", 6.0))
-        all_f, all_p = [], []
-        observations = {}
-
-        channels = np.arange(start_hz + 12_500.0, end_hz, 25_000.0)
-        for center in self._centers_for(start_hz, end_hz, sr):
-            f, p, stack = self._capture(center, sr, fft_size, nblocks, transient=(label == "MOBILE"))
-            usable_mask = ((f >= start_hz) & (f <= end_hz) &
-                           (np.abs(f - center) <= usable_half))
-            if np.any(usable_mask):
-                all_f.append(f[usable_mask]); all_p.append(p[usable_mask])
-
+            try:os.killpg(p.pid,signal.SIGKILL)
+            except Exception:p.kill()
+            out,err=p.communicate();raise RuntimeError('rtl_sdr capture timeout')
+        if p.returncode!=0 or len(out)<n*2:
+            msg=err.decode('utf-8','ignore').strip()[-240:];raise RuntimeError(msg or f'rtl_sdr exit {p.returncode}')
+        raw=np.frombuffer(out,dtype=np.uint8).astype(np.float32); iq=(raw[0::2]-127.5)+1j*(raw[1::2]-127.5)
+        win=np.hanning(n).astype(np.float32); rows=[]
+        for i in range(min(blocks,len(iq)//n)):
+            x=iq[i*n:(i+1)*n]; x-=np.mean(x); s=np.fft.fftshift(np.fft.fft(x*win)); rows.append(20*np.log10(np.abs(s)+1e-12))
+        if not rows:raise RuntimeError('no complete FFT blocks')
+        stack=np.vstack(rows); psd=np.percentile(stack,float(self.cfg.get('mobile_percentile',95)),axis=0) if transient else np.mean(stack,axis=0)
+        mid=len(psd)//2; lo=max(0,mid-2); hi=min(len(psd),mid+3)
+        if lo>0 and hi<len(psd):
+            side=np.r_[psd[max(0,lo-8):lo],psd[hi:min(len(psd),hi+8)]]; fill=float(np.median(side)); psd[lo:hi]=fill; stack[:,lo:hi]=fill
+        return np.fft.fftshift(np.fft.fftfreq(n,1./sr))+center,psd,stack
+    @staticmethod
+    def _duty_q(d,lo,hi,pref_lo,pref_hi):
+        if pref_lo<=d<=pref_hi:return 1.
+        if d<pref_lo:return clamp((d-lo)/max(1e-6,pref_lo-lo))
+        return clamp((hi-d)/max(1e-6,hi-pref_hi))
+    def _scan_band(self,a,b,label):
+        sr=int(self.cfg.get('sample_rate',2048000)); n=int(self.cfg.get('fft_size',1024)); base=int(self.cfg.get('fft_blocks',8))
+        ms=float(self.cfg.get('mobile_capture_ms' if label=='MOBILE' else 'site_capture_ms',72.)); blocks=max(base,math.ceil(sr*ms/1000/n))
+        usable=sr*.68/2; half=float(self.cfg.get('tetra_channel_half_width_hz',9000)); gate=float(self.cfg.get('burst_gate_db',6))
+        channels=np.arange(a+12500.,b,25000.); obs={}; fs=[]; ps=[]
+        for center in self._centers_for(a,b,sr):
+            f,p,stack=self._capture(center,sr,n,blocks,label=='MOBILE'); mask=(f>=a)&(f<=b)&(np.abs(f-center)<=usable)
+            if np.any(mask):fs.append(f[mask]);ps.append(p[mask])
             for ch in channels:
-                edge_margin = usable_half - abs(ch - center)
-                if edge_margin < 15_000.0:
-                    continue
-                bins = np.where(np.abs(f - ch) <= chan_half)[0]
-                if len(bins) < 2:
-                    continue
-                # Integrate power across the occupied part of one 25 kHz TETRA channel.
-                series = 10.0 * np.log10(
-                    np.sum(np.power(10.0, stack[:, bins] / 10.0), axis=1) + 1e-20
-                )
-                low = float(np.percentile(series, 20))
-                median = float(np.percentile(series, 50))
-                high = float(np.percentile(series, 95))
-                span = high - low
-                duty = float(np.mean(series > (low + gate_db)))
-                obs = {
-                    "freq_hz": float(ch), "low_db": low, "median_db": median,
-                    "power_db": high, "snr_db": span, "burst_span_db": span,
-                    "duty": duty, "band": label, "last_seen": time.time(),
-                    "edge_margin": float(edge_margin),
-                }
-                old = observations.get(float(ch))
-                if old is None or obs["edge_margin"] > old["edge_margin"]:
-                    observations[float(ch)] = obs
-
-        if not all_p:
-            return [], np.array([]), np.array([]), -120.0
-        f = np.concatenate(all_f); p = np.concatenate(all_p)
-        order = np.argsort(f); f, p = f[order], p[order]
-        floor = float(np.percentile(p, 40))
-        obs = list(observations.values())
-        peaks = []
-
-        if label == "MOBILE":
-            threshold = float(self.cfg.get("threshold_db", 12.0))
-            required_span = max(float(self.cfg.get("min_burst_span_db", 9.0)), threshold)
-            duty_min = float(self.cfg.get("min_burst_duty", 0.035))
-            duty_max = float(self.cfg.get("max_burst_duty", 0.65))
-            for q in obs:
-                if q["burst_span_db"] < required_span:
-                    continue
-                if not (duty_min <= q["duty"] <= duty_max):
-                    continue
-                q = dict(q)
-                q["level"] = max(0.0, min(1.0,
-                    0.25 + (q["burst_span_db"] - required_span) / 20.0))
-                q["raster_ok"] = True
-                peaks.append(q)
-            peaks.sort(key=lambda q: (q["burst_span_db"], q["power_db"]), reverse=True)
+                margin=usable-abs(ch-center)
+                if margin<15000:continue
+                bins=np.where(np.abs(f-ch)<=half)[0]
+                if len(bins)<2:continue
+                series=10*np.log10(np.sum(10**(stack[:,bins]/10),axis=1)+1e-20); low=float(np.percentile(series,20)); high=float(np.percentile(series,95))
+                q={'freq_hz':float(ch),'low_db':low,'median_db':float(np.percentile(series,50)),'power_db':high,'snr_db':high-low,
+                   'burst_span_db':high-low,'duty':float(np.mean(series>low+gate)),'band':label,'last_seen':time.time(),'edge_margin':float(margin)}
+                old=obs.get(float(ch))
+                if old is None or q['edge_margin']>old['edge_margin']:obs[float(ch)]=q
+        if not ps:return [],np.array([]),np.array([]),-120.
+        f=np.concatenate(fs); p=np.concatenate(ps); order=np.argsort(f); f,p=f[order],p[order]; floor=float(np.percentile(p,40)); vals=list(obs.values())
+        if not vals:return [],f,p,floor
+        ch_floor=float(np.percentile([q['low_db'] for q in vals],40)); peaks=[]
+        if label=='MOBILE':
+            req=max(float(self.cfg.get('min_burst_span_db',9)),float(self.cfg.get('threshold_db',12))); dlo=float(self.cfg.get('min_burst_duty',.035)); dhi=float(self.cfg.get('max_burst_duty',.65))
+            plo=float(self.cfg.get('preferred_burst_duty_min',.06)); phi=float(self.cfg.get('preferred_burst_duty_max',.45)); minsnr=float(self.cfg.get('mobile_min_rf_snr_db',5))
+            for q0 in vals:
+                if q0['burst_span_db']<req or not dlo<=q0['duty']<=dhi:continue
+                q=dict(q0); snr=q['power_db']-ch_floor
+                if snr<minsnr:continue
+                q.update(rf_snr_db=float(snr),burst_quality=clamp((q['burst_span_db']-req+4)/14),duty_quality=self._duty_q(q['duty'],dlo,dhi,plo,phi),
+                         rf_quality=clamp((snr-minsnr+3)/15),signal_strength=clamp((snr-minsnr)/24),raster_ok=True)
+                q'level']=q['signal_strength'];peaks.append(q)
+            peaks.sort(key=lambda q:(q['burst_quality'],q['rf_quality'],q['power_db']),reverse=True)
         else:
-            # Base stations may be continuous. Compare exact 25 kHz channel power
-            # against the population of channels instead of applying burst criteria.
-            if obs:
-                channel_floor = float(np.percentile([q["low_db"] for q in obs], 40))
-                site_min = float(self.cfg.get("site_min_snr_db", 5.0))
-                burst_min = float(self.cfg.get("site_burst_snr_db", 8.0))
-                for q in obs:
-                    steady_snr = q["low_db"] - channel_floor
-                    burst_snr = q["power_db"] - channel_floor
-                    if steady_snr < site_min and burst_snr < burst_min:
-                        continue
-                    q = dict(q)
-                    q["snr_db"] = max(steady_snr, burst_snr - 2.0)
-                    q["level"] = max(0.0, min(1.0, 0.2 + (q["snr_db"] - site_min) / 18.0))
-                    peaks.append(q)
-                peaks.sort(key=lambda q: q["snr_db"], reverse=True)
-
-        candidate_limit = max(32, int(self.cfg.get("max_signals", 3)) * 10)
-        return peaks[:candidate_limit], f, p, floor
-
+            smin=float(self.cfg.get('site_min_snr_db',5)); bmin=float(self.cfg.get('site_burst_snr_db',8))
+            for q0 in vals:
+                steady=q0['low_db']-ch_floor; burst=q0['power_db']-ch_floor
+                if steady<smin and burst<bmin:continue
+                q=dict(q0); snr=max(steady,burst-2); q.update(snr_db=float(snr),site_quality=clamp((snr-smin+3)/14),signal_strength=clamp((snr-smin)/24));q['level']=q['signal_strength'];peaks.append(q)
+            peaks.sort(key=lambda q:(q['site_quality'],q['snr_db']),reverse=True)
+        return peaks[:max(32,int(self.cfg.get('max_signals',3))*10)],f,p,floor
+    def _remember_sites(self,site,now):
+        age=float(self.cfg.get('site_pair_memory_s',4))
+        for q in site:
+            f=round(q['freq_hz']); old=self.site_recent.get(f,{}); hits=int(old.get('hits',0))+1 if now-float(old.get('time',0))<=age*1.5 else 1
+            self.site_recent[f]={'time':now,'hits':min(hits,8),'quality':float(q.get('site_quality',q.get('level',0)))}
+        self.site_recent={f:v for f,v in self.site_recent.items() if now-float(v.get('time',0))<=age}
+    def _pair_q(self,target,site,now):
+        tol=float(self.cfg.get('duplex_pair_tolerance_hz',1000)); age=max(.1,float(self.cfg.get('site_pair_memory_s',4))); hits=int(self.cfg.get('site_pair_min_hits',1)); best=0.; current=False
+        for s in site:
+            if abs(s['freq_hz']-target)<=tol:best=max(best,float(s.get('site_quality',s.get('level',0))));current=True
+        for f,m in self.site_recent.items():
+            if abs(f-target)<=tol and int(m.get('hits',0))>=hits:
+                best=max(best,float(m.get('quality',0))*clamp(1-(now-float(m.get('time',0)))/age))
+        return clamp(best),current
+    def _confidence(self,m,pair):return clamp(.42*m.get('burst_quality',0)+.16*m.get('duty_quality',0)+.14*m.get('rf_quality',0)+.28*pair)
+    def _hysteresis(self,cycle):
+        old=self.activity_confidence; a=float(self.cfg.get('confidence_attack',.58) if cycle>=old else self.cfg.get('confidence_release',.20)); new=clamp(old+clamp(a)*(cycle-old))
+        if not self.mobile_confirmed and new>=float(self.cfg.get('confidence_confirm',.62)):self.mobile_confirmed=True
+        elif self.mobile_confirmed and new<float(self.cfg.get('confidence_clear',.30)):self.mobile_confirmed=False
+        self.activity_confidence=new; return new,self.mobile_confirmed
     def _scan_cycle(self):
         try:
-            m0 = float(self.cfg.get("mobile_band_start_hz", 380e6))
-            m1 = float(self.cfg.get("mobile_band_end_hz", 385e6))
-            s0 = float(self.cfg.get("site_band_start_hz", 390e6))
-            s1 = float(self.cfg.get("site_band_end_hz", 395e6))
-            mobile, mf, mp, mfloor = self._scan_band(m0, m1, "MOBILE")
-            site, sf, sp, sfloor = self._scan_band(s0, s1, "SITE")
-
-            now = time.time()
-            for q in site:
-                self.site_recent[round(q["freq_hz"])] = now
-            max_age = float(self.cfg.get("site_pair_memory_s", 4.0))
-            self.site_recent = {f:t for f,t in self.site_recent.items() if now - t <= max_age}
-
-            # Network-mode TETRA uses paired 25 kHz channels 10 MHz apart.
-            # Requiring recent downlink evidence prevents unrelated 380-385 MHz
-            # interference from being presented as network mobile activity.
-            require_pair = bool(self.cfg.get("require_duplex_pair", True))
-            accepted_mobile = []
-            for m in mobile:
-                target = round(m["freq_hz"] + 10_000_000.0)
-                paired_now = any(abs(s["freq_hz"] - target) <= 1_500.0 for s in site)
-                paired_recent = any(abs(f - target) <= 1_500 for f in self.site_recent)
-                paired = paired_now or paired_recent
-                if require_pair and not paired:
-                    continue
-                q = dict(m)
-                q["paired"] = paired
-                accepted_mobile.append(q)
-            accepted_mobile.sort(key=lambda q: (q.get("burst_span_db", 0.0), q["power_db"]), reverse=True)
-            shown_mobile = accepted_mobile[:int(self.cfg.get("max_signals", 3))]
-
-            ml = max([p["level"] for p in shown_mobile], default=0.0)
-            sl = max([p["level"] for p in site], default=0.0)
-            if ml >= 0.22:
-                self.mobile_hits = min(6, self.mobile_hits + 1)
-            else:
-                self.mobile_hits = max(0, self.mobile_hits - int(self.cfg.get("clear_hits", 2)))
-            confirmed = self.mobile_hits >= int(self.cfg.get("confirm_hits", 2))
-            shown = ml if confirmed else 0.0
-
-            idx = np.linspace(0, len(mp)-1, min(240, len(mp))).astype(int) if len(mp) else np.array([], dtype=int)
+            m,mf,mp,mfloor=self._scan_band(float(self.cfg.get('mobile_band_start_hz',380e6)),float(self.cfg.get('mobile_band_end_hz',385e6)),'MOBILE')
+            site,_,_,_=self._scan_band(float(self.cfg.get('site_band_start_hz',390e6)),float(self.cfg.get('site_band_end_hz',395e6)),'SITE'); now=time.time(); self._remember_sites(site,now)
+            require=bool(self.cfg.get('require_duplex_pair',True)); minpair=float(self.cfg.get('duplex_pair_min_quality',.28)); minconf=float(self.cfg.get('candidate_min_confidence',.48)); accepted=[]
+            for x in m:
+                pq,pnow=self._pair_q(round(x['freq_hz']+10000000),site,now)
+                if require and pq<minpair:continue
+                q=dict(x);q.update(paired=pq>=minpair,paired_now=pnow,pair_quality=pq,confidence=self._confidence(q if False else x,pq))
+                if q['confidence']>=minconf:accepted.append(q)
+            accepted.sort(key=lambda q:(q['confidence'],q.get('burst_quality',0),q.get('rf_snr_db',0)),reverse=True); shown=accepted[:int(self.cfg.get('max_signals',3))]
+            _,confirmed=self._hysteresis(max([p['confidence'] for p in shown],default=0)); rf=max([p.get('signal_strength',0) for p in shown],default=0); sl=max([p.get('signal_strength',0) for p in site],default=0)
+            idx=np.linspace(0,len(mp)-1,min(240,len(mp))).astype(int) if len(mp) else np.array([],dtype=int)
             with self.lock:
-                self.mobile_peaks = accepted_mobile
-                self.site_peaks = site
-                self.peaks = shown_mobile if confirmed else []
-                self.mobile_level = shown
-                self.site_level = sl
-                self.spectrum_freqs = mf[idx].astype(np.float64) if len(idx) else np.array([])
-                self.spectrum_db = mp[idx].astype(np.float32) if len(idx) else np.array([])
-                self.noise_floor_db = mfloor
-                self.last_update = time.time()
-                self.status = "LIVE"
-                self.error = ""
-                self.demo_active = False
-                self.last_good_scan = time.time()
-                self.scan_failures = 0
+                self.mobile_peaks=accepted;self.site_peaks=site;self.peaks=shown if confirmed else [];self.mobile_level=rf if confirmed else 0.;self.site_level=sl
+                self.spectrum_freqs=mf[idx].astype(np.float64) if len(idx) else np.array([]);self.spectrum_db=mp[idx].astype(np.float32) if len(idx) else np.array([])
+                self.noise_floor_db=mfloor;self.last_update=now;self.status='LIVE';self.error='';self.demo_active=False;self.last_good_scan=now;self.scan_failures=0
             return True
         except Exception as e:
-            err = str(e)
-            if "timeout" in err.lower():
-                self._recover_sdr_usb()
+            err=str(e)
+            if 'timeout' in err.lower():self._recover_sdr_usb()
             with self.lock:
-                self.scan_failures += 1
-                recently_good = self.last_good_scan and (time.time() - self.last_good_scan < 8.0)
-                if not recently_good and self.scan_failures >= 3:
-                    self.status = "NO SDR"
-                    self.peaks = []
-                    self.mobile_peaks = []
-                    self.site_peaks = []
-                    self.mobile_level = 0.0
-                    self.site_level = 0.0
-                    self.mobile_hits = 0
-                    self.spectrum_freqs = np.array([], dtype=np.float32)
-                    self.spectrum_db = np.array([], dtype=np.float32)
-                self.error = err
-                self.demo_active = False
+                self.scan_failures+=1; recent=bool(self.last_good_scan and time.time()-self.last_good_scan<8)
+                if not recent and self.scan_failures>=3:
+                    self.status='NO SDR';self.peaks=[];self.mobile_peaks=[];self.site_peaks=[];self.mobile_level=0.;self.site_level=0.;self.activity_confidence=0.;self.mobile_confirmed=False
+                    self.spectrum_freqs=np.array([],dtype=np.float32);self.spectrum_db=np.array([],dtype=np.float32)
+                self.error=err;self.demo_active=False
             return False
-
     def _demo_once(self):
-        t = time.time()
-        vals = [0.10 + 0.75*max(0.0, math.sin(t*0.70))**8,
-                0.06 + 0.50*max(0.0, math.sin(t*0.44+1.7))**10,
-                0.04 + 0.85*max(0.0, math.sin(t*0.28+3.1))**12]
-        base = float(self.cfg.get("mobile_band_start_hz", 380e6))
-        span = float(self.cfg.get("mobile_band_end_hz", 385e6)) - base
-        peaks = [{"freq_hz": base+span*(0.2+i*0.3), "power_db": -80+v*30,
-                  "snr_db": 8+v*30, "level": v, "band":"MOBILE",
-                  "last_seen": time.time()} for i,v in enumerate(vals) if v>0.12]
-        x=np.linspace(0,1,220); spec=-105+4*np.sin(x*15+t)
+        t=time.time(); vals=[.1+.75*max(0,math.sin(t*.7))**8,.06+.5*max(0,math.sin(t*.44+1.7))**10,.04+.85*max(0,math.sin(t*.28+3.1))**12]
+        base=float(self.cfg.get('mobile_band_start_hz',380e6)); span=float(self.cfg.get('mobile_band_end_hz',385e6))-base
+        peaks=[{'freq_hz':base+span*(.2+i*.3),'power_db':-80+v*30,'snr_db':8+v*30,'rf_snr_db':8+v*24,'signal_strength':v,'level':v,'confidence':min(1,.2+v*.8),'band':'MOBILE','last_seen':time.time()} for i,v in enumerate(vals) if v>.12]
+        x=np.linspace(0,1,220);spec=-105+4*np.sin(x*15+t)
         with self.lock:
-            self.peaks = peaks[:3]
-            self.mobile_peaks = peaks[:3]
-            self.site_peaks = []
-            self.mobile_level = max(vals)
-            self.site_level = 0.45
-            self.spectrum_freqs = np.linspace(base, base+span, len(x))
-            self.spectrum_db = spec.astype(np.float32)
-            self.noise_floor_db = -103.0
-            self.last_update = time.time()
-            self.status = "DEMO"
-            self.error = ""
-            self.demo_active = True
-        time.sleep(0.08)
+            self.peaks=peaks[:3];self.mobile_peaks=peaks[:3];self.site_peaks=[];self.mobile_level=max(vals);self.site_level=.45;self.activity_confidence=max([p['confidence'] for p in peaks],default=0);self.mobile_confirmed=bool(peaks)
+            self.spectrum_freqs=np.linspace(base,base+span,len(x));self.spectrum_db=spec.astype(np.float32);self.noise_floor_db=-103.;self.last_update=time.time();self.status='DEMO';self.error='';self.demo_active=True
+        time.sleep(.08)
