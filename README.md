@@ -8,9 +8,10 @@ RF Eye is a portrait RF-activity display for a Raspberry Pi, Elecrow 5-inch 800x
 - RTL-SDR status: CONNECTED / NOT CONNECTED
 - CLEAR / FAR / MID / NEAR indication
 - three large centered signal meters
-- frequency labels underneath each meter
+- always-visible frequency labels underneath each meter
 - GPIO18 buzzer with mute support
-- Settings menu with demo, sensitivity, brightness and update controls
+- polished Settings menu with demo, sensitivity, brightness and update controls
+- built-in Wi-Fi setup: scan, select and connect to another network
 - mouse cursor appears when the mouse is used and hides again automatically
 - Wi-Fi software updates from GitHub
 - technician spectrum page
@@ -40,47 +41,35 @@ When the installer finishes, reboot:
 sudo reboot
 ```
 
-The installer automatically:
-
-- installs Python, Pygame, RTL-SDR and GPIO dependencies
-- downloads the latest RF Eye code from GitHub
-- configures RTL-SDR driver access
-- applies the Elecrow 800x480 HDMI settings
-- detects the connected HDMI output for the appliance display
-- disables the Raspberry Pi top panel and on-screen keyboard in the RF Eye session
-- configures desktop auto-login
-- installs RF Eye under `/opt/rfeye`
-- configures the GitHub update manifest URL
+The installer automatically installs the required Python, Pygame, NetworkManager, RTL-SDR and GPIO packages, downloads RF Eye, configures the Elecrow 800x480 display, detects the connected HDMI output, configures autologin/appliance startup and installs RF Eye under `/opt/rfeye`.
 
 After reboot RF Eye starts automatically.
 
+## Wi-Fi setup
+
+Open **Settings > Wi-Fi**. RF Eye scans nearby networks with NetworkManager. Select an SSID, type its password with a connected keyboard and press **Enter** or choose **CONNECT**. The **RESCAN** button refreshes the list. The currently connected network is shown in green.
+
+This is useful when moving the RF Eye unit to another Wi-Fi network without leaving the application.
+
 ## Software updates over Wi-Fi
 
-RF Eye checks the GitHub update manifest configured during installation.
+Open **Settings > Software update**. RF Eye:
 
-Open **Settings** and select **Software update**. RF Eye then:
-
-1. downloads `update/manifest.json` from GitHub;
+1. downloads `update/manifest.json` from this repository;
 2. compares the published version with the installed version;
-3. downloads the update ZIP when a newer version is available;
-4. verifies the SHA-256 checksum;
+3. downloads `update/rfeye-update.zip` when a newer version exists;
+4. verifies its SHA-256 checksum;
 5. creates a backup of the current application;
 6. installs the new application files.
 
-The update mechanism does not use demo mode if the RTL-SDR is missing. Without an SDR, the main screen shows `SDR: NOT CONNECTED` and remains idle.
+The RTL-SDR does not trigger demo mode when disconnected. The main screen shows `SDR: NOT CONNECTED` and remains idle until the receiver is available again.
 
 ## Publishing a new update
 
-After changing the code, update the version in `VERSION` and `rfeye/config.py`, then run:
+Update `VERSION` and `rfeye/config.py`, then run:
 
 ```bash
 ./scripts/build-release.sh
 ```
 
-This creates:
-
-- `update/rfeye-update.zip`
-- `update/manifest.json`
-- a SHA-256 checksum for the release
-
-Commit and push those files to GitHub. Installed units can then discover the new version through **Settings > Software update**.
+This regenerates `update/rfeye-update.zip`, `update/manifest.json` and its SHA-256 checksum. Commit and push those files. Installed RF Eye units can then discover the new version through **Settings > Software update**.
