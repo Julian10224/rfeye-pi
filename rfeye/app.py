@@ -56,6 +56,14 @@ class App:
         self.font_l = pygame.font.Font(None, 40)
         self.font_xl = pygame.font.Font(None, 56)
 
+        self.settings_icon = None
+        try:
+            icon_path = Path(__file__).resolve().parent / "assets" / "settings_icon.png"
+            icon = pygame.image.load(str(icon_path)).convert_alpha()
+            self.settings_icon = pygame.transform.smoothscale(icon, (48, 48))
+        except Exception:
+            self.settings_icon = None
+
         self.backend = SDRBackend(cfg)
         self.backend.start()
 
@@ -540,9 +548,15 @@ class App:
         pygame.draw.circle(self.ui, BG, (cx+4, cy+3), int(r*0.34))
         pygame.draw.circle(self.ui, BLUE_BRIGHT, (cx-8, cy-8), 5)
 
+    def _draw_settings_icon(self, cx, cy):
+        if self.settings_icon is not None:
+            r = self.settings_icon.get_rect(center=(cx, cy))
+            self.ui.blit(self.settings_icon, r)
+        else:
+            self._gear(cx, cy, 42)
+
     def _gear(self, cx, cy, size=42):
         import math
-        # Blue gear only, transparent background.
         teeth = 8
         outer = size * 0.46
         inner = size * 0.34
@@ -586,7 +600,6 @@ class App:
         status_col = GREEN if status == "LIVE" else BLUE if status == "DEMO" else RED
         pygame.draw.circle(self.ui, status_col, (432, 44), 7)
 
-        # Clear RTL-SDR hardware/status indication on the main screen.
         if status == "LIVE":
             sdr_text = "SDR: CONNECTED"
             sdr_col = GREEN
@@ -598,8 +611,7 @@ class App:
             sdr_col = RED
         self._text(sdr_text, 240, 88, self.font_s, sdr_col, center=True)
 
-        # Settings button in the physical top-right corner after rotation.
-        self._gear(38, 38, 42)
+        self._draw_settings_icon(38, 38)
 
         peaks = snap["peaks"][:3]
         while len(peaks) < 3:
@@ -654,11 +666,9 @@ class App:
         self._text(state, 398, 708, state_font, col, center=True)
         self._text("STATUS", 398, 762, self.font_s, DIM, center=True)
 
-
     def _draw_settings(self):
         self.ui.fill(BG)
 
-        # Header
         pygame.draw.rect(self.ui, (7, 11, 16), (0, 0, 480, 92))
         pygame.draw.circle(self.ui, (18, 31, 41), (38, 45), 24)
         self._text("‹", 38, 43, self.font_xl, BLUE_BRIGHT, center=True)
