@@ -115,7 +115,7 @@ class SDRBackend:
                 if snr<minsnr:continue
                 q.update(rf_snr_db=float(snr),burst_quality=clamp((q['burst_span_db']-req+4)/14),duty_quality=self._duty_q(q['duty'],dlo,dhi,plo,phi),
                          rf_quality=clamp((snr-minsnr+3)/15),signal_strength=clamp((snr-minsnr)/24),raster_ok=True)
-                q'level']=q['signal_strength'];peaks.append(q)
+                q['level']=q['signal_strength'];peaks.append(q)
             peaks.sort(key=lambda q:(q['burst_quality'],q['rf_quality'],q['power_db']),reverse=True)
         else:
             smin=float(self.cfg.get('site_min_snr_db',5)); bmin=float(self.cfg.get('site_burst_snr_db',8))
