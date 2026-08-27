@@ -72,7 +72,7 @@ EOF
 fi
 
 echo "[5/8] Installing appliance session..."
-mkdir -p "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi"
+mkdir -p "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi" "$TARGET_HOME/.config/systemd/user/default.target.wants"
 CONNECTED_OUTPUT=""
 for status in /sys/class/drm/card*-HDMI-A-*/status; do
   [[ -e "$status" ]] || continue
@@ -96,18 +96,36 @@ cat > "$TARGET_HOME/.config/labwc/autostart" <<EOF
 sleep 2
 pkill -x wf-panel-pi 2>/dev/null || true
 pkill -x squeekboard 2>/dev/null || true
-XDG_RUNTIME_DIR=/run/user/${TARGET_UID} \
-WAYLAND_DISPLAY=wayland-0 \
-SDL_VIDEODRIVER=wayland \
-${APP_ROOT}/start-rfeye.sh &
+# RF Eye itself is managed by rfeye-user.service. Do not launch a second copy here.
 EOF
+cat > "$TARGET_HOME/.config/systemd/user/rfeye-user.service" <<EOF
+[Unit]
+Description=RF Eye user display service
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=${APP_ROOT}/rfeye
+Environment=XDG_RUNTIME_DIR=/run/user/${TARGET_UID}
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=SDL_VIDEODRIVER=wayland
+Environment=PYGAME_HIDE_SUPPORT_PROMPT=1
+Environment=RFEYE_CONFIG=${TARGET_HOME}/.config/rfeye/config.json
+ExecStart=/bin/bash -lc 'while [ ! -S /run/user/${TARGET_UID}/wayland-0 ]; do sleep 2; done; exec ${APP_ROOT}/start-rfeye.sh'
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+ln -sfn ../rfeye-user.service "$TARGET_HOME/.config/systemd/user/default.target.wants/rfeye-user.service"
 cat > "$TARGET_HOME/.config/autostart/squeekboard.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=Squeekboard
 Hidden=true
 EOF
-chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi"
+chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi" "$TARGET_HOME/.config/systemd"
 
 echo "[6/8] Configuring permissions and autologin..."
 usermod -aG video,render,input,gpio,plugdev "$TARGET_USER" || true
@@ -115,6 +133,7 @@ if command -v raspi-config >/dev/null 2>&1; then
   raspi-config nonint do_boot_behaviour B4 || true
 fi
 systemctl disable --now rfeye.service 2>/dev/null || true
+loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 
 echo "[7/8] Configuring Wi-Fi updater..."
 MANIFEST_URL="https://raw.githubusercontent.com/${REPO_SLUG}/main/update/manifest.json"
