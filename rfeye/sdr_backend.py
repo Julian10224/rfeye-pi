@@ -24,6 +24,7 @@ class SDRBackend:
         self.mobile_hits = 0
         self.last_good_scan = 0.0
         self.scan_failures = 0
+        self.last_usb_reset = 0.0
         self.spectrum_freqs = np.array([], dtype=np.float32)
         self.spectrum_db = np.array([], dtype=np.float32)
         self.noise_floor_db = -100.0
@@ -91,6 +92,23 @@ class SDRBackend:
         if centers and centers[-1] + half < end_hz:
             centers.append(end_hz - half)
         return centers
+
+    def _recover_sdr_usb(self):
+        now = time.time()
+        if now - self.last_usb_reset < 5.0:
+            return False
+        self.last_usb_reset = now
+        exe = shutil.which("usbreset")
+        if not exe:
+            return False
+        try:
+            cp = subprocess.run([exe, "0bda:2838"], capture_output=True, text=True, timeout=6)
+            if cp.returncode == 0:
+                time.sleep(1.5)
+                return True
+        except Exception:
+            pass
+        return False
 
     def _capture(self, center, sr, fft_size, nblocks):
         exe = shutil.which("rtl_sdr")
@@ -199,6 +217,9 @@ class SDRBackend:
                 self.scan_failures = 0
             return True
         except Exception as e:
+            err = str(e)
+            if "timeout" in err.lower():
+                self._recover_sdr_usb()
             with self.lock:
                 self.scan_failures += 1
                 recently_good = self.last_good_scan and (time.time() - self.last_good_scan < 8.0)
@@ -212,7 +233,7 @@ class SDRBackend:
                     self.mobile_hits = 0
                     self.spectrum_freqs = np.array([], dtype=np.float32)
                     self.spectrum_db = np.array([], dtype=np.float32)
-                self.error = str(e)
+                self.error = err
                 self.demo_active = False
             return False
 
