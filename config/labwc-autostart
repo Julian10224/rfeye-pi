@@ -6,6 +6,7 @@ sleep 2
 
 # Kill anything left from a previous graphical session.
 pkill -x wf-panel-pi 2>/dev/null || true
+pkill -x lxpanel 2>/dev/null || true
 pkill -x squeekboard 2>/dev/null || true
 
 # RF Eye is managed by rfeye-user.service to prevent duplicate RTL-SDR access.

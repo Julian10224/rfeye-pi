@@ -73,6 +73,15 @@ fi
 
 echo "[5/8] Installing appliance session..."
 mkdir -p "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi" "$TARGET_HOME/.config/systemd/user/default.target.wants"
+
+# Raspberry Pi OS runs both the system and user Labwc autostarts. Remove the
+# desktop panel from the system autostart so it cannot cover the RF Eye kiosk.
+SYSTEM_LABWC_AUTOSTART=/etc/xdg/labwc/autostart
+if [[ -f "$SYSTEM_LABWC_AUTOSTART" ]]; then
+  cp -n "$SYSTEM_LABWC_AUTOSTART" "${SYSTEM_LABWC_AUTOSTART}.rfeye-backup" || true
+  sed -i -E '/(^|[[:space:]])(wf-panel-pi|lxpanel)([[:space:]]|$)/d' "$SYSTEM_LABWC_AUTOSTART"
+fi
+
 CONNECTED_OUTPUT=""
 for status in /sys/class/drm/card*-HDMI-A-*/status; do
   [[ -e "$status" ]] || continue
@@ -95,6 +104,7 @@ cat > "$TARGET_HOME/.config/labwc/autostart" <<EOF
 /usr/bin/kanshi &
 sleep 2
 pkill -x wf-panel-pi 2>/dev/null || true
+pkill -x lxpanel 2>/dev/null || true
 pkill -x squeekboard 2>/dev/null || true
 # RF Eye itself is managed by rfeye-user.service. Do not launch a second copy here.
 EOF

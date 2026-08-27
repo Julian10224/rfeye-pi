@@ -1,6 +1,38 @@
 from pathlib import Path
 import json
 import os
+import subprocess
+import threading
+import time
+
+def _kiosk_guard_worker():
+    """Keep Raspberry Pi desktop chrome out of the RF Eye appliance session."""
+    while True:
+        for process_name in ("wf-panel-pi", "lxpanel", "squeekboard"):
+            try:
+                subprocess.run(
+                    ["pkill", "-u", str(os.getuid()), "-x", process_name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=2,
+                )
+            except Exception:
+                pass
+        time.sleep(3.0)
+
+def _start_kiosk_guard():
+    # Only run in the graphical appliance session. This keeps imports in shell
+    # tools/install scripts side-effect free.
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        return
+    threading.Thread(
+        target=_kiosk_guard_worker,
+        name="rfeye-kiosk-guard",
+        daemon=True,
+    ).start()
+
+_start_kiosk_guard()
 
 DEFAULTS = {
     "ui_width": 480,
@@ -60,7 +92,7 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.8",
+    "app_version": "0.7.10",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
