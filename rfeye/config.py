@@ -37,6 +37,14 @@ def _start_kiosk_guard():
 
 _start_kiosk_guard()
 
+# Install RF Eye UI patches before app.py defines App.
+# The hook only touches the RF Eye App class and restores __build_class__ immediately.
+try:
+    from wifi_patch import install_app_patch
+    install_app_patch()
+except Exception:
+    pass
+
 DEFAULTS = {
     "ui_width": 480,
     "ui_height": 800,
@@ -106,7 +114,7 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.11",
+    "app_version": "0.7.12",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
