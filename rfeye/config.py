@@ -16,6 +16,18 @@ DEFAULTS = {
     "sample_rate": 2_048_000,
     "fft_size": 1024,
     "fft_blocks": 8,
+    "mobile_capture_ms": 72.0,
+    "site_capture_ms": 72.0,
+    "mobile_percentile": 95.0,
+    "tetra_channel_half_width_hz": 9000.0,
+    "burst_gate_db": 6.0,
+    "min_burst_span_db": 9.0,
+    "min_burst_duty": 0.035,
+    "max_burst_duty": 0.65,
+    "site_min_snr_db": 5.0,
+    "site_burst_snr_db": 8.0,
+    "site_pair_memory_s": 4.0,
+    "require_duplex_pair": True,
     "ui_fps": 20,
 
     "gain": "auto",
@@ -34,6 +46,7 @@ DEFAULTS = {
     "auto_demo_if_no_sdr": False,
     "audio_mode": "adaptive",
 
+    # GPIO buzzer
     "buzzer_gpio": 18,
     "buzzer_passive": True,
     "buzzer_active_high": True,
@@ -47,7 +60,7 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.6",
+    "app_version": "0.7.7",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -68,6 +81,7 @@ def load_config():
             cfg.update(json.loads(p.read_text()))
     except Exception:
         pass
+    # Release metadata belongs to the installed code, never to stale user settings.
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
     return cfg

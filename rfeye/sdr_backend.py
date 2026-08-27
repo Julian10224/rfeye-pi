@@ -8,7 +8,12 @@ import time
 import numpy as np
 
 class SDRBackend:
-    """Passive C2000/TETRA RF activity monitor."""
+    """Passive C2000/TETRA RF activity monitor.
+
+    The mobile/uplink band is treated as burst activity. The site/downlink
+    band is measured separately so continuous infrastructure carriers do not
+    appear as mobile RF activity.
+    """
     def __init__(self, cfg):
         self.cfg = cfg
         self.lock = threading.Lock()
@@ -22,6 +27,7 @@ class SDRBackend:
         self.mobile_level = 0.0
         self.site_level = 0.0
         self.mobile_hits = 0
+        self.site_recent = {}
         self.last_good_scan = 0.0
         self.scan_failures = 0
         self.last_usb_reset = 0.0
@@ -80,17 +86,21 @@ class SDRBackend:
                         time.sleep(0.5)
 
     def _centers_for(self, start_hz, end_hz, sr):
-        usable = sr * 0.72
+        # Use only the flatter middle of the RTL-SDR passband and overlap sweeps.
+        # Tune on 25 kHz channel *boundaries* so tuner DC lands between TETRA carriers.
+        usable = sr * 0.68
         half = usable / 2.0
-        if end_hz - start_hz <= usable:
-            return [(start_hz + end_hz) / 2.0]
+        step = usable * 0.90
         centers = []
         c = start_hz + half
-        while c < end_hz:
-            centers.append(c)
-            c += usable
-        if centers and centers[-1] + half < end_hz:
-            centers.append(end_hz - half)
+        while True:
+            snapped = start_hz + round((c - start_hz) / 25_000.0) * 25_000.0
+            if centers and snapped <= centers[-1]:
+                snapped = centers[-1] + 25_000.0
+            centers.append(snapped)
+            if snapped + half >= end_hz:
+                break
+            c = snapped + step
         return centers
 
     def _recover_sdr_usb(self):
@@ -110,16 +120,20 @@ class SDRBackend:
             pass
         return False
 
-    def _capture(self, center, sr, fft_size, nblocks):
+    def _capture(self, center, sr, fft_size, nblocks, transient=False):
         exe = shutil.which("rtl_sdr")
         if not exe:
             raise RuntimeError("rtl_sdr command not found")
         nsamp = fft_size * nblocks
         cmd = [exe, "-f", str(int(center)), "-s", str(int(sr)),
-               "-p", str(int(self.cfg.get("ppm", 0))),
-               "-n", str(int(nsamp)), "-"]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                start_new_session=True)
+               "-p", str(int(self.cfg.get("ppm", 0)))]
+        gain = self.cfg.get("gain", "auto")
+        if gain != "auto":
+            cmd += ["-g", str(float(gain))]
+        cmd += ["-n", str(int(nsamp)), "-"]
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
+        )
         try:
             out, err = proc.communicate(timeout=3.0)
         except subprocess.TimeoutExpired:
@@ -136,47 +150,118 @@ class SDRBackend:
         iq = (raw[0::2] - 127.5) + 1j * (raw[1::2] - 127.5)
         window = np.hanning(fft_size).astype(np.float32)
         actual = min(nblocks, len(iq) // fft_size)
-        acc = None
+        blocks = []
         for i in range(actual):
             blk = iq[i*fft_size:(i+1)*fft_size]
+            blk = blk - np.mean(blk)
             spec = np.fft.fftshift(np.fft.fft(blk * window))
-            power = 20.0 * np.log10(np.abs(spec) + 1e-12)
-            acc = power if acc is None else acc + power
-        psd = acc / max(1, actual)
+            blocks.append(20.0 * np.log10(np.abs(spec) + 1e-12))
+        if not blocks:
+            raise RuntimeError("no complete FFT blocks")
+        stack = np.vstack(blocks)
+        percentile = float(self.cfg.get("mobile_percentile", 95.0))
+        psd = np.percentile(stack, percentile, axis=0) if transient else np.mean(stack, axis=0)
+        mid = len(psd) // 2
+        lo, hi = max(0, mid-2), min(len(psd), mid+3)
+        if lo > 0 and hi < len(psd):
+            fill = np.median(np.concatenate((psd[max(0,lo-8):lo], psd[hi:min(len(psd),hi+8)])))
+            psd[lo:hi] = fill
+            stack[:, lo:hi] = fill
         freqs = np.fft.fftshift(np.fft.fftfreq(fft_size, 1.0/sr)) + center
-        return freqs, psd
+        return freqs, psd, stack
 
     def _scan_band(self, start_hz, end_hz, label):
         sr = int(self.cfg.get("sample_rate", 2048000))
         fft_size = int(self.cfg.get("fft_size", 1024))
-        nblocks = int(self.cfg.get("fft_blocks", 8))
+        base_blocks = int(self.cfg.get("fft_blocks", 8))
+        capture_ms = float(self.cfg.get(
+            "mobile_capture_ms" if label == "MOBILE" else "site_capture_ms", 72.0
+        ))
+        nblocks = max(base_blocks, int(math.ceil((sr * capture_ms / 1000.0) / fft_size)))
+        usable_half = sr * 0.68 / 2.0
+        chan_half = float(self.cfg.get("tetra_channel_half_width_hz", 9000.0))
+        gate_db = float(self.cfg.get("burst_gate_db", 6.0))
         all_f, all_p = [], []
+        observations = {}
+
+        channels = np.arange(start_hz + 12_500.0, end_hz, 25_000.0)
         for center in self._centers_for(start_hz, end_hz, sr):
-            f, p = self._capture(center, sr, fft_size, nblocks)
-            mask = (f >= start_hz) & (f <= end_hz)
-            if np.any(mask):
-                all_f.append(f[mask]); all_p.append(p[mask])
+            f, p, stack = self._capture(center, sr, fft_size, nblocks, transient=(label == "MOBILE"))
+            usable_mask = ((f >= start_hz) & (f <= end_hz) &
+                           (np.abs(f - center) <= usable_half))
+            if np.any(usable_mask):
+                all_f.append(f[usable_mask]); all_p.append(p[usable_mask])
+
+            for ch in channels:
+                edge_margin = usable_half - abs(ch - center)
+                if edge_margin < 15_000.0:
+                    continue
+                bins = np.where(np.abs(f - ch) <= chan_half)[0]
+                if len(bins) < 2:
+                    continue
+                # Integrate power across the occupied part of one 25 kHz TETRA channel.
+                series = 10.0 * np.log10(
+                    np.sum(np.power(10.0, stack[:, bins] / 10.0), axis=1) + 1e-20
+                )
+                low = float(np.percentile(series, 20))
+                median = float(np.percentile(series, 50))
+                high = float(np.percentile(series, 95))
+                span = high - low
+                duty = float(np.mean(series > (low + gate_db)))
+                obs = {
+                    "freq_hz": float(ch), "low_db": low, "median_db": median,
+                    "power_db": high, "snr_db": span, "burst_span_db": span,
+                    "duty": duty, "band": label, "last_seen": time.time(),
+                    "edge_margin": float(edge_margin),
+                }
+                old = observations.get(float(ch))
+                if old is None or obs["edge_margin"] > old["edge_margin"]:
+                    observations[float(ch)] = obs
+
         if not all_p:
             return [], np.array([]), np.array([]), -120.0
         f = np.concatenate(all_f); p = np.concatenate(all_p)
         order = np.argsort(f); f, p = f[order], p[order]
         floor = float(np.percentile(p, 40))
-        threshold = floor + float(self.cfg.get("threshold_db", 10.0))
-        loc = np.where((p[1:-1] > p[:-2]) & (p[1:-1] >= p[2:]) &
-                       (p[1:-1] > threshold))[0] + 1
-        cand = sorted([(float(p[i]), float(f[i])) for i in loc], reverse=True)
+        obs = list(observations.values())
         peaks = []
-        for power, freq in cand:
-            if any(abs(freq-q["freq_hz"]) < 18000 for q in peaks):
-                continue
-            snr = power - floor
-            level = max(0.0, min(1.0, (snr - threshold + floor) / 24.0))
-            peaks.append({"freq_hz": freq, "power_db": power,
-                          "snr_db": snr, "level": level,
-                          "band": label, "last_seen": time.time()})
-            if len(peaks) >= 3:
-                break
-        return peaks, f, p, floor
+
+        if label == "MOBILE":
+            threshold = float(self.cfg.get("threshold_db", 12.0))
+            required_span = max(float(self.cfg.get("min_burst_span_db", 9.0)), threshold)
+            duty_min = float(self.cfg.get("min_burst_duty", 0.035))
+            duty_max = float(self.cfg.get("max_burst_duty", 0.65))
+            for q in obs:
+                if q["burst_span_db"] < required_span:
+                    continue
+                if not (duty_min <= q["duty"] <= duty_max):
+                    continue
+                q = dict(q)
+                q["level"] = max(0.0, min(1.0,
+                    0.25 + (q["burst_span_db"] - required_span) / 20.0))
+                q["raster_ok"] = True
+                peaks.append(q)
+            peaks.sort(key=lambda q: (q["burst_span_db"], q["power_db"]), reverse=True)
+        else:
+            # Base stations may be continuous. Compare exact 25 kHz channel power
+            # against the population of channels instead of applying burst criteria.
+            if obs:
+                channel_floor = float(np.percentile([q["low_db"] for q in obs], 40))
+                site_min = float(self.cfg.get("site_min_snr_db", 5.0))
+                burst_min = float(self.cfg.get("site_burst_snr_db", 8.0))
+                for q in obs:
+                    steady_snr = q["low_db"] - channel_floor
+                    burst_snr = q["power_db"] - channel_floor
+                    if steady_snr < site_min and burst_snr < burst_min:
+                        continue
+                    q = dict(q)
+                    q["snr_db"] = max(steady_snr, burst_snr - 2.0)
+                    q["level"] = max(0.0, min(1.0, 0.2 + (q["snr_db"] - site_min) / 18.0))
+                    peaks.append(q)
+                peaks.sort(key=lambda q: q["snr_db"], reverse=True)
+
+        candidate_limit = max(32, int(self.cfg.get("max_signals", 3)) * 10)
+        return peaks[:candidate_limit], f, p, floor
 
     def _scan_cycle(self):
         try:
@@ -186,12 +271,32 @@ class SDRBackend:
             s1 = float(self.cfg.get("site_band_end_hz", 395e6))
             mobile, mf, mp, mfloor = self._scan_band(m0, m1, "MOBILE")
             site, sf, sp, sfloor = self._scan_band(s0, s1, "SITE")
-            paired_mobile = []
+
+            now = time.time()
+            for q in site:
+                self.site_recent[round(q["freq_hz"])] = now
+            max_age = float(self.cfg.get("site_pair_memory_s", 4.0))
+            self.site_recent = {f:t for f,t in self.site_recent.items() if now - t <= max_age}
+
+            # Network-mode TETRA uses paired 25 kHz channels 10 MHz apart.
+            # Requiring recent downlink evidence prevents unrelated 380-385 MHz
+            # interference from being presented as network mobile activity.
+            require_pair = bool(self.cfg.get("require_duplex_pair", True))
+            accepted_mobile = []
             for m in mobile:
-                target = m["freq_hz"] + 10_000_000.0
-                if any(abs(s["freq_hz"] - target) <= 20_000.0 for s in site):
-                    paired_mobile.append(m)
-            ml = max([p["level"] for p in paired_mobile], default=0.0)
+                target = round(m["freq_hz"] + 10_000_000.0)
+                paired_now = any(abs(s["freq_hz"] - target) <= 1_500.0 for s in site)
+                paired_recent = any(abs(f - target) <= 1_500 for f in self.site_recent)
+                paired = paired_now or paired_recent
+                if require_pair and not paired:
+                    continue
+                q = dict(m)
+                q["paired"] = paired
+                accepted_mobile.append(q)
+            accepted_mobile.sort(key=lambda q: (q.get("burst_span_db", 0.0), q["power_db"]), reverse=True)
+            shown_mobile = accepted_mobile[:int(self.cfg.get("max_signals", 3))]
+
+            ml = max([p["level"] for p in shown_mobile], default=0.0)
             sl = max([p["level"] for p in site], default=0.0)
             if ml >= 0.22:
                 self.mobile_hits = min(6, self.mobile_hits + 1)
@@ -199,11 +304,12 @@ class SDRBackend:
                 self.mobile_hits = max(0, self.mobile_hits - int(self.cfg.get("clear_hits", 2)))
             confirmed = self.mobile_hits >= int(self.cfg.get("confirm_hits", 2))
             shown = ml if confirmed else 0.0
+
             idx = np.linspace(0, len(mp)-1, min(240, len(mp))).astype(int) if len(mp) else np.array([], dtype=int)
             with self.lock:
-                self.mobile_peaks = paired_mobile
+                self.mobile_peaks = accepted_mobile
                 self.site_peaks = site
-                self.peaks = paired_mobile[:3] if confirmed else []
+                self.peaks = shown_mobile if confirmed else []
                 self.mobile_level = shown
                 self.site_level = sl
                 self.spectrum_freqs = mf[idx].astype(np.float64) if len(idx) else np.array([])

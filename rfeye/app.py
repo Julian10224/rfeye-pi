@@ -309,23 +309,38 @@ class App:
 
     def _wifi_scan_worker(self):
         try:
-            subprocess.run(["nmcli","dev","wifi","rescan","ifname","wlan0"], capture_output=True, text=True, timeout=12)
-            time.sleep(2.0)
-            cp = subprocess.run([
-                "nmcli","-t","--escape","no","-f","IN-USE,SSID,SIGNAL,SECURITY",
-                "dev","wifi","list","ifname","wlan0"
-            ], capture_output=True, text=True, timeout=12)
-            seen=set(); nets=[]
-            for line in cp.stdout.splitlines():
-                parts=line.split(":",3)
-                if len(parts) < 4: continue
-                active,ssid,signal,sec=parts
-                ssid=ssid.strip()
-                if not ssid or ssid in seen: continue
-                seen.add(ssid)
-                try: sig=int(signal)
-                except: sig=0
-                nets.append((ssid,sig,sec.strip(),active.strip()=="*"))
+            scan = subprocess.run(["nmcli","dev","wifi","rescan","ifname","wlan0"], capture_output=True, text=True, timeout=12)
+            if scan.returncode != 0:
+                msg = (scan.stderr or scan.stdout).strip()
+                if "not authorized" in msg.lower():
+                    self.wifi_message = "SCAN NOT AUTHORIZED"
+                    return
+                raise RuntimeError(msg or "Wi-Fi rescan failed")
+
+            # NetworkManager completes scans asynchronously. Merge several cache reads
+            # instead of assuming the result is complete after a fixed two-second delay.
+            by_ssid = {}
+            for _ in range(5):
+                time.sleep(1.5)
+                cp = subprocess.run([
+                    "nmcli","-t","--escape","no","-f","IN-USE,SSID,SIGNAL,SECURITY",
+                    "dev","wifi","list","--rescan","no","ifname","wlan0"
+                ], capture_output=True, text=True, timeout=12)
+                if cp.returncode != 0:
+                    continue
+                for line in cp.stdout.splitlines():
+                    parts=line.split(":",3)
+                    if len(parts) < 4: continue
+                    active,ssid,signal,sec=parts
+                    ssid=ssid.strip()
+                    if not ssid: continue
+                    try: sig=int(signal)
+                    except: sig=0
+                    item=(ssid,sig,sec.strip(),active.strip()=="*")
+                    old=by_ssid.get(ssid)
+                    if old is None or item[3] or sig > old[1]:
+                        by_ssid[ssid]=item
+            nets=list(by_ssid.values())
             nets.sort(key=lambda x:(not x[3],-x[1]))
             self.wifi_networks=nets[:12]
             self.wifi_last_scan=time.time()
@@ -557,6 +572,7 @@ class App:
 
     def _gear(self, cx, cy, size=42):
         import math
+        # Blue gear only, transparent background.
         teeth = 8
         outer = size * 0.46
         inner = size * 0.34
@@ -600,6 +616,7 @@ class App:
         status_col = GREEN if status == "LIVE" else BLUE if status == "DEMO" else RED
         pygame.draw.circle(self.ui, status_col, (432, 44), 7)
 
+        # Clear RTL-SDR hardware/status indication on the main screen.
         if status == "LIVE":
             sdr_text = "SDR: CONNECTED"
             sdr_col = GREEN
@@ -611,6 +628,7 @@ class App:
             sdr_col = RED
         self._text(sdr_text, 240, 88, self.font_s, sdr_col, center=True)
 
+        # Settings button in the physical top-right corner after rotation.
         self._draw_settings_icon(38, 38)
 
         peaks = snap["peaks"][:3]
@@ -646,11 +664,11 @@ class App:
         if status not in ("LIVE", "DEMO"):
             state, col = "NOT CONNECTED", RED
         elif max_lv > 0.72:
-            state, col = "NEAR", RED
+            state, col = "HIGH", RED
         elif max_lv > 0.43:
-            state, col = "MID", YELLOW
+            state, col = "MEDIUM", YELLOW
         elif max_lv > 0.15:
-            state, col = "FAR", GREEN
+            state, col = "LOW", GREEN
         else:
             state, col = "CLEAR", DIM
 
@@ -666,9 +684,11 @@ class App:
         self._text(state, 398, 708, state_font, col, center=True)
         self._text("STATUS", 398, 762, self.font_s, DIM, center=True)
 
+
     def _draw_settings(self):
         self.ui.fill(BG)
 
+        # Header
         pygame.draw.rect(self.ui, (7, 11, 16), (0, 0, 480, 92))
         pygame.draw.circle(self.ui, (18, 31, 41), (38, 45), 24)
         self._text("‹", 38, 43, self.font_xl, BLUE_BRIGHT, center=True)
@@ -739,8 +759,8 @@ class App:
             pygame.draw.line(self.ui, YELLOW, (plot.left,ty), (plot.right,ty), 2)
             self._text(f'THRESH {self.cfg.get("threshold_db",10):.0f} dB', plot.left+8, ty-24, self.font_s, YELLOW)
 
-        self._text(f'{self.cfg["scan_start_hz"] / 1e6:.3f} MHz', 30, 446, self.font_s, DIM)
-        self._text(f'{self.cfg["scan_end_hz"] / 1e6:.3f} MHz', 304, 446, self.font_s, DIM)
+        self._text(f'{self.cfg.get("mobile_band_start_hz", self.cfg["scan_start_hz"]) / 1e6:.3f} MHz', 30, 446, self.font_s, DIM)
+        self._text(f'{self.cfg.get("mobile_band_end_hz", self.cfg["scan_end_hz"]) / 1e6:.3f} MHz', 304, 446, self.font_s, DIM)
         self._text(f'Noise floor {snap["noise"]:.1f} dB', 240, 495, self.font_m, WHITE, center=True)
 
         if snap["peaks"]:
