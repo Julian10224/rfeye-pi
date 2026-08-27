@@ -1,16 +1,14 @@
 """RF Eye Wi-Fi UI/connection patch.
 
-Installed from config.py before app.py defines App. It adds a case-toggle key to
-RF Eye's own on-screen keyboard and creates a complete user-owned
-NetworkManager profile so no external GUI secret-agent password dialog is
-needed for normal WPA/WPA2/WPA3-Personal networks.
+Adds a lowercase-first touch keyboard with an explicit SHIFT toggle, a password
+visibility eye, and a GUI-equivalent NetworkManager connection path.  The patch
+is installed from config.py before app.py defines App, so existing appliance UI
+code can be upgraded without replacing the whole app.py file.
 """
 from __future__ import annotations
 
 import builtins
 import hashlib
-import os
-import pwd
 import subprocess
 import threading
 
@@ -37,71 +35,61 @@ def _profile_name(ssid):
     return f"RF Eye WiFi {digest}"
 
 
-def _connect_worker(app, ssid, password, security):
-    profile = _profile_name(ssid)
-    try:
-        # Remove only our own stale profile. Never touch a user's unrelated profile.
-        _run(["nmcli", "connection", "delete", "id", profile], timeout=8)
+def _error_text(cp, fallback="connect failed"):
+    return (getattr(cp, "stderr", "") or getattr(cp, "stdout", "") or fallback).strip()
 
-        user = pwd.getpwuid(os.getuid()).pw_name
+
+def _connect_worker(app, ssid, password, security):
+    try:
         sec = security.upper()
         if "802.1X" in sec or "EAP" in sec or "ENTERPRISE" in sec:
             raise RuntimeError("enterprise Wi-Fi is not supported by the PSK keyboard")
-        secured = bool(sec and sec not in {"--", "OPEN", "NONE"})
+        if "WEP" in sec:
+            raise RuntimeError("WEP is not supported by the RF Eye keyboard")
 
-        add_cmd = [
-            "nmcli", "connection", "add",
-            "type", "wifi",
+        secured = bool(sec and sec not in {"--", "OPEN", "NONE"})
+        if secured and not password:
+            raise RuntimeError("password required")
+
+        # Use NetworkManager's GUI-equivalent Wi-Fi connect command.  The older
+        # RF Eye code explicitly created a connection profile first; on systems
+        # where settings.modify.own requires Polkit authorization that can fail
+        # with "not authorized" before a connection is even attempted.
+        cmd = [
+            "nmcli", "--wait", "25",
+            "device", "wifi", "connect", ssid,
             "ifname", "wlan0",
-            "con-name", profile,
-            "ssid", ssid,
-            "connection.permissions", f"user:{user}:",
-            "connection.autoconnect", "yes",
+            "name", _profile_name(ssid),
+            "private", "yes",
         ]
         if secured:
-            if not password:
-                raise RuntimeError("password required")
-            if "WEP" in sec:
-                raise RuntimeError("WEP is not supported by the RF Eye keyboard")
-            # WPA-PSK is the compatibility choice for WPA/WPA2 and WPA3 transition
-            # networks. SAE is used only when the scan advertises WPA3/SAE without
-            # WPA2/WPA1 compatibility. The PSK is saved in this user-owned profile,
-            # so activation has no reason to invoke a desktop secret agent.
-            wpa3_only = ("WPA3" in sec or "SAE" in sec) and "WPA2" not in sec and "WPA1" not in sec and "WPA " not in sec
-            key_mgmt = "sae" if wpa3_only else "wpa-psk"
-            add_cmd += [
-                "802-11-wireless-security.key-mgmt", key_mgmt,
-                "802-11-wireless-security.psk", password,
-                "802-11-wireless-security.psk-flags", "0",
-            ]
+            cmd += ["password", password]
 
-        cp = _run(add_cmd, timeout=15)
+        cp = _run(cmd, timeout=30)
         if cp.returncode != 0:
-            raise RuntimeError(cp.stderr.strip() or cp.stdout.strip() or "profile create failed")
-
-        cp = _run([
-            "nmcli", "--wait", "25",
-            "connection", "up", "id", profile,
-            "ifname", "wlan0",
-        ], timeout=30)
-        if cp.returncode != 0:
-            msg = (cp.stderr or cp.stdout or "connect failed").strip()
-            raise RuntimeError(msg)
+            raise RuntimeError(_error_text(cp))
 
         app.wifi_message = "CONNECTED"
         app.wifi_selected = None
         app.wifi_password = ""
         app.wifi_shift = False
+        app.wifi_show_password = False
         try:
             app._wifi_scan()
         except Exception:
             pass
     except Exception as exc:
         text = str(exc).lower()
-        if "secret" in text or "password" in text or "key" in text:
-            app.wifi_message = "PASSWORD FAILED"
-        elif "not authorized" in text or "permission" in text:
+        if "not authorized" in text or "not authorised" in text or "permission" in text:
             app.wifi_message = "CONNECT NOT AUTHORIZED"
+        elif (
+            "secret" in text
+            or "password" in text
+            or "psk" in text
+            or "authentication" in text
+            or "wrong key" in text
+        ):
+            app.wifi_message = "PASSWORD FAILED"
         else:
             app.wifi_message = "CONNECT FAILED"
     finally:
@@ -127,6 +115,7 @@ def _wifi_connect(app):
 
 
 def _rows(app):
+    # Lowercase is always the default. SHIFT is an explicit opt-in toggle.
     upper = bool(getattr(app, "wifi_shift", False))
     letters = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
     if upper:
@@ -135,6 +124,11 @@ def _rows(app):
 
 
 def _wifi_key_at(app, x, y):
+    # Password visibility eye inside the password field.
+    if getattr(app, "wifi_selected", None) and 394 <= x <= 452 and 258 <= y <= 304:
+        app.wifi_show_password = not bool(getattr(app, "wifi_show_password", False))
+        return None
+
     rows = _rows(app)
     top = 468
     row_h = 48
@@ -148,6 +142,7 @@ def _wifi_key_at(app, x, y):
                 idx = int((x - start) // kw)
                 if 0 <= idx < len(row):
                     return row[idx]
+
     if 660 <= y <= 704:
         if 30 <= x <= 116:
             return "BACK"
@@ -180,7 +175,12 @@ def _draw_wifi_keyboard(app):
 
     active = bool(getattr(app, "wifi_shift", False))
     pygame.draw.rect(app.ui, (30, 36, 44), (30, 660, 86, 44), border_radius=8)
-    pygame.draw.rect(app.ui, (17, 132, 212) if active else (30, 36, 44), (124, 660, 90, 44), border_radius=8)
+    pygame.draw.rect(
+        app.ui,
+        (17, 132, 212) if active else (30, 36, 44),
+        (124, 660, 90, 44),
+        border_radius=8,
+    )
     pygame.draw.rect(app.ui, (30, 36, 44), (222, 660, 120, 44), border_radius=8)
     pygame.draw.rect(app.ui, (17, 132, 212), (350, 660, 100, 44), border_radius=8)
     app._text("BACK", 73, 682, app.font_s, (224, 229, 236), center=True)
@@ -189,15 +189,71 @@ def _draw_wifi_keyboard(app):
     app._text("ENTER", 400, 682, app.font_s, (224, 229, 236), center=True)
 
 
+def _fit_password_text(app, text, max_width):
+    if not text:
+        return text
+    if app.font_s.size(text)[0] <= max_width:
+        return text
+    suffix = text
+    while suffix and app.font_s.size("…" + suffix)[0] > max_width:
+        suffix = suffix[1:]
+    return "…" + suffix
+
+
+def _draw_password_overlay(app):
+    if not getattr(app, "wifi_selected", None) or getattr(app, "wifi_details", None):
+        return
+
+    import pygame
+
+    field = pygame.Rect(24, 254, 432, 54)
+    pygame.draw.rect(app.ui, (10, 15, 20), field, border_radius=12)
+
+    show = bool(getattr(app, "wifi_show_password", False))
+    password = str(getattr(app, "wifi_password", ""))
+    if password:
+        shown = password if show else ("•" * len(password))
+        shown = _fit_password_text(app, shown, 335)
+        app._text(shown, 42, 271, app.font_s, (224, 229, 236))
+    else:
+        app._text("type with keyboard...", 42, 270, app.font_s, (82, 90, 100))
+
+    # Eye button. Blue means the password is currently visible.
+    eye_col = (28, 190, 255) if show else (132, 184, 210)
+    pygame.draw.rect(app.ui, (18, 24, 30), (394, 259, 54, 44), border_radius=9)
+    pygame.draw.ellipse(app.ui, eye_col, (403, 270, 36, 21), 2)
+    pygame.draw.circle(app.ui, eye_col, (421, 280), 5, 2)
+    if not show:
+        pygame.draw.line(app.ui, eye_col, (402, 294), (440, 266), 2)
+
+
 def _patch_app_class(cls):
     old_init = cls.__init__
+    old_tap = cls._tap
+    old_draw_wifi = cls._draw_wifi
 
     def patched_init(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
         self.wifi_shift = False
+        self.wifi_show_password = False
         self.wifi_connect_busy = False
 
+    def patched_tap(self, x, y):
+        before = getattr(self, "wifi_selected", None)
+        old_tap(self, x, y)
+        after = getattr(self, "wifi_selected", None)
+        # A new password entry session always starts lowercase and hidden.
+        if before != after:
+            self.wifi_shift = False
+            self.wifi_show_password = False
+
+    def patched_draw_wifi(self):
+        old_draw_wifi(self)
+        _draw_password_overlay(self)
+
     cls.__init__ = patched_init
+    cls._tap = patched_tap
+    cls._draw_wifi = patched_draw_wifi
     cls._wifi_connect = _wifi_connect
     cls._wifi_connect_worker = _connect_worker
     cls._wifi_key_at = _wifi_key_at
