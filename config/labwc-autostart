@@ -8,7 +8,4 @@ sleep 2
 pkill -x wf-panel-pi 2>/dev/null || true
 pkill -x squeekboard 2>/dev/null || true
 
-XDG_RUNTIME_DIR=/run/user/1000 \
-WAYLAND_DISPLAY=wayland-0 \
-SDL_VIDEODRIVER=wayland \
-/opt/rfeye/.venv/bin/python /opt/rfeye/rfeye/app.py &
+# RF Eye is managed by rfeye-user.service to prevent duplicate RTL-SDR access.
