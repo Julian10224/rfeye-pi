@@ -153,7 +153,7 @@ class SDRBackend:
             for x in m:
                 pq,pnow=self._pair_q(round(x['freq_hz']+10000000),site,now)
                 if require and pq<minpair:continue
-                q=dict(x);q.update(paired=pq>=minpair,paired_now=pnow,pair_quality=pq,confidence=self._confidence(q if False else x,pq))
+                q=dict(x);q.update(paired=pq>=minpair,paired_now=pnow,pair_quality=pq,confidence=self._confidence(x,pq))
                 if q['confidence']>=minconf:accepted.append(q)
             accepted.sort(key=lambda q:(q['confidence'],q.get('burst_quality',0),q.get('rf_snr_db',0)),reverse=True); shown=accepted[:int(self.cfg.get('max_signals',3))]
             _,confirmed=self._hysteresis(max([p['confidence'] for p in shown],default=0)); rf=max([p.get('signal_strength',0) for p in shown],default=0); sl=max([p.get('signal_strength',0) for p in site],default=0)
