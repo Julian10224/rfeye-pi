@@ -8,11 +8,28 @@ import time
 
 def _kiosk_guard_worker():
     """Keep Raspberry Pi desktop chrome out of the RF Eye appliance session."""
+    uid = str(os.getuid())
     while True:
+        # Raspberry Pi OS launches the panel through lwrespawn. Killing only
+        # wf-panel-pi makes lwrespawn immediately bring it back, so stop the
+        # panel-specific respawn wrapper first. Do not touch other lwrespawn jobs.
+        try:
+            own_uid = os.getuid()
+            for proc_dir in Path("/proc").glob("[0-9]*"):
+                try:
+                    if proc_dir.stat().st_uid != own_uid:
+                        continue
+                    argv = [x for x in (proc_dir / "cmdline").read_bytes().split(b"\0") if x]
+                    if argv[-2:] == [b"/usr/bin/lwrespawn", b"/usr/bin/wf-panel-pi"]:
+                        os.kill(int(proc_dir.name), 15)
+                except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+                    pass
+        except Exception:
+            pass
         for process_name in ("wf-panel-pi", "lxpanel", "squeekboard"):
             try:
                 subprocess.run(
-                    ["pkill", "-u", str(os.getuid()), "-x", process_name],
+                    ["pkill", "-u", uid, "-x", process_name],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
@@ -114,7 +131,7 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.12",
+    "app_version": "0.7.13",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
