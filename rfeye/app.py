@@ -309,37 +309,67 @@ class App:
 
     def _wifi_scan_worker(self):
         try:
-            scan = subprocess.run(["nmcli","dev","wifi","rescan","ifname","wlan0"], capture_output=True, text=True, timeout=12)
-            if scan.returncode != 0:
-                msg = (scan.stderr or scan.stdout).strip()
-                if "not authorized" in msg.lower():
-                    self.wifi_message = "SCAN NOT AUTHORIZED"
-                    return
-                raise RuntimeError(msg or "Wi-Fi rescan failed")
-
-            # NetworkManager completes scans asynchronously. Merge several cache reads
-            # instead of assuming the result is complete after a fixed two-second delay.
             by_ssid = {}
-            for _ in range(5):
-                time.sleep(1.5)
-                cp = subprocess.run([
-                    "nmcli","-t","--escape","no","-f","IN-USE,SSID,SIGNAL,SECURITY",
-                    "dev","wifi","list","--rescan","no","ifname","wlan0"
-                ], capture_output=True, text=True, timeout=12)
+            scan = subprocess.run(["nmcli","dev","wifi","rescan","ifname","wlan0"], capture_output=True, text=True, timeout=12)
+            if scan.returncode == 0:
+                # NetworkManager completes scans asynchronously. Merge several cache reads.
+                for _ in range(5):
+                    time.sleep(1.5)
+                    cp = subprocess.run([
+                        "nmcli","-t","--escape","no","-f","IN-USE,SSID,SIGNAL,SECURITY",
+                        "dev","wifi","list","--rescan","no","ifname","wlan0"
+                    ], capture_output=True, text=True, timeout=12)
+                    if cp.returncode != 0:
+                        continue
+                    for line in cp.stdout.splitlines():
+                        parts=line.split(":",3)
+                        if len(parts) < 4: continue
+                        active,ssid,signal,sec=parts
+                        ssid=ssid.strip()
+                        if not ssid: continue
+                        try: sig=int(signal)
+                        except: sig=0
+                        item=(ssid,sig,sec.strip(),active.strip()=="*")
+                        old=by_ssid.get(ssid)
+                        if old is None or item[3] or sig > old[1]:
+                            by_ssid[ssid]=item
+            else:
+                # A process started outside the active desktop seat can be denied by
+                # NetworkManager/polkit. wpa_supplicant exposes its control socket to
+                # the netdev group, so use that as a non-privileged scan fallback.
+                wp = subprocess.run(["wpa_cli","-i","wlan0","scan"], capture_output=True, text=True, timeout=8)
+                if wp.returncode != 0 or "OK" not in wp.stdout:
+                    msg=(scan.stderr or scan.stdout or wp.stderr or wp.stdout).strip()
+                    raise RuntimeError(msg or "Wi-Fi rescan failed")
+                time.sleep(3.0)
+                current=""
+                st=subprocess.run(["wpa_cli","-i","wlan0","status"], capture_output=True, text=True, timeout=8)
+                for line in st.stdout.splitlines():
+                    if line.startswith("ssid="):
+                        current=line[5:].strip(); break
+                cp=subprocess.run(["wpa_cli","-i","wlan0","scan_results"], capture_output=True, text=True, timeout=8)
                 if cp.returncode != 0:
-                    continue
-                for line in cp.stdout.splitlines():
-                    parts=line.split(":",3)
-                    if len(parts) < 4: continue
-                    active,ssid,signal,sec=parts
+                    raise RuntimeError(cp.stderr.strip() or "wpa_cli scan_results failed")
+                for line in cp.stdout.splitlines()[1:]:
+                    parts=line.split("\t",4)
+                    if len(parts) < 5: continue
+                    _bssid,_freq,dbm,flags,ssid=parts
                     ssid=ssid.strip()
                     if not ssid: continue
-                    try: sig=int(signal)
-                    except: sig=0
-                    item=(ssid,sig,sec.strip(),active.strip()=="*")
+                    try: dbm_i=int(dbm)
+                    except: dbm_i=-100
+                    sig=max(0,min(100,2*(dbm_i+100)))
+                    fu=flags.upper()
+                    if "SAE" in fu: sec="WPA3"
+                    elif "WPA2" in fu: sec="WPA2"
+                    elif "WPA" in fu: sec="WPA"
+                    elif "WEP" in fu: sec="WEP"
+                    else: sec=""
+                    item=(ssid,sig,sec,ssid==current)
                     old=by_ssid.get(ssid)
                     if old is None or item[3] or sig > old[1]:
                         by_ssid[ssid]=item
+
             nets=list(by_ssid.values())
             nets.sort(key=lambda x:(not x[3],-x[1]))
             self.wifi_networks=nets[:12]
