@@ -45,6 +45,7 @@ python3 -m venv --system-site-packages "$APP_ROOT/.venv"
 "$APP_ROOT/.venv/bin/pip" install -r "$SRC_ROOT/requirements.txt"
 python3 "$SRC_ROOT/scripts/patch-startup-splash.py" "$APP_ROOT/rfeye/app.py"
 python3 "$SRC_ROOT/scripts/patch-radar-buzzer.py" "$APP_ROOT/rfeye/app.py"
+python3 "$SRC_ROOT/scripts/patch-fast-scan.py" "$APP_ROOT/rfeye/sdr_backend.py"
 chown -R "$TARGET_USER:$TARGET_USER" "$APP_ROOT/rfeye" "$SRC_ROOT"
 
 echo "[3/9] Configuring RTL-SDR..."
@@ -237,6 +238,9 @@ if command -v raspi-config >/dev/null 2>&1; then
 fi
 systemctl disable --now rfeye.service 2>/dev/null || true
 loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
+
+# Trim services that are unnecessary for a dedicated RF Eye appliance.
+bash "$SRC_ROOT/scripts/optimize-rpi-appliance.sh" "$TARGET_USER"
 
 echo "[8/9] Configuring Wi-Fi updater..."
 MANIFEST_URL="https://raw.githubusercontent.com/${REPO_SLUG}/main/update/manifest.json"
