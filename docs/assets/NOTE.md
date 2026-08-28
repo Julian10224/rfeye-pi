@@ -1,0 +1,1 @@
+Temporary note while wiring image documentation is being added.
