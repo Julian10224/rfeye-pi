@@ -46,6 +46,7 @@ python3 -m venv --system-site-packages "$APP_ROOT/.venv"
 python3 "$SRC_ROOT/scripts/patch-startup-splash.py" "$APP_ROOT/rfeye/app.py"
 python3 "$SRC_ROOT/scripts/patch-radar-buzzer.py" "$APP_ROOT/rfeye/app.py"
 python3 "$SRC_ROOT/scripts/patch-fast-scan.py" "$APP_ROOT/rfeye/sdr_backend.py"
+python3 "$SRC_ROOT/scripts/patch-persistent-sdr.py" "$APP_ROOT/rfeye/sdr_backend.py"
 chown -R "$TARGET_USER:$TARGET_USER" "$APP_ROOT/rfeye" "$SRC_ROOT"
 
 echo "[3/9] Configuring RTL-SDR..."
