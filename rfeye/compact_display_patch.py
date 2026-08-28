@@ -1,10 +1,10 @@
 """Compact-display support for the CUQI 3.5-inch 480x320 SPI panel.
 
 RF Eye's native UI is designed on a 480x800 portrait canvas and then rotated
-onto the physical display.  The CUQI panel is physically 480x320 in landscape,
+onto the physical display. The CUQI panel is physically 480x320 in landscape,
 so this patch keeps the existing high-resolution logical canvas (preserving the
-layout) and performs a final aspect-aware downscale to the real framebuffer.
-Touch coordinates are mapped back through that same scale/rotation transform.
+layout) and performs a final downscale to the real framebuffer. Touch
+coordinates are mapped back through that same scale/rotation transform.
 
 The patch is only enabled when RFEYE_DISPLAY_PROFILE=cuqi35 is present.
 """
@@ -76,12 +76,11 @@ def install_app_patch():
     def wrapper(func, name, *bases, **kwargs):
         cls = original(func, name, *bases, **kwargs)
         if name == "App" and getattr(cls, "__module__", "") in {"__main__", "app"}:
-            try:
-                _patch_app_class(cls)
-            finally:
-                # Other RF Eye class patches may also wrap __build_class__.
-                # Restore the wrapper we inherited rather than assuming the
-                # interpreter's pristine built-in.
+            _patch_app_class(cls)
+            # If no inner RF Eye class patch already restored __build_class__,
+            # restore the wrapper that we inherited. This keeps nested patches
+            # (such as wifi_patch) from being re-enabled accidentally.
+            if builtins.__build_class__ is wrapper:
                 builtins.__build_class__ = original
         return cls
 
