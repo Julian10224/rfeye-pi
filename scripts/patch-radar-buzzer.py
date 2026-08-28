@@ -8,6 +8,19 @@ if len(sys.argv) != 2:
 p = Path(sys.argv[1])
 s = p.read_text()
 
+# RF Eye hardware build now targets the TMB12A03 active buzzer. Force active
+# mode even when an older persisted config still contains buzzer_passive=true.
+needle = '        self.buzzer = GPIOBuzzer(\n'
+if needle in s and 'TMB12A03 active buzzer' not in s:
+    s = s.replace(
+        needle,
+        '        # TMB12A03 active buzzer: do not drive its internal oscillator with PWM.\n'
+        '        self.cfg["buzzer_passive"] = False\n'
+        '        self.cfg["buzzer_model"] = "TMB12A03"\n'
+        + needle,
+        1,
+    )
+
 start = s.find('    def _sound_logic(self, snap):\n')
 end = s.find('    def _text(', start)
 if start < 0 or end < 0:
@@ -25,9 +38,8 @@ new = '''    def _sound_logic(self, snap):
         if lv < 0.15:
             return
 
-        # TMB12A03 is an ACTIVE buzzer with its own ~2.3 kHz oscillator.
-        # Frequency PWM makes it sound clipped/raspy. Different levels are
-        # therefore encoded as complete pulse patterns instead of carrier pitch.
+        # TMB12A03 has its own oscillator (~2.3 kHz) and can take up to 50 ms
+        # to respond. Give it full DC pulses long enough to produce a complete tone.
         if lv > 0.72:
             on_ms = int(self.cfg.get("buzzer_red_ms", 75))
             gap_ms = int(self.cfg.get("buzzer_red_gap_ms", 55))
