@@ -20,13 +20,13 @@ def _kiosk_guard_worker():
                     if proc_dir.stat().st_uid != own_uid:
                         continue
                     argv = [x for x in (proc_dir / "cmdline").read_bytes().split(b"\0") if x]
-                    if argv[-2:] == [b"/usr/bin/lwrespawn", b"/usr/bin/wf-panel-pi"]:
+                    if argv[-2:] in ([b"/usr/bin/lwrespawn", b"/usr/bin/wf-panel-pi"], [b"/usr/bin/lwrespawn", b"/usr/bin/pcmanfm-pi"]):
                         os.kill(int(proc_dir.name), 15)
                 except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
                     pass
         except Exception:
             pass
-        for process_name in ("wf-panel-pi", "lxpanel", "squeekboard"):
+        for process_name in ("wf-panel-pi", "pcmanfm-pi", "lxpanel", "squeekboard"):
             try:
                 subprocess.run(
                     ["pkill", "-u", uid, "-x", process_name],
@@ -41,30 +41,126 @@ def _kiosk_guard_worker():
 
 
 def _start_kiosk_guard():
-    # Only run in the graphical appliance session. ThhÈÙY\È[\ÜÈ[ˆÚ[ˆÈÛÛËÚ[œİ[ØÜš\ÈÚYKYY™™Xİœ™YK‚ˆYˆ›İÜË™[š\›Û‹™Ù]
-•ĞVSS‘ÑTÔVHŠN‚ˆ™]\›‚ˆ™XY[™Ë•™XY
-ˆ\™Ù]WÚÚ[ÜÚ×ÙİX\™İÛÜšÙ\‹ˆ˜[YOHœ™™^YKZÚ[ÜÚËYİX\™‹ˆY[[ÛUYKˆ
-Kœİ\
+    # Only run in the graphical appliance session. This keeps imports in shell
+    # tools/install scripts side-effect free.
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        return
+    threading.Thread(
+        target=_kiosk_guard_worker,
+        name="rfeye-kiosk-guard",
+        daemon=True,
+    ).start()
 
-B‚‚—Üİ\ÚÚ[ÜÚ×ÙİX\™
 
-B‚ˆÈ[œİ[‘ˆ^YHRH]Ú\È™Y›Ü™H\œHYš[™\È\‚ˆÈHÛÚÈÛ›HİXÚ\ÈH‘ˆ^YH\Û\ÜÈ[™™\İÜ™\È×ØZ[ØÛ\Ü××È[[YYX][K‚N‚ˆœ›ÛHÚYšWÜ]Ú[\Ü[œİ[Ø\Ü]Úˆ[œİ[Ø\Ü]Ú
+_start_kiosk_guard()
 
-B™^Ù\^Ù\[Û‚ˆ\ÜÂ‚‘QUSÈHÂˆZWİÚYˆˆZWÚZYÚˆˆœ\ÚXØ[İÚYˆˆœ\ÚXØ[ÚZYÚˆˆœ›İ][Ûˆˆ˜İÈ‹ˆ™[ØÜ™Y[ˆˆYK‚ˆœØØ[—Üİ\ÚˆˆÎÌÌˆœØØ[—Ù[™ÚˆˆÎMWÌÌ‚ˆœØ[\WÜ˜]Hˆ—ÌÌˆ™™ÜÚ^™HˆLˆ™™Ø›ØÚÜÈˆˆ›[Øš[WØØ\\™WÛ\ÈˆÌ‹ŒˆœÚ]WØØ\\™WÛ\ÈˆÌ‹Œˆ›[Øš[WÜ\˜Ù[[HˆMKŒˆ]˜WØÚ[›™[Ú[—İÚYÚˆˆLŒˆ˜\œİÙØ]WÙˆˆ‹Œˆ›Z[—Ø\œİÜÜ[—ÙˆˆKŒˆ›Z[—Ø\œİÙ]HˆŒÍKˆ›X^Ø\œİÙ]HˆKˆœ™Y™\œ™YØ\œİÙ]WÛZ[ˆˆŒ‹ˆœ™Y™\œ™YØ\œİÙ]WÛX^ˆKˆ›[Øš[WÛZ[—Ü™—ÜÛœ—ÙˆˆKŒˆœÚ]WÛZ[—ÜÛœ—ÙˆˆKŒˆœÚ]WØ\œİÜÛœ—ÙˆˆŒˆœÚ]WÜZ\—ÛY[[ÜWÜÈˆŒˆœÚ]WÜZ\—ÛZ[—Ú]ÈˆKˆ™\^ÜZ\—İÛ\˜[˜ÙWÚˆˆLŒˆ™\^ÜZ\—ÛZ[—Ü]X[]HˆŒˆœ™\]Z\™WÙ\^ÜZ\ˆˆYKˆ˜Ø[™Y]WÛZ[—ØÛÛ™šY[˜ÙHˆˆ˜ÛÛ™šY[˜ÙWØ]XÚÈˆNˆ˜ÛÛ™šY[˜ÙWÜ™[X\ÙHˆŒŒˆ˜ÛÛ™šY[˜ÙWØÛÛ™š\›HˆŒ‹ˆ˜ÛÛ™šY[˜ÙWØÛX\ˆˆŒÌˆZWÙœÈˆŒ‚ˆ™ØZ[ˆˆ˜]]È‹ˆœHˆˆ™\ÚÛÙˆˆLŒˆ˜ÛÛ™š\›WÚ]Èˆ‹ˆ˜ÛX\—Ú]Èˆ‹ˆ›[Øš[WØ˜[™Üİ\ÚˆˆÎÌÌˆ›[Øš[WØ˜[™Ù[™ÚˆˆÎWÌÌˆœÚ]WØ˜[™Üİ\ÚˆˆÎLÌÌˆœÚ]WØ˜[™Ù[™ÚˆˆÎMWÌÌˆ›X^ÜÚYÛ˜[ÈˆË‚ˆ›]]Yˆ˜[ÙKˆ™[[×Û[ÙHˆ˜[ÙKˆ˜]]×Ù[[×ÚY—Û›×ÜÙˆˆ˜[ÙKˆ˜]Y[×Û[ÙHˆ˜Y\]™H‹‚ˆÈÔSÈ^™\‚ˆ˜^™\—ÙÜ[ÈˆNˆ˜^™\—Ü\ÜÚ]™HˆYKˆ˜^™\—ØXİ]™WÚYÚˆYKˆ˜^™\—Ûİ×ÚˆˆLˆ˜^™\—ÚYÚÚˆˆMLˆ˜^™\—Ù\˜][Û—Û\ÈˆKˆ˜œšYÚ™\ÜÈˆKŒˆœÚİ×Ùœ™\]Y[˜ŞHˆYKˆœÚİ×Øœ˜[™İ^ˆYK‚ˆİXÚÚ[™\Şˆ˜[ÙKˆİXÚÚ[™\ŞHˆ˜[ÙK‚ˆ˜\İ™\œÚ[ÛˆˆŒËŒM‹ˆ\]WÛX[šY™\İİ\›ˆšÎ‹ËÜ˜]Ë™Ú]X\Ù\˜ÛÛ[˜ÛÛKÒ[X[ŒLŒÜ™™^YK\KÛXZ[‹İ\]KÛX[šY™\İšœÛÛˆ‹ˆ]Hˆ”‘ˆVQH‹ŸB‚‚™YˆØÛÛ™šY×Ü]
+# Install RF Eye UI patches before app.py defines App.
+# The hook only touches the RF Eye App class and restores __build_class__ immediately.
+try:
+    from wifi_patch import install_app_patch
+    install_app_patch()
+except Exception:
+    pass
 
-N‚ˆ[ˆHÜË™Ù][Š”‘‘VQWĞÓÓ‘’QÈŠBˆYˆ[‚ˆ™]\›ˆ]
-[ŠBˆYˆÜË™Ù]]ZY
+DEFAULTS = {
+    "ui_width": 480,
+    "ui_height": 800,
+    "physical_width": 800,
+    "physical_height": 480,
+    "rotation": "cw",
+    "fullscreen": True,
 
-HOH‚ˆ™]\›ˆ]
-‹İ˜\‹ÛX‹Ü™™^YKØÛÛ™šYËšœÛÛˆŠBˆ™]\›ˆ]šÛYJ
-HÈ‹˜ÛÛ™šYÈˆÈœ™™^YHˆÈ˜ÛÛ™šYËšœÛÛˆ‚‚‚™YˆØYØÛÛ™šYÊ
-N‚ˆÙ™ÈHXİ
-QUSÊBˆHØÛÛ™šY×Ü]
+    "scan_start_hz": 380_000_000,
+    "scan_end_hz": 395_000_000,
 
-BˆN‚ˆYˆ™^\İÊ
-N‚ˆÙ™Ë\]JœÛÛ‹›ØYÊœ™XYİ^
+    "sample_rate": 2_048_000,
+    "fft_size": 1024,
+    "fft_blocks": 8,
+    "mobile_capture_ms": 72.0,
+    "site_capture_ms": 72.0,
+    "mobile_percentile": 95.0,
+    "tetra_channel_half_width_hz": 9000.0,
+    "burst_gate_db": 6.0,
+    "min_burst_span_db": 9.0,
+    "min_burst_duty": 0.035,
+    "max_burst_duty": 0.65,
+    "preferred_burst_duty_min": 0.06,
+    "preferred_burst_duty_max": 0.45,
+    "mobile_min_rf_snr_db": 5.0,
+    "site_min_snr_db": 5.0,
+    "site_burst_snr_db": 8.0,
+    "site_pair_memory_s": 4.0,
+    "site_pair_min_hits": 1,
+    "duplex_pair_tolerance_hz": 1000.0,
+    "duplex_pair_min_quality": 0.28,
+    "require_duplex_pair": True,
+    "candidate_min_confidence": 0.48,
+    "confidence_attack": 0.58,
+    "confidence_release": 0.20,
+    "confidence_confirm": 0.62,
+    "confidence_clear": 0.30,
+    "ui_fps": 20,
 
-JJBˆ^Ù\^Ù\[Û‚ˆ\ÜÂˆÈ™[X\ÙHY]Y]H™[Û™ÜÈÈH[œİ[YÛÙK™]™\ˆÈİ[H\Ù\ˆÙ][™ÜË‚ˆÙ™ÖÈ˜\İ™\œÚ[Ûˆ—HHQUSÖÈ˜\İ™\œÚ[Ûˆ—BˆÙ™ÖÈ\]WÛX[šY™\İİ\›—HHQUSÖÈ\]WÛX[šY™\İİ\›—Bˆ™]\›ˆÙ™Â‚‚™YˆØ]™WØÛÛ™šYÊÙ™ÊN‚ˆHØÛÛ™šY×Ü]
+    "gain": "auto",
+    "ppm": 0,
+    "threshold_db": 10.0,
+    "confirm_hits": 2,
+    "clear_hits": 2,
+    "mobile_band_start_hz": 380_000_000,
+    "mobile_band_end_hz": 385_000_000,
+    "site_band_start_hz": 390_000_000,
+    "site_band_end_hz": 395_000_000,
+    "max_signals": 3,
 
-Bˆœ\™[›ZÙ\Š\™[ÏUYK^\İÛÚÏUYJBˆÜš]Wİ^
-œÛÛ‹™[\ÊÙ™Ë[™[LŠJB
+    "muted": False,
+    "demo_mode": False,
+    "auto_demo_if_no_sdr": False,
+    "audio_mode": "adaptive",
+
+    # GPIO buzzer
+    "buzzer_gpio": 18,
+    "buzzer_passive": True,
+    "buzzer_active_high": True,
+    "buzzer_low_hz": 900,
+    "buzzer_high_hz": 1500,
+    "buzzer_duration_ms": 85,
+    "brightness": 1.0,
+    "show_frequency": True,
+    "show_brand_text": True,
+
+    "touch_invert_x": False,
+    "touch_invert_y": False,
+
+    "app_version": "0.7.15",
+    "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
+    "title": "RF EYE",
+}
+
+
+def _config_path():
+    env = os.getenv("RFEYE_CONFIG")
+    if env:
+        return Path(env)
+    if os.geteuid() == 0:
+        return Path("/var/lib/rfeye/config.json")
+    return Path.home() / ".config" / "rfeye" / "config.json"
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    p = _config_path()
+    try:
+        if p.exists():
+            cfg.update(json.loads(p.read_text()))
+    except Exception:
+        pass
+    # Release metadata belongs to the installed code, never to stale user settings.
+    cfg["app_version"] = DEFAULTS["app_version"]
+    cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
+    return cfg
+
+
+def save_config(cfg):
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, indent=2))

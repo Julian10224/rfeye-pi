@@ -186,6 +186,7 @@ EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi" "$TARGET_HOME/.config/systemd"
 
 echo "[7/9] Configuring permissions and autologin..."
+bash "$SRC_ROOT/scripts/install-networkmanager-policy.sh" "$TARGET_USER"
 usermod -aG video,render,input,gpio,plugdev "$TARGET_USER" || true
 if command -v raspi-config >/dev/null 2>&1; then
   raspi-config nonint do_boot_behaviour B4 || true

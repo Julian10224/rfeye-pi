@@ -1,7 +1,7 @@
 """RF Eye Wi-Fi UI/connection patch.
 
 Adds a lowercase-first touch keyboard with an explicit SHIFT toggle, a password
-visibility eye, and a GUI-equivalent NetworkManager connection path.  The patch
+visibility eye, and persistent system NetworkManager profiles for reliable boot autoconnect.  The patch
 is installed from config.py before app.py defines App, so existing appliance UI
 code can be upgraded without replacing the whole app.py file.
 """
@@ -39,6 +39,11 @@ def _error_text(cp, fallback="connect failed"):
     return (getattr(cp, "stderr", "") or getattr(cp, "stdout", "") or fallback).strip()
 
 
+def _profile_exists(name):
+    cp = _run(["nmcli", "-g", "connection.id", "connection", "show", "id", name], timeout=8)
+    return cp.returncode == 0
+
+
 def _connect_worker(app, ssid, password, security):
     try:
         sec = security.upper()
@@ -51,21 +56,52 @@ def _connect_worker(app, ssid, password, security):
         if secured and not password:
             raise RuntimeError("password required")
 
-        # Use NetworkManager's GUI-equivalent Wi-Fi connect command.  The older
-        # RF Eye code explicitly created a connection profile first; on systems
-        # where settings.modify.own requires Polkit authorization that can fail
-        # with "not authorized" before a connection is even attempted.
-        cmd = [
-            "nmcli", "--wait", "25",
-            "device", "wifi", "connect", ssid,
-            "ifname", "wlan0",
-            "name", _profile_name(ssid),
-            "private", "yes",
-        ]
-        if secured:
-            cmd += ["password", password]
+        profile = _profile_name(ssid)
+        exists = _profile_exists(profile)
+        # System profile + saved secret = reliable boot autoconnect.
+        if not exists:
+            cp = _run([
+                "nmcli", "connection", "add",
+                "type", "wifi", "ifname", "wlan0",
+                "con-name", profile, "ssid", ssid,
+                "connection.autoconnect", "yes",
+                "connection.autoconnect-priority", "100",
+            ], timeout=15)
+            if cp.returncode != 0:
+                raise RuntimeError(_error_text(cp))
 
-        cp = _run(cmd, timeout=30)
+        cp = _run([
+            "nmcli", "connection", "modify", "id", profile,
+            "connection.interface-name", "wlan0",
+            "connection.autoconnect", "yes",
+            "connection.autoconnect-priority", "100",
+            "connection.permissions", "",
+            "802-11-wireless.ssid", ssid,
+        ], timeout=15)
+        if cp.returncode != 0:
+            raise RuntimeError(_error_text(cp))
+
+        if secured:
+            key_mgmt = "sae" if "SAE" in sec and "WPA2" not in sec else "wpa-psk"
+            cp = _run([
+                "nmcli", "connection", "modify", "id", profile,
+                "802-11-wireless-security.key-mgmt", key_mgmt,
+                "802-11-wireless-security.psk", password,
+                "802-11-wireless-security.psk-flags", "0",
+            ], timeout=15)
+        else:
+            cp = _run([
+                "nmcli", "connection", "modify", "id", profile,
+                "802-11-wireless-security.key-mgmt", "",
+                "802-11-wireless-security.psk", "",
+            ], timeout=15)
+        if cp.returncode != 0:
+            raise RuntimeError(_error_text(cp))
+
+        cp = _run([
+            "nmcli", "--wait", "25", "connection", "up", "id", profile,
+            "ifname", "wlan0",
+        ], timeout=30)
         if cp.returncode != 0:
             raise RuntimeError(_error_text(cp))
 
@@ -88,6 +124,7 @@ def _connect_worker(app, ssid, password, security):
             or "psk" in text
             or "authentication" in text
             or "wrong key" in text
+            or "supplicant" in text
         ):
             app.wifi_message = "PASSWORD FAILED"
         else:
