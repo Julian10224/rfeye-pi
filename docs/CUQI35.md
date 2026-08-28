@@ -9,18 +9,19 @@ curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-3
 sudo reboot
 ```
 
-The installer keeps the LCD controller at its native 480x320 orientation and renders RF Eye vertically in software. RF Eye retains its 480x800 logical portrait canvas and scales the final rotated frame to the physical 480x320 display. Touch is mapped through the inverse transform so the existing Wi-Fi keyboard, settings, spectrum and main screen keep their original hit regions.
+The LCD controller stays in its native 480x320 landscape orientation. RF Eye itself uses a native 320x480 portrait canvas and rotates that once into the physical framebuffer. There is no aspect-ratio scaling: the main screen, settings, Wi-Fi keyboard, connected-network details and spectrum page all have dedicated 320x480 layouts and touch regions.
 
 ## What the installer changes
 
-- Reuses the normal RF Eye installer for RTL-SDR, NetworkManager, boot splash, buzzer permissions and appliance startup.
-- Enables SPI.
+- Reuses the normal RF Eye installer for RTL-SDR, NetworkManager, buzzer permissions and appliance startup.
+- Enables SPI and makes the SPI DRM panel the primary graphics device.
 - Uses the kernel `piscreen` DRM overlay instead of legacy fbturbo/fbdev LCD-show graphics drivers.
 - Sets `dtoverlay=piscreen,speed=18000000,drm,rotate=0` by default.
 - Removes conflicting old `mhs35`, `tft35a`, `ads7846`, `99-fbturbo.conf` and `99-fbdev.conf` configuration where applicable.
-- Configures RF Eye for a 480x320 physical framebuffer with the `cuqi35` display profile.
-- Limits UI rendering to 18 FPS to reduce SPI transfer/CPU load on the small display.
-- Installs `rfeye-cuqi35-status` for display, SPI and touchscreen diagnostics.
+- Configures RF Eye for a 320x480 logical portrait UI and 480x320 physical framebuffer.
+- Uses a 20 FPS UI target to balance responsiveness and SPI/CPU load.
+- Regenerates the RF Eye Plymouth boot artwork at native 480x320.
+- Installs `rfeye-cuqi35-status` for DRM, framebuffer, SPI and touchscreen diagnostics.
 
 ## Rotation
 
@@ -41,19 +42,19 @@ Useful manual checks:
 
 ```bash
 cat /boot/firmware/config.txt | grep -E 'spi|piscreen|rfeye-cuqi35'
-ls -l /dev/spidev* /dev/dri/* 2>/dev/null
+ls -l /dev/fb* /dev/dri/* /dev/spidev* 2>/dev/null
 grep -B1 -A4 -Ei 'ADS7846|XPT2046|Touchscreen' /proc/bus/input/devices
 ```
 
 ## Touch compatibility options
 
-The Raspberry Pi `piscreen` overlay supports touchscreen axis options on compatible panels. If a clone reports inverted axes, the installer can append an overlay option, for example:
+The Raspberry Pi `piscreen` overlay supports axis options on compatible panels. If the touch controller is inverted, the installer can append an option, for example:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/install-cuqi35.sh | sudo env RFEYE_CUQI_TOUCH_OPTS=invx bash
 ```
 
-Only use `invx`, `invy` or `swapxy` after checking the actual touch behaviour; different 3.5-inch clones wire the resistive controller differently.
+Only use `invx`, `invy` or `swapxy` after checking the actual touch behaviour; different 3.5-inch clones wire the resistive controller differently. RF Eye itself already performs the 90-degree application rotation and inverse touch mapping, so kernel rotation stays at zero.
 
 ## Hardware note
 
