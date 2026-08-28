@@ -19,7 +19,7 @@ if 'self.last_cycle_ms=' not in s:
         "        self.last_cycle_ms=0.; self.last_mobile_scan_ms=0.; self.last_site_scan_ms=0.; self.last_capture_ms=0.; self.last_scan_windows=0\n", 1)
 
 snap_old = "            'last_update':float(self.last_update),'demo':bool(self.demo_active)}\n"
-snap_new = "            'last_update':float(self.last_update),'demo':bool(self.demo_active),\n            'cycle_ms':float(self.last_cycle_ms),'mobile_scan_ms':float(self.last_mobile_scan_ms),\n            'site_scan_ms':float(self.last_site_scan_ms),'capture_ms':float(self.last_capture_ms),\n            'scan_windows':int(self.last_scan_windows),\n            'sdr_path':('DIRECT' if globals().get('RtlSdr') is not None else 'RTL_SDR CLI')}\n"
+snap_new = "            'last_update':float(self.last_update),'demo':bool(self.demo_active),\n            'cycle_ms':float(self.last_cycle_ms),'mobile_scan_ms':float(self.last_mobile_scan_ms),\n            'site_scan_ms':float(self.last_site_scan_ms),'capture_ms':float(self.last_capture_ms),\n            'scan_windows':int(self.last_scan_windows),\n            'sdr_path':str(getattr(self,'sdr_path','?'))}\n"
 if snap_old in s:
     s = s.replace(snap_old, snap_new, 1)
 elif "'cycle_ms':float(self.last_cycle_ms)" not in s:
