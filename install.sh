@@ -16,7 +16,6 @@ TARGET_UID="$(id -u "$TARGET_USER")"
 
 echo "[1/9] Installing packages..."
 apt-get update
-# Configure the Dutch Wi-Fi regulatory domain so 2.4/5 GHz scanning uses NL rules.
 if command -v raspi-config >/dev/null 2>&1; then
   raspi-config nonint do_wifi_country NL || true
 fi
@@ -39,7 +38,6 @@ cp -a "$SRC_ROOT/rfeye/." "$APP_ROOT/rfeye/"
 python3 -m venv --system-site-packages "$APP_ROOT/.venv"
 "$APP_ROOT/.venv/bin/pip" install --upgrade pip wheel
 "$APP_ROOT/.venv/bin/pip" install -r "$SRC_ROOT/requirements.txt"
-# Keep the final transition from Plymouth to the app in the same RF Eye style.
 python3 "$SRC_ROOT/scripts/patch-startup-splash.py" "$APP_ROOT/rfeye/app.py"
 chown -R "$TARGET_USER:$TARGET_USER" "$APP_ROOT/rfeye" "$SRC_ROOT"
 
@@ -74,8 +72,6 @@ dtoverlay=ads7846,cs=1,penirq=25,penirq_pull=2,speed=50000,keep_vref_on=0,swapxy
 EOF
 fi
 
-# Hide the Raspberry Pi firmware logo and verbose kernel/systemd output while
-# keeping Plymouth enabled for the RF Eye splash.
 grep -q '^disable_splash=1$' "$CONFIG" || printf '\n# RF Eye appliance boot\ndisable_splash=1\n' >> "$CONFIG"
 CMDLINE="$BOOT/cmdline.txt"
 cp -n "$CMDLINE" "${CMDLINE}.rfeye-backup" || true
@@ -94,7 +90,6 @@ for value in [
 p.write_text(' '.join(items) + '\n')
 PY
 
-# Install the RF Eye Plymouth theme and rebuild initramfs using Raspberry Pi OS tooling.
 THEME_DIR=/usr/share/plymouth/themes/rfeye
 mkdir -p "$THEME_DIR"
 install -m 0644 "$SRC_ROOT/config/plymouth/rfeye/rfeye.plymouth" "$THEME_DIR/rfeye.plymouth"
@@ -103,9 +98,6 @@ python3 "$SRC_ROOT/scripts/generate-plymouth-assets.py" "$THEME_DIR"
 chmod 0644 "$THEME_DIR"/*.png
 plymouth-set-default-theme -R rfeye
 
-# Make any short desktop/login transition visually identical to RF Eye.
-# This also disables Trash/Documents/mount icons and points PCManFM at an
-# intentionally empty desktop folder.
 bash "$SRC_ROOT/scripts/apply-desktop-splash.sh" "$TARGET_USER" "$TARGET_HOME" "$THEME_DIR"
 
 echo "[5/9] RF Eye boot splash installed."
@@ -113,12 +105,10 @@ echo "[5/9] RF Eye boot splash installed."
 echo "[6/9] Installing appliance session..."
 mkdir -p "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi" "$TARGET_HOME/.config/systemd/user/default.target.wants"
 
-# Raspberry Pi OS can start desktop chrome from the system Labwc autostart.
-# Remove it there, rather than only killing the child process after login.
 SYSTEM_LABWC_AUTOSTART=/etc/xdg/labwc/autostart
 if [[ -f "$SYSTEM_LABWC_AUTOSTART" ]]; then
   cp -n "$SYSTEM_LABWC_AUTOSTART" "${SYSTEM_LABWC_AUTOSTART}.rfeye-backup" || true
-  sed -i -E '/(^|[[:space:]])(wf-panel-pi|pcmanfm-pi|lxpanel)([[:space:]]|$)/d' "$SYSTEM_LABWC_AUTOSTART"
+  sed -i -E '/(^|[[:space:]])(wf-panel-pi|pcmanfm-pi|pcmanfm|lxpanel)([[:space:]]|$)/d' "$SYSTEM_LABWC_AUTOSTART"
 fi
 
 CONNECTED_OUTPUT=""
@@ -148,6 +138,7 @@ cat > "$TARGET_HOME/.config/labwc/autostart" <<'EOF'
     pgrep -f '^/bin/sh /usr/bin/lwrespawn /usr/bin/pcmanfm-pi$' | xargs -r kill 2>/dev/null || true
     pkill -x wf-panel-pi 2>/dev/null || true
     pkill -x pcmanfm-pi 2>/dev/null || true
+    pkill -x pcmanfm 2>/dev/null || true
     pkill -x squeekboard 2>/dev/null || true
     i=$((i + 1))
     sleep 1
@@ -215,7 +206,7 @@ RF Eye is installed.
 Reboot with:
   sudo reboot
 
-After reboot RF Eye starts as an appliance: custom boot splash, no Raspberry Pi desktop chrome, then RF Eye fullscreen.
+After reboot RF Eye starts as an appliance: portrait RF Eye boot splash, no Raspberry Pi desktop chrome, then RF Eye fullscreen.
 Updater manifest:
   ${MANIFEST_URL}
 EOF
