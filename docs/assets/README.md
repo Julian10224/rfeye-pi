@@ -1,0 +1,1 @@
+GPIO pinout image assets for the Raspberry Pi 3B+ speaker/buzzer wiring guide.
