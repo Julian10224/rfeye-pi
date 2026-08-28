@@ -10,9 +10,6 @@ def _kiosk_guard_worker():
     """Keep Raspberry Pi desktop chrome out of the RF Eye appliance session."""
     uid = str(os.getuid())
     while True:
-        # Raspberry Pi OS launches the panel through lwrespawn. Killing only
-        # wf-panel-pi makes lwrespawn immediately bring it back, so stop the
-        # panel-specific respawn wrapper first. Do not touch other lwrespawn jobs.
         try:
             own_uid = os.getuid()
             for proc_dir in Path("/proc").glob("[0-9]*"):
@@ -41,8 +38,6 @@ def _kiosk_guard_worker():
 
 
 def _start_kiosk_guard():
-    # Only run in the graphical appliance session. This keeps imports in shell
-    # tools/install scripts side-effect free.
     if not os.environ.get("WAYLAND_DISPLAY"):
         return
     threading.Thread(
@@ -54,14 +49,15 @@ def _start_kiosk_guard():
 
 _start_kiosk_guard()
 
-# Install RF Eye UI patches before app.py defines App.
-# The hooks only touch the RF Eye App class.
 try:
     from wifi_patch import install_app_patch
     install_app_patch()
 except Exception:
     pass
 
+# CUQI 3.5 profile hook. It is inert unless the display installer sets
+# RFEYE_DISPLAY_PROFILE=cuqi35, so the same source tree stays compatible with
+# the normal Elecrow build while this branch keeps its native 320x480 UI.
 try:
     from compact_display_patch import install_app_patch as install_compact_display_patch
     install_compact_display_patch()
@@ -123,13 +119,17 @@ DEFAULTS = {
     "auto_demo_if_no_sdr": False,
     "audio_mode": "adaptive",
 
-    # GPIO buzzer
+    # Current main hardware profile: active TMB12A03 electromagnetic buzzer.
     "buzzer_gpio": 18,
-    "buzzer_passive": True,
+    "buzzer_model": "TMB12A03",
+    "buzzer_passive": False,
     "buzzer_active_high": True,
-    "buzzer_low_hz": 900,
-    "buzzer_high_hz": 1500,
-    "buzzer_duration_ms": 85,
+    "buzzer_green_ms": 95,
+    "buzzer_yellow_ms": 85,
+    "buzzer_red_ms": 75,
+    "buzzer_green_gap_ms": 0,
+    "buzzer_yellow_gap_ms": 70,
+    "buzzer_red_gap_ms": 55,
     "brightness": 1.0,
     "show_frequency": True,
     "show_brand_text": True,
@@ -137,7 +137,7 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.16",
+    "app_version": "0.7.17",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/update/manifest.json",
     "title": "RF EYE",
 }
@@ -160,7 +160,6 @@ def load_config():
             cfg.update(json.loads(p.read_text()))
     except Exception:
         pass
-    # Release metadata belongs to the installed code, never to stale user settings.
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
     return cfg

@@ -24,6 +24,9 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3-rpi.gpio rtl-sdr librtlsdr0 librtlsdr-dev usbutils curl unzip kanshi network-manager \
   plymouth plymouth-themes initramfs-tools
 
+DEBIAN_FRONTEND=noninteractive apt-get install -y pigpio python3-pigpio || true
+systemctl enable --now pigpiod.service 2>/dev/null || true
+
 echo "[2/9] Downloading RF Eye..."
 rm -rf "$SRC_ROOT"
 if [[ -d "${RFEYE_LOCAL_SOURCE:-}" ]]; then
@@ -39,6 +42,9 @@ python3 -m venv --system-site-packages "$APP_ROOT/.venv"
 "$APP_ROOT/.venv/bin/pip" install --upgrade pip wheel
 "$APP_ROOT/.venv/bin/pip" install -r "$SRC_ROOT/requirements.txt"
 python3 "$SRC_ROOT/scripts/patch-startup-splash.py" "$APP_ROOT/rfeye/app.py"
+python3 "$SRC_ROOT/scripts/patch-radar-buzzer.py" "$APP_ROOT/rfeye/app.py"
+python3 "$SRC_ROOT/scripts/patch-fast-scan.py" "$APP_ROOT/rfeye/sdr_backend.py"
+python3 "$SRC_ROOT/scripts/patch-persistent-sdr.py" "$APP_ROOT/rfeye/sdr_backend.py"
 chown -R "$TARGET_USER:$TARGET_USER" "$APP_ROOT/rfeye" "$SRC_ROOT"
 
 echo "[3/9] Configuring RTL-SDR..."
@@ -73,6 +79,8 @@ EOF
 fi
 
 grep -q '^disable_splash=1$' "$CONFIG" || printf '\n# RF Eye appliance boot\ndisable_splash=1\n' >> "$CONFIG"
+grep -q '^auto_initramfs=1$' "$CONFIG" || printf 'auto_initramfs=1\n' >> "$CONFIG"
+
 CMDLINE="$BOOT/cmdline.txt"
 cp -n "$CMDLINE" "${CMDLINE}.rfeye-backup" || true
 python3 - "$CMDLINE" <<'PY'
@@ -96,7 +104,45 @@ install -m 0644 "$SRC_ROOT/config/plymouth/rfeye/rfeye.plymouth" "$THEME_DIR/rfe
 install -m 0644 "$SRC_ROOT/config/plymouth/rfeye/rfeye.script" "$THEME_DIR/rfeye.script"
 python3 "$SRC_ROOT/scripts/generate-plymouth-assets.py" "$THEME_DIR"
 chmod 0644 "$THEME_DIR"/*.png
-plymouth-set-default-theme -R rfeye
+
+if [[ -f /etc/initramfs-tools/initramfs.conf ]]; then
+  grep -q '^MODULES=' /etc/initramfs-tools/initramfs.conf \
+    && sed -i 's/^MODULES=.*/MODULES=most/' /etc/initramfs-tools/initramfs.conf \
+    || printf '\nMODULES=most\n' >> /etc/initramfs-tools/initramfs.conf
+fi
+if [[ -f /etc/initramfs-tools/update-initramfs.conf ]]; then
+  grep -q '^update_initramfs=' /etc/initramfs-tools/update-initramfs.conf \
+    && sed -i 's/^update_initramfs=.*/update_initramfs=all/' /etc/initramfs-tools/update-initramfs.conf \
+    || printf '\nupdate_initramfs=all\n' >> /etc/initramfs-tools/update-initramfs.conf
+fi
+
+plymouth-set-default-theme rfeye
+update-initramfs -u -k all
+
+MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
+ARCH="$(uname -m)"
+EXPECTED_INITRAMFS=""
+if [[ "$MODEL" == *"Raspberry Pi 3"* ]]; then
+  [[ "$ARCH" == "aarch64" ]] && EXPECTED_INITRAMFS="initramfs8" || EXPECTED_INITRAMFS="initramfs7"
+elif [[ "$MODEL" == *"Raspberry Pi 4"* ]]; then
+  [[ "$ARCH" == "aarch64" ]] && EXPECTED_INITRAMFS="initramfs8" || EXPECTED_INITRAMFS="initramfs7l"
+elif [[ "$MODEL" == *"Raspberry Pi 5"* ]]; then
+  EXPECTED_INITRAMFS="initramfs_2712"
+fi
+
+if [[ -n "$EXPECTED_INITRAMFS" ]]; then
+  IMAGE="$BOOT/$EXPECTED_INITRAMFS"
+  if [[ ! -f "$IMAGE" ]] || ! lsinitramfs "$IMAGE" 2>/dev/null | grep -q 'usr/share/plymouth/themes/rfeye/rfeye.script'; then
+    echo "Rebuilding $EXPECTED_INITRAMFS explicitly for $MODEL ($ARCH)..."
+    TMP_IMAGE="${IMAGE}.rfeye-new"
+    mkinitramfs -o "$TMP_IMAGE" "$(uname -r)"
+    mv -f "$TMP_IMAGE" "$IMAGE"
+  fi
+  lsinitramfs "$IMAGE" 2>/dev/null | grep -q 'usr/share/plymouth/themes/rfeye/rfeye.script' \
+    && echo "Verified RF Eye Plymouth theme in $IMAGE" \
+    || echo "WARNING: RF Eye theme could not be verified in $IMAGE" >&2
+fi
+sync
 
 bash "$SRC_ROOT/scripts/apply-desktop-splash.sh" "$TARGET_USER" "$TARGET_HOME" "$THEME_DIR"
 
@@ -130,10 +176,9 @@ cp "$SRC_ROOT/scripts/start-rfeye.sh" "$APP_ROOT/start-rfeye.sh"
 chmod +x "$APP_ROOT/start-rfeye.sh"
 cat > "$TARGET_HOME/.config/labwc/autostart" <<'EOF'
 #!/bin/sh
-# RF Eye appliance session: suppress any desktop chrome that still respawns.
 (
   i=0
-  while [ "$i" -lt 45 ]; do
+  while [ "$i" -lt 30 ]; do
     pgrep -f '^/bin/sh /usr/bin/lwrespawn /usr/bin/wf-panel-pi$' | xargs -r kill 2>/dev/null || true
     pgrep -f '^/bin/sh /usr/bin/lwrespawn /usr/bin/pcmanfm-pi$' | xargs -r kill 2>/dev/null || true
     pkill -x wf-panel-pi 2>/dev/null || true
@@ -141,11 +186,10 @@ cat > "$TARGET_HOME/.config/labwc/autostart" <<'EOF'
     pkill -x pcmanfm 2>/dev/null || true
     pkill -x squeekboard 2>/dev/null || true
     i=$((i + 1))
-    sleep 1
+    sleep 0.5
   done
 ) &
 /usr/bin/kanshi &
-# RF Eye itself is managed by rfeye-user.service. Do not launch a second copy here.
 EOF
 cat > "$TARGET_HOME/.config/systemd/user/rfeye-user.service" <<EOF
 [Unit]
@@ -160,9 +204,11 @@ Environment=WAYLAND_DISPLAY=wayland-0
 Environment=SDL_VIDEODRIVER=wayland
 Environment=PYGAME_HIDE_SUPPORT_PROMPT=1
 Environment=RFEYE_CONFIG=${TARGET_HOME}/.config/rfeye/config.json
-ExecStart=/bin/bash -lc 'while [ ! -S /run/user/${TARGET_UID}/wayland-0 ]; do sleep 2; done; exec ${APP_ROOT}/start-rfeye.sh'
+# Poll frequently instead of sleeping in two-second chunks. This removes up to
+# almost two seconds of avoidable startup latency after Wayland becomes ready.
+ExecStart=/bin/bash -lc 'while [ ! -S /run/user/${TARGET_UID}/wayland-0 ]; do sleep 0.15; done; exec ${APP_ROOT}/start-rfeye.sh'
 Restart=always
-RestartSec=2
+RestartSec=0.5
 
 [Install]
 WantedBy=default.target
@@ -184,6 +230,8 @@ if command -v raspi-config >/dev/null 2>&1; then
 fi
 systemctl disable --now rfeye.service 2>/dev/null || true
 loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
+
+bash "$SRC_ROOT/scripts/optimize-rpi-appliance.sh" "$TARGET_USER"
 
 echo "[8/9] Configuring Wi-Fi updater..."
 MANIFEST_URL="https://raw.githubusercontent.com/${REPO_SLUG}/main/update/manifest.json"
