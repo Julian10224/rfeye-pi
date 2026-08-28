@@ -17,13 +17,14 @@ def tap(app, x, y):
         return
 
     if app.page == "settings":
+        from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_COUNT
         if y < 62:
             app.page = "main"
             return
-        idx = int((y - 70) / 42)
+        idx = int((y - SETTINGS_TOP) / SETTINGS_STEP)
         keys = ["muted", "demo_mode", "threshold_db", "audio_mode", "brightness",
-                "show_frequency", "wifi", "update", "spectrum"]
-        if not 0 <= idx < len(keys):
+                "show_frequency", "wifi", "update", "spectrum", "debug"]
+        if not 0 <= idx < min(SETTINGS_COUNT, len(keys)):
             return
         key = keys[idx]
         if key == "muted":
@@ -46,6 +47,8 @@ def tap(app, x, y):
             app._update_action()
         elif key == "spectrum":
             app.page = "spectrum"
+        elif key == "debug":
+            app.page = "debug"
         return
 
     if app.page == "wifi":
@@ -87,3 +90,7 @@ def tap(app, x, y):
 
     if app.page == "spectrum" and (y < 62 or y > 448):
         app.page = "main"
+        return
+
+    if app.page == "debug" and (y < 62 or y > 448):
+        app.page = "settings"

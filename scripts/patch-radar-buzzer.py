@@ -38,24 +38,47 @@ new = '''    def _sound_logic(self, snap):
         if lv < 0.15:
             return
 
-        # TMB12A03 has its own oscillator (~2.3 kHz) and can take up to 50 ms
-        # to respond. Give it full DC pulses long enough to produce a complete tone.
+        # TMB12A03 has one fixed internal tone, so make the LOW/MEDIUM/HIGH
+        # zones deliberately different by rhythm rather than tiny pitch changes.
+        # Each ON time is kept comfortably above the buzzer's response time.
         if lv > 0.72:
-            on_ms = int(self.cfg.get("buzzer_red_ms", 75))
-            gap_ms = int(self.cfg.get("buzzer_red_gap_ms", 55))
+            # HIGH/red: urgent triple burst with very short gaps.
+            on_ms = int(self.cfg.get("buzzer_red_ms", 105))
+            gap_ms = int(self.cfg.get("buzzer_red_gap_ms", 45))
             pattern = [(on_ms, gap_ms), (on_ms, gap_ms), (on_ms, 0)]
+            base_interval = 0.46
         elif lv > 0.43:
-            on_ms = int(self.cfg.get("buzzer_yellow_ms", 85))
-            gap_ms = int(self.cfg.get("buzzer_yellow_gap_ms", 70))
+            # MEDIUM/yellow: unmistakable double beep.
+            on_ms = int(self.cfg.get("buzzer_yellow_ms", 130))
+            gap_ms = int(self.cfg.get("buzzer_yellow_gap_ms", 135))
             pattern = [(on_ms, gap_ms), (on_ms, 0)]
+            base_interval = 0.95
         else:
-            on_ms = int(self.cfg.get("buzzer_green_ms", 95))
+            # LOW/green: one long, calm pulse with a large quiet gap.
+            on_ms = int(self.cfg.get("buzzer_green_ms", 185))
             pattern = [(on_ms, 0)]
+            base_interval = 1.85
 
-        n = max(0.0, min(1.0, (lv - 0.15) / 0.85))
-        interval = max(0.42, 1.35 * (0.31 ** n))
-        if self.cfg.get("audio_mode", "adaptive") != "adaptive":
-            interval = 1.0
+        # Keep a little within-zone acceleration, but never enough to erase
+        # the strong one/double/triple-beep distinction between the colours.
+        if self.cfg.get("audio_mode", "adaptive") == "adaptive":
+            if lv > 0.72:
+                zone_n = max(0.0, min(1.0, (lv - 0.72) / 0.28))
+                interval = max(0.40, base_interval - 0.06 * zone_n)
+            elif lv > 0.43:
+                zone_n = max(0.0, min(1.0, (lv - 0.43) / 0.29))
+                interval = max(0.82, base_interval - 0.13 * zone_n)
+            else:
+                zone_n = max(0.0, min(1.0, (lv - 0.15) / 0.28))
+                interval = max(1.45, base_interval - 0.40 * zone_n)
+        else:
+            interval = base_interval
+
+        # Ensure a complete pattern always has time to finish before a new one
+        # is started. beep_pattern itself is generation-safe, but this also makes
+        # the audible rhythm much cleaner and easier to recognise.
+        pattern_ms = sum(on + gap for on, gap in pattern)
+        interval = max(interval, pattern_ms / 1000.0 + 0.08)
 
         now = time.time()
         if now - self.last_beep >= interval:

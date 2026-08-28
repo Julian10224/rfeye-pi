@@ -40,11 +40,7 @@ def _kiosk_guard_worker():
 def _start_kiosk_guard():
     if not os.environ.get("WAYLAND_DISPLAY"):
         return
-    threading.Thread(
-        target=_kiosk_guard_worker,
-        name="rfeye-kiosk-guard",
-        daemon=True,
-    ).start()
+    threading.Thread(target=_kiosk_guard_worker,name="rfeye-kiosk-guard",daemon=True).start()
 
 
 _start_kiosk_guard()
@@ -55,9 +51,6 @@ try:
 except Exception:
     pass
 
-# CUQI 3.5 profile hook. It is inert unless the display installer sets
-# RFEYE_DISPLAY_PROFILE=cuqi35, so the same source tree stays compatible with
-# the normal Elecrow build while this branch keeps its native 320x480 UI.
 try:
     from compact_display_patch import install_app_patch as install_compact_display_patch
     install_compact_display_patch()
@@ -71,10 +64,8 @@ DEFAULTS = {
     "physical_height": 480,
     "rotation": "cw",
     "fullscreen": True,
-
     "scan_start_hz": 380_000_000,
     "scan_end_hz": 395_000_000,
-
     "sample_rate": 2_048_000,
     "fft_size": 1024,
     "fft_blocks": 8,
@@ -102,7 +93,6 @@ DEFAULTS = {
     "confidence_confirm": 0.62,
     "confidence_clear": 0.30,
     "ui_fps": 20,
-
     "gain": "auto",
     "ppm": 0,
     "threshold_db": 10.0,
@@ -113,13 +103,10 @@ DEFAULTS = {
     "site_band_start_hz": 390_000_000,
     "site_band_end_hz": 395_000_000,
     "max_signals": 3,
-
     "muted": False,
     "demo_mode": False,
     "auto_demo_if_no_sdr": False,
     "audio_mode": "adaptive",
-
-    # Current main hardware profile: active TMB12A03 electromagnetic buzzer.
     "buzzer_gpio": 18,
     "buzzer_model": "TMB12A03",
     "buzzer_passive": False,
@@ -133,11 +120,9 @@ DEFAULTS = {
     "brightness": 1.0,
     "show_frequency": True,
     "show_brand_text": True,
-
     "touch_invert_x": False,
     "touch_invert_y": False,
-
-    "app_version": "0.7.17",
+    "app_version": "0.7.18",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/update/manifest.json",
     "title": "RF EYE",
 }

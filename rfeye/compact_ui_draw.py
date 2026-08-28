@@ -1,7 +1,12 @@
-"""Main/settings/spectrum drawing for RF Eye on a 320x480 portrait canvas."""
+"""Compact RF Eye drawing helpers for the CUQI 3.5-inch 320x480 portrait UI."""
 BG=(2,3,5); PANEL=(8,9,12); BLUE=(0,152,222); BLUE_BRIGHT=(28,190,255)
 WHITE=(224,229,236); DIM=(82,90,100); SEG_OFF=(34,35,31); GREEN=(57,205,91)
 YELLOW=(243,192,56); RED=(230,54,54)
+
+SETTINGS_TOP=66
+SETTINGS_STEP=39
+SETTINGS_HEIGHT=34
+SETTINGS_COUNT=10
 
 def _clamp(v, lo=0.0, hi=1.0): return max(lo,min(hi,v))
 
@@ -43,19 +48,60 @@ def draw_settings(app):
     app.ui.fill(BG); pygame.draw.rect(app.ui,(7,11,16),(0,0,320,60))
     app._text("‹",18,26,app.font_xl,BLUE_BRIGHT,center=True); app._text("SETTINGS",48,12,app.font_l,WHITE)
     app._text(f'RF EYE v{app.cfg.get("app_version","")}',50,39,app.font_s,DIM)
-    rows=[("Sound","MUTED" if app.cfg.get("muted") else "ON","toggle"),("Demo","ON" if app.cfg.get("demo_mode") else "OFF","toggle"),
-          ("Sensitivity",f'{app.cfg.get("threshold_db",12):.0f} dB',"value"),("Audio mode",app.cfg.get("audio_mode","adaptive").upper(),"value"),
-          ("Brightness",f'{int(app.cfg.get("brightness",1.0)*100)}%',"value"),("Freq labels","ON" if app.cfg.get("show_frequency") else "OFF","toggle"),
-          ("Wi-Fi",app._wifi_text(),"status"),("Update",app.update_message,"action"),("Spectrum","OPEN","action")]
+    rows=[
+        ("Sound","MUTED" if app.cfg.get("muted") else "ON","toggle"),
+        ("Demo","ON" if app.cfg.get("demo_mode") else "OFF","toggle"),
+        ("Sensitivity",f'{app.cfg.get("threshold_db",12):.0f} dB',"value"),
+        ("Audio mode",app.cfg.get("audio_mode","adaptive").upper(),"value"),
+        ("Brightness",f'{int(app.cfg.get("brightness",1.0)*100)}%',"value"),
+        ("Freq labels","ON" if app.cfg.get("show_frequency") else "OFF","toggle"),
+        ("Wi-Fi",app._wifi_text(),"status"),
+        ("Update",app.update_message,"action"),
+        ("Spectrum","OPEN","action"),
+        ("Debug","OPEN","action"),
+    ]
     for i,(label,value,kind) in enumerate(rows):
-        y=70+i*42; pygame.draw.rect(app.ui,(9,13,18),(8,y,304,36),border_radius=8); app._text(label,18,y+10,app.font_s,WHITE)
+        y=SETTINGS_TOP+i*SETTINGS_STEP
+        pygame.draw.rect(app.ui,(9,13,18),(8,y,304,SETTINGS_HEIGHT),border_radius=7)
+        app._text(label,18,y+9,app.font_s,WHITE)
         if kind=="toggle":
-            enabled=value=="ON"; pygame.draw.rect(app.ui,BLUE if enabled else (38,43,49),(260,y+8,42,20),border_radius=10)
-            pygame.draw.circle(app.ui,WHITE,(291 if enabled else 271,y+18),7)
+            enabled=value=="ON"; pygame.draw.rect(app.ui,BLUE if enabled else (38,43,49),(264,y+7,38,20),border_radius=10)
+            pygame.draw.circle(app.ui,WHITE,(292 if enabled else 274,y+17),7)
         else:
             col=GREEN if kind=="status" and value=="CONNECTED" else (RED if kind=="status" else BLUE_BRIGHT if kind=="action" else (150,201,226))
             shown=str(value); shown=shown if len(shown)<=13 else shown[:12]+"…"
-            surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(302-surf.get_width(),y+10))
+            surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(302-surf.get_width(),y+9))
+
+def draw_debug(app,snap):
+    import pygame, time
+    app.ui.fill(BG); pygame.draw.rect(app.ui,(7,11,16),(0,0,320,60))
+    app._text("‹",18,26,app.font_xl,BLUE_BRIGHT,center=True); app._text("DEBUG",48,10,app.font_l,WHITE)
+    app._text("LIVE PERFORMANCE",50,38,app.font_s,DIM)
+    age_ms=max(0.0,(time.time()-float(snap.get("last_update",0.0)))*1000.0) if snap.get("last_update") else 0.0
+    frame_ms=max(0.001,float(getattr(app,"debug_frame_ms",0.0) or 0.001))
+    rows=[
+        ("UI refresh",f"{frame_ms:.1f} ms / {1000.0/frame_ms:.1f} FPS"),
+        ("Data age",f"{age_ms:.0f} ms"),
+        ("Full cycle",f"{float(snap.get('cycle_ms',0)):.0f} ms"),
+        ("Mobile sweep",f"{float(snap.get('mobile_scan_ms',0)):.0f} ms"),
+        ("Site sweep",f"{float(snap.get('site_scan_ms',0)):.0f} ms"),
+        ("Last capture",f"{float(snap.get('capture_ms',0)):.0f} ms"),
+        ("Tune windows",str(int(snap.get("scan_windows",0)))),
+        ("SDR path",str(snap.get("sdr_path","?"))),
+        ("Backend",str(snap.get("status","?"))),
+    ]
+    y=66
+    for label,value in rows:
+        pygame.draw.rect(app.ui,(9,13,18),(8,y,304,34),border_radius=7)
+        app._text(label,16,y+5,app.font_s,DIM)
+        shown=value if len(value)<=20 else value[:19]+"…"
+        col=GREEN if label=="Backend" and value=="LIVE" else BLUE_BRIGHT
+        surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(304-surf.get_width(),y+17))
+        y+=38
+    err=str(snap.get("error","")).strip()
+    if err:
+        app._text("ERR "+err[-35:],160,421,app.font_s,RED,center=True)
+    app._text("tap top/bottom to return",160,463,app.font_s,DIM,center=True)
 
 def draw_spectrum(app,snap):
     import pygame

@@ -5,15 +5,15 @@ import builtins, os
 
 def _patch_app_class(cls):
     from compact_ui_controls import tap
-    from compact_ui_draw import draw_main, draw_settings, draw_spectrum
+    from compact_ui_draw import draw_main, draw_settings, draw_spectrum, draw_debug
     from compact_wifi_ui import draw as draw_wifi, draw_keyboard, key_at, rows
     old_init=cls.__init__
     def init(self,*args,**kwargs):
         old_init(self,*args,**kwargs)
         import pygame
         self.display_profile="cuqi35"
-        # Enforce the panel geometry even when an older ~/.config/rfeye/config.json
-        # still contains the original 800x480 Elecrow dimensions.
+        # Enforce native CUQI geometry even when an older config still contains
+        # the original Elecrow 800x480 / 480x800 dimensions.
         if (self.uw,self.uh,self.pw,self.ph)!=(320,480,480,320):
             self.uw,self.uh,self.pw,self.ph=320,480,480,320
             self.screen=pygame.display.set_mode((480,320),pygame.NOFRAME)
@@ -36,7 +36,7 @@ def _patch_app_class(cls):
         if self.cfg.get("touch_invert_y",False): uy=self.uh-1-uy
         return ux,uy
     cls.__init__=init; cls._present_rotated=present; cls._physical_to_ui=physical_to_ui; cls._tap=tap
-    cls._draw_main=draw_main; cls._draw_settings=draw_settings; cls._draw_spectrum=draw_spectrum
+    cls._draw_main=draw_main; cls._draw_settings=draw_settings; cls._draw_spectrum=draw_spectrum; cls._draw_debug=draw_debug
     cls._compact_wifi_rows=rows; cls._wifi_key_at=key_at; cls._draw_wifi_keyboard=draw_keyboard; cls._draw_wifi=draw_wifi
     return cls
 

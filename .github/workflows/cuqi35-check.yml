@@ -8,6 +8,8 @@ on:
     paths:
       - 'install-cuqi35.sh'
       - 'rfeye/compact_*.py'
+      - 'scripts/patch-*.py'
+      - 'scripts/build-release.sh'
       - 'scripts/generate-plymouth-assets-cuqi35.py'
 
 jobs:
@@ -15,9 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check installer shell syntax
-        run: bash -n install-cuqi35.sh
-      - name: Check compact Python modules
+      - name: Check installer and release shell syntax
+        run: |
+          bash -n install-cuqi35.sh
+          bash -n scripts/build-release.sh
+      - name: Check compact and main patch Python syntax
         run: >-
           python3 -m py_compile
           rfeye/compact_display_patch.py
@@ -25,3 +29,32 @@ jobs:
           rfeye/compact_ui_draw.py
           rfeye/compact_wifi_ui.py
           scripts/generate-plymouth-assets-cuqi35.py
+          scripts/patch-startup-splash.py
+          scripts/patch-radar-buzzer.py
+          scripts/patch-fast-scan.py
+          scripts/patch-persistent-sdr.py
+          scripts/patch-ctypes-sdr.py
+          scripts/patch-debug-menu.py
+      - name: Verify CUQI layout stays inside 320x480
+        run: |
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, 'rfeye')
+          import compact_ui_draw as ui
+          settings_bottom = ui.SETTINGS_TOP + (ui.SETTINGS_COUNT - 1) * ui.SETTINGS_STEP + ui.SETTINGS_HEIGHT
+          assert settings_bottom <= 480, settings_bottom
+          assert hasattr(ui, 'draw_debug')
+          print('settings bottom:', settings_bottom)
+          PY
+      - name: Exercise full installer patch chain
+        run: |
+          mkdir -p /tmp/rfeye-patch-test
+          cp rfeye/app.py /tmp/rfeye-patch-test/app.py
+          cp rfeye/sdr_backend.py /tmp/rfeye-patch-test/sdr_backend.py
+          python3 scripts/patch-startup-splash.py /tmp/rfeye-patch-test/app.py
+          python3 scripts/patch-radar-buzzer.py /tmp/rfeye-patch-test/app.py
+          python3 scripts/patch-fast-scan.py /tmp/rfeye-patch-test/sdr_backend.py
+          python3 scripts/patch-persistent-sdr.py /tmp/rfeye-patch-test/sdr_backend.py
+          python3 -m py_compile /tmp/rfeye-patch-test/app.py /tmp/rfeye-patch-test/sdr_backend.py
+          grep -q 'def _draw_debug' /tmp/rfeye-patch-test/app.py
+          grep -q 'CTYPES PERSISTENT' /tmp/rfeye-patch-test/sdr_backend.py
