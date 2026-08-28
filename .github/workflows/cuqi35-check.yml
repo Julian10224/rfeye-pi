@@ -1,0 +1,27 @@
+name: CUQI 3.5 fork checks
+
+on:
+  push:
+    branches:
+      - display-cuqi-35-portrait
+  pull_request:
+    paths:
+      - 'install-cuqi35.sh'
+      - 'rfeye/compact_*.py'
+      - 'scripts/generate-plymouth-assets-cuqi35.py'
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check installer shell syntax
+        run: bash -n install-cuqi35.sh
+      - name: Check compact Python modules
+        run: >-
+          python3 -m py_compile
+          rfeye/compact_display_patch.py
+          rfeye/compact_ui_controls.py
+          rfeye/compact_ui_draw.py
+          rfeye/compact_wifi_ui.py
+          scripts/generate-plymouth-assets-cuqi35.py
