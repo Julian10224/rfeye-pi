@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import sys
+import subprocess
 
 if len(sys.argv) != 2:
     raise SystemExit('usage: patch-persistent-sdr.py /path/to/sdr_backend.py')
@@ -127,3 +128,11 @@ s = s.replace(
 compile(s, str(p), 'exec')
 p.write_text(s)
 print('RF Eye persistent SDR patch installed:', p)
+
+# Keep the installer entry-point simple: this patch already runs after the other
+# app/backend patches, so install the debug timing page from here as the final
+# source transformation. That avoids an extra installer dependency/order issue.
+debug_patch = Path(__file__).with_name('patch-debug-menu.py')
+app_path = p.with_name('app.py')
+if debug_patch.exists() and app_path.exists():
+    subprocess.run([sys.executable, str(debug_patch), str(app_path), str(p)], check=True)
