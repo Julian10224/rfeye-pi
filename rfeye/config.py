@@ -55,10 +55,16 @@ def _start_kiosk_guard():
 _start_kiosk_guard()
 
 # Install RF Eye UI patches before app.py defines App.
-# The hook only touches the RF Eye App class and restores __build_class__ immediately.
+# The hooks only touch the RF Eye App class.
 try:
     from wifi_patch import install_app_patch
     install_app_patch()
+except Exception:
+    pass
+
+try:
+    from compact_display_patch import install_app_patch as install_compact_display_patch
+    install_compact_display_patch()
 except Exception:
     pass
 
@@ -131,8 +137,8 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.15",
-    "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
+    "app_version": "0.7.16",
+    "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/update/manifest.json",
     "title": "RF EYE",
 }
 
