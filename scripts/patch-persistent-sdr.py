@@ -16,9 +16,11 @@ if 'from rtlsdr import RtlSdr' not in s:
     )
 
 init_old = "        self._demo_forced=bool(cfg.get('demo_mode',False))\n"
-init_new = init_old + "        self.sdr=None; self.sdr_sample_rate=None; self.sdr_gain=None\n"
+init_new = init_old + "        self.sdr=None; self.sdr_sample_rate=None; self.sdr_gain=None; self._fft_window_cache={}\n"
 if init_old in s and 'self.sdr_sample_rate' not in s:
     s = s.replace(init_old, init_new, 1)
+elif 'self._fft_window_cache' not in s:
+    s=s.replace('        self.sdr=None; self.sdr_sample_rate=None; self.sdr_gain=None\n','        self.sdr=None; self.sdr_sample_rate=None; self.sdr_gain=None; self._fft_window_cache={}\n',1)
 
 stop_old = "    def stop(self):\n        self.running=False\n        if self.thread:self.thread.join(timeout=2.)\n"
 stop_new = """    def stop(self):
@@ -58,9 +60,9 @@ new_capture = '''    def _close_direct_sdr(self):
             if self.sdr_gain != wanted_gain:
                 self.sdr.gain=wanted_gain; self.sdr_gain=wanted_gain
             self.sdr.center_freq=int(center)
-            # Discard a very short retune transient, then capture the requested
-            # window. Keeping the USB device open removes repeated process/device
-            # startup without shortening the observation window itself.
+            # Keep the same retune settling margin and the same requested sample
+            # count. Speed comes from avoiding reopen/process overhead, not from
+            # observing less RF data.
             discard=max(4096, int(sr*0.006))
             self.sdr.read_samples(discard)
             return np.asarray(self.sdr.read_samples(int(count)),dtype=np.complex64)
@@ -86,11 +88,20 @@ new_capture = '''    def _close_direct_sdr(self):
             if p.returncode!=0 or len(out)<n*2:
                 msg=err.decode('utf-8','ignore').strip()[-240:];raise RuntimeError(msg or f'rtl_sdr exit {p.returncode}')
             raw=np.frombuffer(out,dtype=np.uint8).astype(np.float32); iq=(raw[0::2]-127.5)+1j*(raw[1::2]-127.5)
-        win=np.hanning(n).astype(np.float32); rows=[]
-        for i in range(min(blocks,len(iq)//n)):
-            x=iq[i*n:(i+1)*n].astype(np.complex64,copy=True); x-=np.mean(x); spectrum=np.fft.fftshift(np.fft.fft(x*win)); rows.append(20*np.log10(np.abs(spectrum)+1e-12))
-        if not rows:raise RuntimeError('no complete FFT blocks')
-        stack=np.vstack(rows); psd=np.percentile(stack,float(self.cfg.get('mobile_percentile',95)),axis=0) if transient else np.mean(stack,axis=0)
+
+        rows_count=min(blocks,len(iq)//n)
+        if rows_count<1:raise RuntimeError('no complete FFT blocks')
+        # Same FFTs as before, but process every block in one NumPy batch. This
+        # removes the Python loop on the Pi 3B+ without changing samples,
+        # windowing, FFT size, percentile, thresholds or confirmation logic.
+        matrix=np.asarray(iq[:rows_count*n],dtype=np.complex64).reshape(rows_count,n).copy()
+        matrix-=np.mean(matrix,axis=1,keepdims=True)
+        win=self._fft_window_cache.get(n)
+        if win is None:
+            win=np.hanning(n).astype(np.float32); self._fft_window_cache[n]=win
+        spectra=np.fft.fftshift(np.fft.fft(matrix*win,axis=1),axes=1)
+        stack=20*np.log10(np.abs(spectra)+1e-12)
+        psd=np.percentile(stack,float(self.cfg.get('mobile_percentile',95)),axis=0) if transient else np.mean(stack,axis=0)
         mid=len(psd)//2; lo=max(0,mid-2); hi=min(len(psd),mid+3)
         if lo>0 and hi<len(psd):
             side=np.r_[psd[max(0,lo-8):lo],psd[hi:min(len(psd),hi+8)]]; fill=float(np.median(side)); psd[lo:hi]=fill; stack[:,lo:hi]=fill
@@ -99,7 +110,6 @@ new_capture = '''    def _close_direct_sdr(self):
 '''
 s = s[:capture_start] + new_capture + s[capture_end:]
 
-# Close the persistent handle before an attempted USB reset.
 s = s.replace(
     "        self.last_usb_reset=now; exe=shutil.which('usbreset')\n",
     "        self.last_usb_reset=now; self._close_direct_sdr(); exe=shutil.which('usbreset')\n",

@@ -12,8 +12,6 @@ logo.sprite.SetPosition(logo.x, logo.y, -10);
 
 progress_box.image = Image("progress_box.png");
 progress_box.sprite = Sprite(progress_box.image);
-# Portrait display is rendered into a framebuffer rotated clockwise.
-# Moving left in framebuffer X moves the visible horizontal bar down.
 progress_box.x = ((screen_width - progress_box.image.GetWidth()) / 2) - 28;
 progress_box.y = (screen_height - progress_box.image.GetHeight()) / 2;
 progress_box.sprite.SetPosition(progress_box.x, progress_box.y, 0);
@@ -24,28 +22,18 @@ progress_bar.x = progress_box.x + 4;
 progress_bar.y = progress_box.y + 4;
 progress_bar.sprite.SetPosition(progress_bar.x, progress_bar.y, 1);
 
-fun draw_progress(value)
+fun progress_callback(duration, progress)
 {
-    if (value < 0.0) value = 0.0;
-    if (value > 1.0) value = 1.0;
-    height = Math.Int(progress_bar.original_image.GetHeight() * value);
+    # Visual feedback only: never hold Plymouth open to complete the bar. RF Eye
+    # should take the display immediately when userspace is ready. Raspberry Pi
+    # appliance boots often hand off around 50-60% of Plymouth's generic scale,
+    # so map that range to a visually complete bar without adding any delay.
+    visible = progress * 2.0;
+    if (visible < 0.0) visible = 0.0;
+    if (visible > 1.0) visible = 1.0;
+    height = Math.Int(progress_bar.original_image.GetHeight() * visible);
     if (height < 3) height = 3;
     progress_bar.image = progress_bar.original_image.Scale(progress_bar.original_image.GetWidth(), height);
     progress_bar.sprite.SetImage(progress_bar.image);
 }
-
-fun progress_callback(duration, progress)
-{
-    # Plymouth's reported boot progress commonly stops around 50-65% when a
-    # fast appliance reaches the graphical handoff. Remap it so the visible
-    # bar completes before Plymouth exits instead of appearing half-finished.
-    visible = progress * 1.75;
-    draw_progress(visible);
-}
 Plymouth.SetBootProgressFunction(progress_callback);
-
-fun quit_callback()
-{
-    draw_progress(1.0);
-}
-Plymouth.SetQuitFunction(quit_callback);
