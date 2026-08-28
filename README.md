@@ -16,6 +16,9 @@ RF Eye is a portrait RF-activity display for a Raspberry Pi, Elecrow 5-inch 800x
 - mouse cursor appears when the mouse is used and hides again automatically
 - Wi-Fi software updates from GitHub
 - automatic appliance-style startup
+- RF Eye Plymouth boot splash with progress bar
+- Raspberry Pi firmware logo and verbose boot status hidden
+- Raspberry Pi desktop panel/file-manager suppressed before RF Eye starts fullscreen
 
 ## Requirements
 
@@ -35,6 +38,12 @@ On a fresh Raspberry Pi OS Desktop installation, run:
 curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/install.sh | sudo bash
 sudo reboot
 ```
+
+The installer configures the display, RTL-SDR permissions, graphical auto-login, the RF Eye user service, the custom Plymouth theme and the kiosk/appliance session. On the next boot the intended flow is:
+
+`power on -> RF EYE boot splash -> RF EYE application loading screen -> RF EYE fullscreen`
+
+The Plymouth PNG assets are generated locally during installation by `scripts/generate-plymouth-assets.py`, so the repository contains the complete reproducible boot configuration without storing board-specific initramfs images.
 
 ## Wi-Fi setup
 
