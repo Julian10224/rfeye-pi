@@ -39,3 +39,10 @@ done < <(nmcli -t -f NAME,TYPE connection show)
 
 nmcli connection reload || true
 echo "RF Eye NetworkManager policy installed for ${TARGET_USER}."
+
+# install.sh calls this policy step after the kiosk service is configured, so it
+# is also a safe point to apply the conservative appliance boot optimization.
+OPTIMIZER="$(cd "$(dirname "$0")" && pwd)/optimize-rpi-appliance.sh"
+if [[ -f "$OPTIMIZER" ]]; then
+  bash "$OPTIMIZER"
+fi
