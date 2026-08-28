@@ -25,32 +25,29 @@ new = '''    def _sound_logic(self, snap):
         if lv < 0.15:
             return
 
-        # Keep every tone close to the common ~2.7 kHz piezo resonance.
-        # Large jumps away from resonance sound thin/harsh on small piezo discs.
+        # TMB12A03 is an ACTIVE buzzer with its own ~2.3 kHz oscillator.
+        # Frequency PWM makes it sound clipped/raspy. Different levels are
+        # therefore encoded as complete pulse patterns instead of carrier pitch.
         if lv > 0.72:
-            freq = int(self.cfg.get("buzzer_red_hz", 2925))
-            pulse_ms = int(self.cfg.get("buzzer_red_ms", 34))
+            on_ms = int(self.cfg.get("buzzer_red_ms", 75))
+            gap_ms = int(self.cfg.get("buzzer_red_gap_ms", 55))
+            pattern = [(on_ms, gap_ms), (on_ms, gap_ms), (on_ms, 0)]
         elif lv > 0.43:
-            freq = int(self.cfg.get("buzzer_yellow_hz", 2700))
-            pulse_ms = int(self.cfg.get("buzzer_yellow_ms", 39))
+            on_ms = int(self.cfg.get("buzzer_yellow_ms", 85))
+            gap_ms = int(self.cfg.get("buzzer_yellow_gap_ms", 70))
+            pattern = [(on_ms, gap_ms), (on_ms, 0)]
         else:
-            freq = int(self.cfg.get("buzzer_green_hz", 2475))
-            pulse_ms = int(self.cfg.get("buzzer_green_ms", 44))
+            on_ms = int(self.cfg.get("buzzer_green_ms", 95))
+            pattern = [(on_ms, 0)]
 
-        # Radar/Geiger cadence, but never so fast that a new pulse starts before
-        # the previous tone has cleanly ended. This preserves an audible gap.
         n = max(0.0, min(1.0, (lv - 0.15) / 0.85))
-        interval = max(0.085, 1.050 * (0.080 ** n))
+        interval = max(0.42, 1.35 * (0.31 ** n))
         if self.cfg.get("audio_mode", "adaptive") != "adaptive":
-            interval = 0.75
+            interval = 1.0
 
         now = time.time()
         if now - self.last_beep >= interval:
-            self.buzzer.beep(
-                frequency=freq,
-                duration_ms=pulse_ms,
-                duty=int(self.cfg.get("buzzer_duty", 50)),
-            )
+            self.buzzer.beep_pattern(pattern)
             self.last_beep = now
 
 '''
