@@ -12,6 +12,12 @@ def _patch_app_class(cls):
         old_init(self,*args,**kwargs)
         import pygame
         self.display_profile="cuqi35"
+        # Enforce the panel geometry even when an older ~/.config/rfeye/config.json
+        # still contains the original 800x480 Elecrow dimensions.
+        if (self.uw,self.uh,self.pw,self.ph)!=(320,480,480,320):
+            self.uw,self.uh,self.pw,self.ph=320,480,480,320
+            self.screen=pygame.display.set_mode((480,320),pygame.NOFRAME)
+            self.ui=pygame.Surface((320,480))
         self.font_s=pygame.font.Font(None,17); self.font_m=pygame.font.Font(None,21)
         self.font_l=pygame.font.Font(None,28); self.font_xl=pygame.font.Font(None,38)
         if self.settings_icon is not None: self.settings_icon=pygame.transform.smoothscale(self.settings_icon,(32,32))
