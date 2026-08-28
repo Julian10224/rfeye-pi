@@ -61,9 +61,6 @@ new_capture = '''    def _close_direct_sdr(self):
             if self.sdr_gain != wanted_gain:
                 self.sdr.gain=wanted_gain; self.sdr_gain=wanted_gain
             self.sdr.center_freq=int(center)
-            # Keep the same retune settling margin and requested sample count.
-            # Normal capture time is still determined by the RF observation
-            # window, not by process startup or multi-second fallback timeouts.
             discard=max(4096, int(sr*0.006))
             self.sdr.read_samples(discard)
             return np.asarray(self.sdr.read_samples(int(count)),dtype=np.complex64)
@@ -72,14 +69,9 @@ new_capture = '''    def _close_direct_sdr(self):
             raise RuntimeError('direct RTL-SDR read failed: ' + str(e))
 
     def _capture(self,center,sr,n,blocks,transient=False):
-        # pyrtlsdr is installed by RF Eye and is the real-time path. If it is
-        # present but a device read fails, abort this scan cycle immediately so
-        # recovery can run. The old code fell back to a 3-second rtl_sdr timeout
-        # for every tuning window, which could turn one failed cycle into ~24 s.
         if RtlSdr is not None:
             iq=self._direct_samples(center,sr,n*blocks)
         else:
-            # Compatibility fallback only when pyrtlsdr itself is unavailable.
             exe=shutil.which('rtl_sdr')
             if not exe:raise RuntimeError('rtl_sdr command not found')
             cmd=[exe,'-f',str(int(center)),'-s',str(int(sr)),'-p',str(int(self.cfg.get('ppm',0)))]
@@ -100,9 +92,6 @@ new_capture = '''    def _close_direct_sdr(self):
             raise RuntimeError('short RTL-SDR capture')
         rows_count=min(blocks,len(iq)//n)
         if rows_count<1:raise RuntimeError('no complete FFT blocks')
-
-        # Process all FFT blocks in one NumPy batch. Samples, windowing, FFT
-        # size, percentiles and thresholds are unchanged.
         matrix=np.asarray(iq[:rows_count*n],dtype=np.complex64).reshape(rows_count,n).copy()
         matrix-=np.mean(matrix,axis=1,keepdims=True)
         win=self._fft_window_cache.get(n)
@@ -129,17 +118,18 @@ compile(s, str(p), 'exec')
 p.write_text(s)
 print('RF Eye persistent SDR patch installed:', p)
 
-# Replace the pyrtlsdr path with a small ctypes wrapper around librtlsdr's
-# stable C API. This keeps the RTL-SDR open across all tuning windows and also
-# works with RTL-SDR Blog V4 libraries that do not expose rtlsdr_set_dithering.
 ctypes_patch = Path(__file__).with_name('patch-ctypes-sdr.py')
 if ctypes_patch.exists():
     subprocess.run([sys.executable, str(ctypes_patch), str(p)], check=True)
 
-# Keep the installer entry-point simple: this patch already runs after the other
-# app/backend patches, so install the debug timing page from here as the final
-# source transformation. That avoids an extra installer dependency/order issue.
 debug_patch = Path(__file__).with_name('patch-debug-menu.py')
 app_path = p.with_name('app.py')
 if debug_patch.exists() and app_path.exists():
     subprocess.run([sys.executable, str(debug_patch), str(app_path), str(p)], check=True)
+
+# Final UI correction: the compact Debug-enabled Settings layout uses different
+# row geometry than the original screen, so touch hitboxes must be updated too.
+# Also extends _text with right alignment used by the debug value column.
+debug_fix = Path(__file__).with_name('patch-debug-fix.py')
+if debug_fix.exists() and app_path.exists():
+    subprocess.run([sys.executable, str(debug_fix), str(app_path)], check=True)
