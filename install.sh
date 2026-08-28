@@ -24,6 +24,11 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3-rpi.gpio rtl-sdr librtlsdr0 librtlsdr-dev usbutils curl unzip kanshi network-manager \
   plymouth plymouth-themes initramfs-tools
 
+# GPIO18 on Raspberry Pi 3B+ supports hardware PWM. pigpio is optional: RF Eye
+# falls back to RPi.GPIO if these packages are unavailable on the installed OS.
+DEBIAN_FRONTEND=noninteractive apt-get install -y pigpio python3-pigpio || true
+systemctl enable --now pigpiod.service 2>/dev/null || true
+
 echo "[2/9] Downloading RF Eye..."
 rm -rf "$SRC_ROOT"
 if [[ -d "${RFEYE_LOCAL_SOURCE:-}" ]]; then
@@ -39,6 +44,7 @@ python3 -m venv --system-site-packages "$APP_ROOT/.venv"
 "$APP_ROOT/.venv/bin/pip" install --upgrade pip wheel
 "$APP_ROOT/.venv/bin/pip" install -r "$SRC_ROOT/requirements.txt"
 python3 "$SRC_ROOT/scripts/patch-startup-splash.py" "$APP_ROOT/rfeye/app.py"
+python3 "$SRC_ROOT/scripts/patch-radar-buzzer.py" "$APP_ROOT/rfeye/app.py"
 chown -R "$TARGET_USER:$TARGET_USER" "$APP_ROOT/rfeye" "$SRC_ROOT"
 
 echo "[3/9] Configuring RTL-SDR..."
@@ -73,6 +79,9 @@ EOF
 fi
 
 grep -q '^disable_splash=1$' "$CONFIG" || printf '\n# RF Eye appliance boot\ndisable_splash=1\n' >> "$CONFIG"
+# Raspberry Pi OS Bookworm only loads the matching initramfs when this is enabled.
+grep -q '^auto_initramfs=1$' "$CONFIG" || printf 'auto_initramfs=1\n' >> "$CONFIG"
+
 CMDLINE="$BOOT/cmdline.txt"
 cp -n "$CMDLINE" "${CMDLINE}.rfeye-backup" || true
 python3 - "$CMDLINE" <<'PY'
@@ -96,7 +105,51 @@ install -m 0644 "$SRC_ROOT/config/plymouth/rfeye/rfeye.plymouth" "$THEME_DIR/rfe
 install -m 0644 "$SRC_ROOT/config/plymouth/rfeye/rfeye.script" "$THEME_DIR/rfeye.script"
 python3 "$SRC_ROOT/scripts/generate-plymouth-assets.py" "$THEME_DIR"
 chmod 0644 "$THEME_DIR"/*.png
-plymouth-set-default-theme -R rfeye
+
+# Raspberry Pi 3B+/Bookworm reliability: make sure the DRM/display modules and
+# Plymouth assets are actually inside the initramfs, then rebuild every kernel.
+if [[ -f /etc/initramfs-tools/initramfs.conf ]]; then
+  grep -q '^MODULES=' /etc/initramfs-tools/initramfs.conf \
+    && sed -i 's/^MODULES=.*/MODULES=most/' /etc/initramfs-tools/initramfs.conf \
+    || printf '\nMODULES=most\n' >> /etc/initramfs-tools/initramfs.conf
+fi
+if [[ -f /etc/initramfs-tools/update-initramfs.conf ]]; then
+  grep -q '^update_initramfs=' /etc/initramfs-tools/update-initramfs.conf \
+    && sed -i 's/^update_initramfs=.*/update_initramfs=all/' /etc/initramfs-tools/update-initramfs.conf \
+    || printf '\nupdate_initramfs=all\n' >> /etc/initramfs-tools/update-initramfs.conf
+fi
+
+plymouth-set-default-theme rfeye
+update-initramfs -u -k all
+
+# Fallback for Pi firmware naming. On a Pi 3B+ the firmware expects initramfs8
+# with a 64-bit kernel and initramfs7 with a 32-bit kernel.
+MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
+ARCH="$(uname -m)"
+EXPECTED_INITRAMFS=""
+if [[ "$MODEL" == *"Raspberry Pi 3"* ]]; then
+  [[ "$ARCH" == "aarch64" ]] && EXPECTED_INITRAMFS="initramfs8" || EXPECTED_INITRAMFS="initramfs7"
+elif [[ "$MODEL" == *"Raspberry Pi 4"* ]]; then
+  [[ "$ARCH" == "aarch64" ]] && EXPECTED_INITRAMFS="initramfs8" || EXPECTED_INITRAMFS="initramfs7l"
+elif [[ "$MODEL" == *"Raspberry Pi 5"* ]]; then
+  EXPECTED_INITRAMFS="initramfs_2712"
+fi
+
+if [[ -n "$EXPECTED_INITRAMFS" ]]; then
+  IMAGE="$BOOT/$EXPECTED_INITRAMFS"
+  if [[ ! -f "$IMAGE" ]] || ! lsinitramfs "$IMAGE" 2>/dev/null | grep -q 'usr/share/plymouth/themes/rfeye/rfeye.script'; then
+    echo "Rebuilding $EXPECTED_INITRAMFS explicitly for $MODEL ($ARCH)..."
+    TMP_IMAGE="${IMAGE}.rfeye-new"
+    mkinitramfs -o "$TMP_IMAGE" "$(uname -r)"
+    mv -f "$TMP_IMAGE" "$IMAGE"
+  fi
+  if lsinitramfs "$IMAGE" 2>/dev/null | grep -q 'usr/share/plymouth/themes/rfeye/rfeye.script'; then
+    echo "Verified RF Eye Plymouth theme in $IMAGE"
+  else
+    echo "WARNING: RF Eye theme could not be verified in $IMAGE" >&2
+  fi
+fi
+sync
 
 bash "$SRC_ROOT/scripts/apply-desktop-splash.sh" "$TARGET_USER" "$TARGET_HOME" "$THEME_DIR"
 
