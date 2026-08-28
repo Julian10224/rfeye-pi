@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -u
-sleep 2
+
+# Do not add a fixed sleep here. The user service already waits for the Wayland
+# socket, so any extra delay only makes the appliance feel slower.
 pkill -x wf-panel-pi 2>/dev/null || true
 pkill -x squeekboard 2>/dev/null || true
 pkill -9 -x rtl_sdr 2>/dev/null || true
