@@ -8,6 +8,15 @@ if len(sys.argv) != 2:
 app = Path(sys.argv[1])
 s = app.read_text()
 
+# RF Eye uses the display/font modules plus a GPIO buzzer. Initializing every
+# pygame subsystem also probes audio and other desktop facilities and was
+# measured to add avoidable startup latency. Initialize only what the UI needs.
+s = s.replace(
+    '        pygame.init()\n        pygame.font.init()\n',
+    '        pygame.display.init()\n        pygame.font.init()\n',
+    1,
+)
+
 # Keep exactly one very early splash draw. Repainting four intermediate startup
 # stages costs noticeable time on a Pi 3B+ and does not make initialization faster.
 if 'def _startup_splash(' not in s:
