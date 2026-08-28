@@ -31,6 +31,22 @@ mask_unit() {
 mask_unit NetworkManager-wait-online.service
 mask_unit systemd-networkd-wait-online.service
 
+# cloud-init is intended for provisioning cloud/first-boot images. On the RF Eye
+# appliance it was measured on the critical boot chain and added roughly nine
+# seconds before NetworkManager/display startup. RF Eye configures networking,
+# hostname and application state itself after installation, so keep cloud-init
+# disabled unless an integrator explicitly opts back in.
+if [[ "${RFEYE_KEEP_CLOUD_INIT:-0}" != "1" ]]; then
+  mkdir -p /etc/cloud
+  touch /etc/cloud/cloud-init.disabled
+  mask_unit cloud-init-main.service
+  mask_unit cloud-init-local.service
+  mask_unit cloud-init-network.service
+  mask_unit cloud-config.service
+  mask_unit cloud-final.service
+  mask_unit cloud-init.target
+fi
+
 # Printing is not part of the appliance.
 if [[ "${RFEYE_KEEP_PRINTING:-0}" != "1" ]]; then
   mask_unit cups.service
@@ -85,6 +101,7 @@ mkdir -p /var/lib/rfeye
   echo "RF Eye appliance boot optimization"
   echo "Applied: $(date -Is 2>/dev/null || date)"
   echo "NetworkManager remains enabled; wait-online disabled."
+  echo "cloud-init disabled unless RFEYE_KEEP_CLOUD_INIT=1."
   echo "Optional services can be retained with RFEYE_KEEP_* environment flags."
 } > "$action_log"
 
