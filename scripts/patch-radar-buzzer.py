@@ -21,6 +21,14 @@ if needle in s and 'TMB12A03 active buzzer' not in s:
         1,
     )
 
+# One-shot boot acknowledgement. Do not sound merely because the UI exists:
+# wait until the RF backend reports LIVE, so the rhythm confirms functionality.
+if 'self.ready_chime_done' not in s:
+    init_needle = '        self.last_beep = 0.0\n'
+    if init_needle not in s:
+        raise SystemExit('ready chime init point missing')
+    s = s.replace(init_needle, init_needle + '        self.ready_chime_done = False\n', 1)
+
 start = s.find('    def _sound_logic(self, snap):\n')
 end = s.find('    def _text(', start)
 if start < 0 or end < 0:
@@ -30,6 +38,17 @@ new = '''    def _sound_logic(self, snap):
         if self.cfg.get("muted", False):
             self.buzzer.off()
             return
+
+        # TMB12A03 is an active buzzer with one fixed pitch, so the startup
+        # "jingle" is a distinct short-short-long rhythm. It is played exactly
+        # once, only after a real SDR scan has reached LIVE state.
+        if not self.ready_chime_done and snap.get("status") == "LIVE":
+            self.ready_chime_done = True
+            if self.cfg.get("startup_chime", True):
+                self.buzzer.beep_pattern([(70, 55), (70, 60), (175, 0)])
+                self.last_beep = time.time() + 0.25
+            return
+
         peaks = snap["peaks"]
         if not peaks:
             return
