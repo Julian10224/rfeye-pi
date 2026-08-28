@@ -14,17 +14,18 @@ TARGET_USER="${SUDO_USER:-$(logname 2>/dev/null || echo julian)}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 TARGET_UID="$(id -u "$TARGET_USER")"
 
-echo "[1/8] Installing packages..."
+echo "[1/9] Installing packages..."
 apt-get update
 # Configure the Dutch Wi-Fi regulatory domain so 2.4/5 GHz scanning uses NL rules.
 if command -v raspi-config >/dev/null 2>&1; then
   raspi-config nonint do_wifi_country NL || true
 fi
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  git python3 python3-venv python3-pip python3-numpy python3-pygame \
-  python3-rpi.gpio rtl-sdr librtlsdr0 librtlsdr-dev usbutils curl unzip kanshi network-manager
+  git python3 python3-venv python3-pip python3-numpy python3-pygame python3-pil \
+  python3-rpi.gpio rtl-sdr librtlsdr0 librtlsdr-dev usbutils curl unzip kanshi network-manager \
+  plymouth plymouth-themes initramfs-tools
 
-echo "[2/8] Downloading RF Eye..."
+echo "[2/9] Downloading RF Eye..."
 rm -rf "$SRC_ROOT"
 if [[ -d "${RFEYE_LOCAL_SOURCE:-}" ]]; then
   cp -a "$RFEYE_LOCAL_SOURCE" "$SRC_ROOT"
@@ -38,16 +39,18 @@ cp -a "$SRC_ROOT/rfeye/." "$APP_ROOT/rfeye/"
 python3 -m venv --system-site-packages "$APP_ROOT/.venv"
 "$APP_ROOT/.venv/bin/pip" install --upgrade pip wheel
 "$APP_ROOT/.venv/bin/pip" install -r "$SRC_ROOT/requirements.txt"
+# Keep the final transition from Plymouth to the app in the same RF Eye style.
+python3 "$SRC_ROOT/scripts/patch-startup-splash.py" "$APP_ROOT/rfeye/app.py"
 chown -R "$TARGET_USER:$TARGET_USER" "$APP_ROOT/rfeye" "$SRC_ROOT"
 
-echo "[3/8] Configuring RTL-SDR..."
+echo "[3/9] Configuring RTL-SDR..."
 cat >/etc/modprobe.d/rfeye-rtl-sdr.conf <<'EOF'
 blacklist dvb_usb_rtl28xxu
 blacklist rtl2832
 blacklist rtl2830
 EOF
 
-echo "[4/8] Configuring Elecrow HDMI display..."
+echo "[4/9] Configuring Elecrow HDMI display and RF Eye boot splash..."
 BOOT=/boot/firmware
 [[ -d "$BOOT" ]] || BOOT=/boot
 CONFIG="$BOOT/config.txt"
@@ -71,15 +74,46 @@ dtoverlay=ads7846,cs=1,penirq=25,penirq_pull=2,speed=50000,keep_vref_on=0,swapxy
 EOF
 fi
 
-echo "[5/8] Installing appliance session..."
+# Hide the Raspberry Pi firmware logo and verbose kernel/systemd output while
+# keeping Plymouth enabled for the RF Eye splash.
+grep -q '^disable_splash=1$' "$CONFIG" || printf '\n# RF Eye appliance boot\ndisable_splash=1\n' >> "$CONFIG"
+CMDLINE="$BOOT/cmdline.txt"
+cp -n "$CMDLINE" "${CMDLINE}.rfeye-backup" || true
+python3 - "$CMDLINE" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+items = p.read_text().strip().split()
+for value in [
+    'quiet', 'splash', 'plymouth.ignore-serial-consoles', 'logo.nologo',
+    'vt.global_cursor_default=0', 'loglevel=3', 'systemd.show_status=false',
+    'rd.systemd.show_status=false'
+]:
+    if value not in items:
+        items.append(value)
+p.write_text(' '.join(items) + '\n')
+PY
+
+# Install the RF Eye Plymouth theme and rebuild initramfs using Raspberry Pi OS tooling.
+THEME_DIR=/usr/share/plymouth/themes/rfeye
+mkdir -p "$THEME_DIR"
+install -m 0644 "$SRC_ROOT/config/plymouth/rfeye/rfeye.plymouth" "$THEME_DIR/rfeye.plymouth"
+install -m 0644 "$SRC_ROOT/config/plymouth/rfeye/rfeye.script" "$THEME_DIR/rfeye.script"
+python3 "$SRC_ROOT/scripts/generate-plymouth-assets.py" "$THEME_DIR"
+chmod 0644 "$THEME_DIR"/*.png
+plymouth-set-default-theme -R rfeye
+
+echo "[5/9] RF Eye boot splash installed."
+
+echo "[6/9] Installing appliance session..."
 mkdir -p "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi" "$TARGET_HOME/.config/systemd/user/default.target.wants"
 
-# Raspberry Pi OS runs both the system and user Labwc autostarts. Remove the
-# desktop panel from the system autostart so it cannot cover the RF Eye kiosk.
+# Raspberry Pi OS can start desktop chrome from the system Labwc autostart.
+# Remove it there, rather than only killing the child process after login.
 SYSTEM_LABWC_AUTOSTART=/etc/xdg/labwc/autostart
 if [[ -f "$SYSTEM_LABWC_AUTOSTART" ]]; then
   cp -n "$SYSTEM_LABWC_AUTOSTART" "${SYSTEM_LABWC_AUTOSTART}.rfeye-backup" || true
-  sed -i -E '/(^|[[:space:]])(wf-panel-pi|lxpanel)([[:space:]]|$)/d' "$SYSTEM_LABWC_AUTOSTART"
+  sed -i -E '/(^|[[:space:]])(wf-panel-pi|pcmanfm-pi|lxpanel)([[:space:]]|$)/d' "$SYSTEM_LABWC_AUTOSTART"
 fi
 
 CONNECTED_OUTPUT=""
@@ -99,13 +133,22 @@ profile {
 EOF
 cp "$SRC_ROOT/scripts/start-rfeye.sh" "$APP_ROOT/start-rfeye.sh"
 chmod +x "$APP_ROOT/start-rfeye.sh"
-cat > "$TARGET_HOME/.config/labwc/autostart" <<EOF
+cat > "$TARGET_HOME/.config/labwc/autostart" <<'EOF'
 #!/bin/sh
+# RF Eye appliance session: suppress any desktop chrome that still respawns.
+(
+  i=0
+  while [ "$i" -lt 45 ]; do
+    pgrep -f '^/bin/sh /usr/bin/lwrespawn /usr/bin/wf-panel-pi$' | xargs -r kill 2>/dev/null || true
+    pgrep -f '^/bin/sh /usr/bin/lwrespawn /usr/bin/pcmanfm-pi$' | xargs -r kill 2>/dev/null || true
+    pkill -x wf-panel-pi 2>/dev/null || true
+    pkill -x pcmanfm-pi 2>/dev/null || true
+    pkill -x squeekboard 2>/dev/null || true
+    i=$((i + 1))
+    sleep 1
+  done
+) &
 /usr/bin/kanshi &
-sleep 2
-pkill -x wf-panel-pi 2>/dev/null || true
-pkill -x lxpanel 2>/dev/null || true
-pkill -x squeekboard 2>/dev/null || true
 # RF Eye itself is managed by rfeye-user.service. Do not launch a second copy here.
 EOF
 cat > "$TARGET_HOME/.config/systemd/user/rfeye-user.service" <<EOF
@@ -137,7 +180,7 @@ Hidden=true
 EOF
 chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config/labwc" "$TARGET_HOME/.config/autostart" "$TARGET_HOME/.config/kanshi" "$TARGET_HOME/.config/systemd"
 
-echo "[6/8] Configuring permissions and autologin..."
+echo "[7/9] Configuring permissions and autologin..."
 usermod -aG video,render,input,gpio,plugdev "$TARGET_USER" || true
 if command -v raspi-config >/dev/null 2>&1; then
   raspi-config nonint do_boot_behaviour B4 || true
@@ -145,27 +188,28 @@ fi
 systemctl disable --now rfeye.service 2>/dev/null || true
 loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 
-echo "[7/8] Configuring Wi-Fi updater..."
+echo "[8/9] Configuring Wi-Fi updater..."
 MANIFEST_URL="https://raw.githubusercontent.com/${REPO_SLUG}/main/update/manifest.json"
 python3 - "$APP_ROOT/rfeye/config.py" "$MANIFEST_URL" <<'PY'
 from pathlib import Path
 import sys
-p=Path(sys.argv[1]); url=sys.argv[2]
-s=p.read_text()
-s=s.replace('"update_manifest_url": "",', f'"update_manifest_url": "{url}",')
+p = Path(sys.argv[1])
+url = sys.argv[2]
+s = p.read_text()
+s = s.replace('"update_manifest_url": "",', f'"update_manifest_url": "{url}",')
 p.write_text(s)
 PY
 
 VERSION="$(cat "$SRC_ROOT/VERSION")"
 echo "Installed RF Eye ${VERSION}"
-echo "[8/8] Finished."
+echo "[9/9] Finished."
 cat <<EOF
 
 RF Eye is installed.
 Reboot with:
   sudo reboot
 
-After reboot the Raspberry Pi desktop auto-login starts RF Eye fullscreen.
+After reboot RF Eye starts as an appliance: custom boot splash, no Raspberry Pi desktop chrome, then RF Eye fullscreen.
 Updater manifest:
   ${MANIFEST_URL}
 EOF
