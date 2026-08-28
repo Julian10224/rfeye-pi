@@ -103,6 +103,11 @@ python3 "$SRC_ROOT/scripts/generate-plymouth-assets.py" "$THEME_DIR"
 chmod 0644 "$THEME_DIR"/*.png
 plymouth-set-default-theme -R rfeye
 
+# Make any short desktop/login transition visually identical to RF Eye.
+# This also disables Trash/Documents/mount icons and points PCManFM at an
+# intentionally empty desktop folder.
+bash "$SRC_ROOT/scripts/apply-desktop-splash.sh" "$TARGET_USER" "$TARGET_HOME" "$THEME_DIR"
+
 echo "[5/9] RF Eye boot splash installed."
 
 echo "[6/9] Installing appliance session..."
