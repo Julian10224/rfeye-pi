@@ -18,57 +18,17 @@ mkdir -p "$WALL_DIR" "$EMPTY_DESKTOP"
 if [[ -f "$THEME_DIR/splash.png" ]]; then
   install -m 0644 "$THEME_DIR/splash.png" "$WALLPAPER"
 else
-  python3 - "$WALLPAPER" <<'PY'
-from pathlib import Path
-import sys
-from PIL import Image, ImageDraw, ImageFont
-
-out = Path(sys.argv[1])
-W, H = 800, 480
-blue = (28, 190, 255)
-dim = (86, 126, 146)
-img = Image.new('RGB', (W, H), (0, 0, 0))
-draw = ImageDraw.Draw(img)
-fonts = [
-    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-    '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
-]
-font_path = next((p for p in fonts if Path(p).exists()), None)
-if font_path:
-    title = ImageFont.truetype(font_path, 72)
-    subtitle = ImageFont.truetype(font_path, 18)
-else:
-    title = subtitle = ImageFont.load_default()
-
-def centered(text, y, font, fill):
-    box = draw.textbbox((0, 0), text, font=font)
-    x = (W - (box[2] - box[0])) // 2
-    draw.text((x, y), text, font=font, fill=fill)
-
-centered('RF EYE', 170, title, blue)
-centered('STARTING SYSTEM', 266, subtitle, dim)
-img.save(out)
-PY
-  chmod 0644 "$WALLPAPER"
+  python3 "$(dirname "$0")/generate-plymouth-assets.py" /tmp/rfeye-desktop-assets
+  install -m 0644 /tmp/rfeye-desktop-assets/splash.png "$WALLPAPER"
 fi
 
-set_conf() {
-  local conf="$1"
-  mkdir -p "$(dirname "$conf")"
-  python3 - "$conf" "$WALLPAPER" "$EMPTY_DESKTOP" <<'PY'
+python3 - "$TARGET_HOME" "$WALLPAPER" "$EMPTY_DESKTOP" <<'PY'
 from pathlib import Path
 import sys
 
-path = Path(sys.argv[1])
+home = Path(sys.argv[1])
 wallpaper = sys.argv[2]
 empty_desktop = sys.argv[3]
-
-lines = path.read_text().splitlines() if path.exists() else ['[*]']
-if not lines:
-    lines = ['[*]']
-if not any(line.strip() == '[*]' for line in lines):
-    lines.insert(0, '[*]')
-
 values = {
     'wallpaper_mode': 'crop',
     'wallpaper_common': '1',
@@ -77,66 +37,56 @@ values = {
     'show_wm_menu': '0',
     'folder': empty_desktop,
     'show_documents': '0',
+    'show_home': '0',
     'show_trash': '0',
     'show_mounts': '0',
 }
 
-seen = set()
-out = []
-in_global = False
-for line in lines:
-    stripped = line.strip()
-    if stripped.startswith('[') and stripped.endswith(']'):
-        if in_global:
-            for key, value in values.items():
-                if key not in seen:
-                    out.append(f'{key}={value}')
-        in_global = stripped == '[*]'
-        if in_global:
-            seen = set()
-        out.append(line)
-        continue
-    if in_global and '=' in line:
-        key = line.split('=', 1)[0].strip()
-        if key in values:
-            out.append(f'{key}={values[key]}')
-            seen.add(key)
-            continue
-    out.append(line)
+paths = []
+for root in (Path('/etc/xdg/pcmanfm'), home / '.config/pcmanfm'):
+    if root.exists():
+        paths.extend(root.rglob('desktop-items-*.conf'))
 
-if in_global:
+# Ensure both standard profiles exist even on a fresh image.
+for profile in ('default', 'LXDE-pi'):
+    p = home / '.config/pcmanfm' / profile / 'desktop-items-0.conf'
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('[*]\n')
+        paths.append(p)
+
+for path in sorted(set(paths)):
+    lines = path.read_text().splitlines() if path.exists() else ['[*]']
+    if not lines:
+        lines = ['[*]']
+    if not any(line.strip() == '[*]' for line in lines):
+        lines.insert(0, '[*]')
+
+    seen = set()
+    out = []
+    for line in lines:
+        if '=' in line and not line.lstrip().startswith('#'):
+            key = line.split('=', 1)[0].strip()
+            if key in values:
+                out.append(f'{key}={values[key]}')
+                seen.add(key)
+                continue
+        out.append(line)
     for key, value in values.items():
         if key not in seen:
             out.append(f'{key}={value}')
-
-path.write_text('\n'.join(out).rstrip() + '\n')
+    path.write_text('\n'.join(out).rstrip() + '\n')
+    print('RF Eye desktop config:', path)
 PY
-}
 
-for profile in default LXDE-pi; do
-  set_conf "/etc/xdg/pcmanfm/${profile}/desktop-items-0.conf"
-  [[ ! -f "/etc/xdg/pcmanfm/${profile}/desktop-items-1.conf" ]] || \
-    set_conf "/etc/xdg/pcmanfm/${profile}/desktop-items-1.conf"
-  set_conf "$TARGET_HOME/.config/pcmanfm/${profile}/desktop-items-0.conf"
-done
+chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config/pcmanfm" "$EMPTY_DESKTOP" 2>/dev/null || true
 
-chown -R "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/.config/pcmanfm" "$EMPTY_DESKTOP"
-
-# Refresh an already running desktop when possible. A reboot is still the
-# definitive test because the goal is to mask the short login transition.
-TARGET_UID="$(id -u "$TARGET_USER")"
-sudo -u "$TARGET_USER" env \
-  DISPLAY="${DISPLAY:-:0}" \
-  XDG_RUNTIME_DIR="/run/user/${TARGET_UID}" \
-  pcmanfm --set-wallpaper="$WALLPAPER" --wallpaper-mode=crop \
-  >/dev/null 2>&1 || true
-sudo -u "$TARGET_USER" env \
-  DISPLAY="${DISPLAY:-:0}" \
-  XDG_RUNTIME_DIR="/run/user/${TARGET_UID}" \
-  pcmanfm --reconfigure >/dev/null 2>&1 || true
+# Stop the desktop process itself. This prevents a per-output PCManFM config
+# generated during login from briefly drawing Trash/Wastebasket or mounts.
+pkill -x pcmanfm 2>/dev/null || true
+pkill -x pcmanfm-pi 2>/dev/null || true
 
 echo "RF Eye desktop transition installed."
 echo "Wallpaper: $WALLPAPER"
-echo "Desktop icons: disabled"
+echo "Desktop icons: disabled on all detected outputs"
 echo "Desktop folder: $EMPTY_DESKTOP"
-echo "Reboot to verify the complete boot transition."
