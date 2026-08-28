@@ -25,7 +25,7 @@ TARGET_USER="${SUDO_USER:-$(logname 2>/dev/null || echo pi)}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 [[ -n "$TARGET_HOME" ]] || { echo "Could not determine home directory for $TARGET_USER"; exit 1; }
 
-echo "[CUQI 1/7] Preparing RF Eye display fork..."
+echo "[CUQI 1/8] Preparing RF Eye display fork..."
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 libinput-tools evtest
 
@@ -36,8 +36,8 @@ trap cleanup EXIT
 git clone --depth 1 --branch "$REPO_BRANCH" "https://github.com/${REPO_SLUG}.git" "$TMP_ROOT/src"
 
 # Reuse the normal RF Eye appliance installer so SDR, Wi-Fi, updater,
-# autologin, splash and permissions stay aligned with the primary firmware.
-echo "[CUQI 2/7] Installing RF Eye appliance core..."
+# autologin, splash infrastructure and permissions stay aligned with main.
+echo "[CUQI 2/8] Installing RF Eye appliance core..."
 RFEYE_LOCAL_SOURCE="$TMP_ROOT/src" RFEYE_REPO="$REPO_SLUG" bash "$TMP_ROOT/src/install.sh"
 
 BOOT=/boot/firmware
@@ -45,7 +45,7 @@ BOOT=/boot/firmware
 CONFIG="$BOOT/config.txt"
 cp -n "$CONFIG" "${CONFIG}.rfeye-cuqi35-backup" || true
 
-echo "[CUQI 3/7] Configuring native 480x320 SPI/DRM display..."
+echo "[CUQI 3/8] Configuring native 480x320 SPI/DRM display..."
 python3 - "$CONFIG" "$SPI_HZ" "$TOUCH_OPTS" <<'PY'
 from pathlib import Path
 import sys
@@ -68,7 +68,7 @@ for line in lines:
     if skip:
         continue
 
-    # Remove legacy display overlays that conflict with the modern DRM panel.
+    # Remove legacy/duplicate LCD overlays that can claim the same SPI/GPIOs.
     if stripped.startswith((
         "dtoverlay=piscreen",
         "dtoverlay=mhs35",
@@ -76,11 +76,16 @@ for line in lines:
         "dtoverlay=ads7846",
     )):
         continue
+
+    # Make the SPI DRM panel the appliance's primary graphics device. The
+    # piscreen overlay itself creates a DRM card suitable for labwc/Wayland.
+    if stripped.startswith("dtoverlay=vc4-kms-v3d") or stripped.startswith("dtoverlay=vc4-fkms-v3d"):
+        out.append("# RF Eye CUQI disabled primary HDMI KMS: " + stripped)
+        continue
     out.append(line)
 
-# Keep the kernel/display controller in native landscape orientation. RF Eye
-# performs the portrait rotation in software, which lets rendering and touch
-# use exactly the same transform and avoids a double-rotation on some images.
+# Keep the controller in native landscape orientation. RF Eye rotates its
+# native 320x480 portrait surface once into the 480x320 framebuffer.
 overlay = f"dtoverlay=piscreen,speed={speed},drm,rotate=0"
 if touch:
     overlay += "," + touch
@@ -88,7 +93,7 @@ if touch:
 out += [
     "",
     "# rfeye-cuqi35-display-start",
-    "# CUQI 3.5in 480x320: ILI9486-family SPI panel + resistive touch",
+    "# CUQI 3.5in 480x320: ILI9486/piscreen-family SPI panel + resistive touch",
     "dtparam=spi=on",
     overlay,
     "# rfeye-cuqi35-display-end",
@@ -96,22 +101,19 @@ out += [
 path.write_text("\n".join(out).rstrip() + "\n")
 PY
 
-# The original vendor installers can install fbturbo/fbdev snippets that break
-# modern KMS/Wayland setups. They are not required for piscreen,drm.
+# Old vendor LCD-show packages can leave Xorg snippets that conflict with
+# Bookworm/Trixie graphics. They are not needed by the native DRM route.
 rm -f /usr/share/X11/xorg.conf.d/99-fbturbo.conf \
       /usr/share/X11/xorg.conf.d/99-fbdev.conf 2>/dev/null || true
 
-# The generic installer creates an HDMI-specific kanshi profile. For this fork
-# the SPI DRM connector advertises its native 480x320 mode automatically.
+# The generic installer creates an HDMI-specific kanshi profile. The SPI DRM
+# panel advertises its own native mode and does not need an HDMI override.
 mkdir -p "$TARGET_HOME/.config/kanshi"
 cat > "$TARGET_HOME/.config/kanshi/config" <<'EOF'
 # CUQI SPI panel uses its native DRM mode. No HDMI mode override is required.
 EOF
 
-# The compact renderer keeps a 480x800 logical portrait canvas and maps it to
-# the physical 480x320 framebuffer. This is deliberate: it preserves every
-# existing screen while keeping touch coordinates exact after scaling.
-echo "[CUQI 4/7] Applying compact portrait display profile..."
+echo "[CUQI 4/8] Applying native 320x480 portrait UI profile..."
 CFG_DIR="$TARGET_HOME/.config/rfeye"
 CFG_FILE="$CFG_DIR/config.json"
 mkdir -p "$CFG_DIR"
@@ -128,12 +130,12 @@ except Exception:
 
 cfg.update({
     "display_profile": "cuqi35",
-    "ui_width": 480,
-    "ui_height": 800,
+    "ui_width": 320,
+    "ui_height": 480,
     "physical_width": 480,
     "physical_height": 320,
     "rotation": rotation,
-    "ui_fps": 18,
+    "ui_fps": 20,
     "fullscreen": True,
 })
 p.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -148,14 +150,21 @@ if [[ -f "$SERVICE" ]]; then
   chown "$TARGET_USER:$TARGET_USER" "$SERVICE"
 fi
 
-# Remove the HDMI-specific mode from the generic appliance autostart. labwc
-# will choose the connected 480x320 DRM panel natively.
+# Remove the HDMI-specific mode manager from appliance autostart.
 LABWC="$TARGET_HOME/.config/labwc/autostart"
 if [[ -f "$LABWC" ]]; then
   sed -i '/\/usr\/bin\/kanshi[[:space:]]*&/d' "$LABWC"
 fi
 
-echo "[CUQI 5/7] Installing display diagnostics..."
+echo "[CUQI 5/8] Rebuilding boot splash for 480x320..."
+THEME_DIR=/usr/share/plymouth/themes/rfeye
+if [[ -d "$THEME_DIR" ]]; then
+  python3 "$TMP_ROOT/src/scripts/generate-plymouth-assets-cuqi35.py" "$THEME_DIR"
+  chmod 0644 "$THEME_DIR"/*.png
+  plymouth-set-default-theme -R rfeye
+fi
+
+echo "[CUQI 6/8] Installing display diagnostics..."
 cat > /usr/local/bin/rfeye-cuqi35-status <<'EOF'
 #!/usr/bin/env bash
 set -u
@@ -168,6 +177,9 @@ for s in /sys/class/drm/card*-*/status; do
   printf '  %-28s %s\n' "$(basename "$(dirname "$s")")" "$(cat "$s")"
 done
 echo ""
+echo "Framebuffers / DRM:"
+ls -l /dev/fb* /dev/dri/* 2>/dev/null || true
+echo ""
 echo "SPI devices:"
 ls -1 /dev/spidev* 2>/dev/null || true
 echo ""
@@ -175,11 +187,11 @@ echo "Touch devices:"
 grep -B1 -A4 -Ei 'ADS7846|XPT2046|Touchscreen' /proc/bus/input/devices 2>/dev/null || true
 echo ""
 echo "Kernel display messages:"
-dmesg | grep -iE 'ili9486|piscreen|spi|drm' | tail -n 40 || true
+dmesg | grep -iE 'ili9486|piscreen|spi|drm' | tail -n 60 || true
 EOF
 chmod +x /usr/local/bin/rfeye-cuqi35-status
 
-echo "[CUQI 6/7] Verifying configuration..."
+echo "[CUQI 7/8] Verifying configuration..."
 grep -q '^dtoverlay=piscreen,.*drm' "$CONFIG" || {
   echo "ERROR: piscreen DRM overlay was not written to $CONFIG"
   exit 1
@@ -188,17 +200,22 @@ grep -q 'RFEYE_DISPLAY_PROFILE=cuqi35' "$SERVICE" || {
   echo "ERROR: compact display profile was not added to RF Eye service"
   exit 1
 }
+python3 - "$CFG_FILE" <<'PY'
+import json, sys
+cfg=json.load(open(sys.argv[1]))
+assert (cfg.get('ui_width'),cfg.get('ui_height')) == (320,480)
+assert (cfg.get('physical_width'),cfg.get('physical_height')) == (480,320)
+PY
 
 sync
-
-echo "[CUQI 7/7] Done."
+echo "[CUQI 8/8] Done."
 cat <<EOF
 
 RF Eye CUQI 3.5 portrait fork is installed.
 
 Display:  3.5 inch SPI touchscreen
-Native:   480x320
-RF Eye:   portrait, software-rotated and scaled for the native panel
+Native:   480x320 physical / 320x480 portrait UI
+RF Eye:   native portrait layout, no aspect-ratio scaling
 SPI:      ${SPI_HZ} Hz
 Branch:   ${REPO_BRANCH}
 
