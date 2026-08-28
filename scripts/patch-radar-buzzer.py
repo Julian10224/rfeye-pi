@@ -22,26 +22,27 @@ new = '''    def _sound_logic(self, snap):
             return
 
         lv = max(float(p.get("level", 0.0)) for p in peaks)
-        # Match the visible LOW/MEDIUM/HIGH zones in the UI.
         if lv < 0.15:
             return
 
+        # Keep every tone close to the common ~2.7 kHz piezo resonance.
+        # Large jumps away from resonance sound thin/harsh on small piezo discs.
         if lv > 0.72:
-            freq = int(self.cfg.get("buzzer_red_hz", 3200))
+            freq = int(self.cfg.get("buzzer_red_hz", 2925))
+            pulse_ms = int(self.cfg.get("buzzer_red_ms", 34))
         elif lv > 0.43:
             freq = int(self.cfg.get("buzzer_yellow_hz", 2700))
+            pulse_ms = int(self.cfg.get("buzzer_yellow_ms", 39))
         else:
-            freq = int(self.cfg.get("buzzer_green_hz", 2200))
+            freq = int(self.cfg.get("buzzer_green_hz", 2475))
+            pulse_ms = int(self.cfg.get("buzzer_green_ms", 44))
 
-        # Same Geiger/radar-style timing idea as the ESP32 reference:
-        # slow isolated clicks when weak, rapidly accelerating when strong.
+        # Radar/Geiger cadence, but never so fast that a new pulse starts before
+        # the previous tone has cleanly ended. This preserves an audible gap.
         n = max(0.0, min(1.0, (lv - 0.15) / 0.85))
-        interval = max(0.030, 1.000 * (0.035 ** n))
-        pulse_ms = max(12, min(30, int(interval * 500)))
-
+        interval = max(0.085, 1.050 * (0.080 ** n))
         if self.cfg.get("audio_mode", "adaptive") != "adaptive":
             interval = 0.75
-            pulse_ms = 25
 
         now = time.time()
         if now - self.last_beep >= interval:
