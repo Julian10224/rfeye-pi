@@ -45,6 +45,24 @@ The installer configures the display, RTL-SDR permissions, graphical auto-login,
 
 The Plymouth PNG assets are generated locally during installation by `scripts/generate-plymouth-assets.py`, so the repository contains the complete reproducible boot configuration without storing board-specific initramfs images.
 
+## Buzzer / speaker wiring on Raspberry Pi 3B+
+
+RF Eye uses **BCM GPIO18**, which is **physical pin 12** on the Raspberry Pi 3B+ 40-pin header. The default configuration is for a passive piezo buzzer.
+
+Recommended basic connection:
+
+```text
+Passive 3.3 V piezo buzzer
++  -> Raspberry Pi physical pin 12 (BCM GPIO18)
+-  -> Raspberry Pi physical pin 14 (GND)
+```
+
+Do **not** connect a normal 4 ohm or 8 ohm loudspeaker directly to GPIO18. Use a transistor driver for a higher-current buzzer or an audio amplifier for a real loudspeaker.
+
+See the complete installation, pinout, transistor wiring, active/passive buzzer explanation, loudspeaker option and hardware test in:
+
+**[docs/SPEAKER_WIRING_RPI3BPLUS.md](docs/SPEAKER_WIRING_RPI3BPLUS.md)**
+
 ## Wi-Fi setup
 
 Open **Settings > Wi-Fi**. The screen starts a fresh scan in the background. While scanning, the button shows `SCANNING...`; when complete it shows the number of networks found. Tap **RESCAN** to repeat the scan.
