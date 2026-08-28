@@ -129,6 +129,13 @@ compile(s, str(p), 'exec')
 p.write_text(s)
 print('RF Eye persistent SDR patch installed:', p)
 
+# Replace the pyrtlsdr path with a small ctypes wrapper around librtlsdr's
+# stable C API. This keeps the RTL-SDR open across all tuning windows and also
+# works with RTL-SDR Blog V4 libraries that do not expose rtlsdr_set_dithering.
+ctypes_patch = Path(__file__).with_name('patch-ctypes-sdr.py')
+if ctypes_patch.exists():
+    subprocess.run([sys.executable, str(ctypes_patch), str(p)], check=True)
+
 # Keep the installer entry-point simple: this patch already runs after the other
 # app/backend patches, so install the debug timing page from here as the final
 # source transformation. That avoids an extra installer dependency/order issue.
