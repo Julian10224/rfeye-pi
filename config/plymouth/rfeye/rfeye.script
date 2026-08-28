@@ -12,7 +12,9 @@ logo.sprite.SetPosition(logo.x, logo.y, -10);
 
 progress_box.image = Image("progress_box.png");
 progress_box.sprite = Sprite(progress_box.image);
-progress_box.x = (screen_width - progress_box.image.GetWidth()) / 2;
+# The portrait display is rendered into a framebuffer rotated clockwise.
+# Moving left in framebuffer X moves the visible horizontal bar down in portrait.
+progress_box.x = ((screen_width - progress_box.image.GetWidth()) / 2) - 28;
 progress_box.y = (screen_height - progress_box.image.GetHeight()) / 2;
 progress_box.sprite.SetPosition(progress_box.x, progress_box.y, 0);
 
