@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # RF Eye installer for the CUQI RPM-01 / common 3.5-inch 480x320 GPIO SPI
-# touchscreen family.  The panel is driven through the Raspberry Pi kernel's
+# touchscreen family. The panel is driven through the Raspberry Pi kernel's
 # piscreen DRM driver instead of the legacy fbtft/LCD-show graphics stack.
 
 REPO_SLUG="${RFEYE_REPO:-Julian10224/rfeye-pi}"
@@ -78,7 +78,10 @@ for line in lines:
         continue
     out.append(line)
 
-overlay = f"dtoverlay=piscreen,speed={speed},drm"
+# Keep the kernel/display controller in native landscape orientation. RF Eye
+# performs the portrait rotation in software, which lets rendering and touch
+# use exactly the same transform and avoids a double-rotation on some images.
+overlay = f"dtoverlay=piscreen,speed={speed},drm,rotate=0"
 if touch:
     overlay += "," + touch
 
@@ -205,6 +208,6 @@ Reboot now:
 After reboot, diagnostics are available with:
   sudo rfeye-cuqi35-status
 
-If the image is upside-down, switch the RF Eye software rotation with:
-  RFEYE_ROTATION=ccw sudo -E bash install-cuqi35.sh
+If the image is upside-down, reinstall with counter-clockwise RF Eye rotation:
+  curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/install-cuqi35.sh | sudo env RFEYE_ROTATION=ccw bash
 EOF
