@@ -60,40 +60,48 @@ new_capture = '''    def _close_direct_sdr(self):
             if self.sdr_gain != wanted_gain:
                 self.sdr.gain=wanted_gain; self.sdr_gain=wanted_gain
             self.sdr.center_freq=int(center)
-            # Keep the same retune settling margin and the same requested sample
-            # count. Speed comes from avoiding reopen/process overhead, not from
-            # observing less RF data.
+            # Keep the same retune settling margin and requested sample count.
+            # Normal capture time is still determined by the RF observation
+            # window, not by process startup or multi-second fallback timeouts.
             discard=max(4096, int(sr*0.006))
             self.sdr.read_samples(discard)
             return np.asarray(self.sdr.read_samples(int(count)),dtype=np.complex64)
-        except Exception:
+        except Exception as e:
             self._close_direct_sdr()
-            return None
+            raise RuntimeError('direct RTL-SDR read failed: ' + str(e))
 
     def _capture(self,center,sr,n,blocks,transient=False):
-        iq=self._direct_samples(center,sr,n*blocks)
-        if iq is None or len(iq)<n:
+        # pyrtlsdr is installed by RF Eye and is the real-time path. If it is
+        # present but a device read fails, abort this scan cycle immediately so
+        # recovery can run. The old code fell back to a 3-second rtl_sdr timeout
+        # for every tuning window, which could turn one failed cycle into ~24 s.
+        if RtlSdr is not None:
+            iq=self._direct_samples(center,sr,n*blocks)
+        else:
+            # Compatibility fallback only when pyrtlsdr itself is unavailable.
             exe=shutil.which('rtl_sdr')
             if not exe:raise RuntimeError('rtl_sdr command not found')
             cmd=[exe,'-f',str(int(center)),'-s',str(int(sr)),'-p',str(int(self.cfg.get('ppm',0)))]
             gain=self.cfg.get('gain','auto')
             if gain!='auto':cmd+=['-g',str(float(gain))]
             cmd+=['-n',str(int(n*blocks)),'-']
-            p=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
-            try:out,err=p.communicate(timeout=3.)
+            proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+            try:out,err=proc.communicate(timeout=0.8)
             except subprocess.TimeoutExpired:
-                try:os.killpg(p.pid,signal.SIGKILL)
-                except Exception:p.kill()
-                out,err=p.communicate();raise RuntimeError('rtl_sdr capture timeout')
-            if p.returncode!=0 or len(out)<n*2:
-                msg=err.decode('utf-8','ignore').strip()[-240:];raise RuntimeError(msg or f'rtl_sdr exit {p.returncode}')
+                try:os.killpg(proc.pid,signal.SIGKILL)
+                except Exception:proc.kill()
+                out,err=proc.communicate();raise RuntimeError('rtl_sdr capture timeout')
+            if proc.returncode!=0 or len(out)<n*2:
+                msg=err.decode('utf-8','ignore').strip()[-240:];raise RuntimeError(msg or f'rtl_sdr exit {proc.returncode}')
             raw=np.frombuffer(out,dtype=np.uint8).astype(np.float32); iq=(raw[0::2]-127.5)+1j*(raw[1::2]-127.5)
 
+        if iq is None or len(iq)<n:
+            raise RuntimeError('short RTL-SDR capture')
         rows_count=min(blocks,len(iq)//n)
         if rows_count<1:raise RuntimeError('no complete FFT blocks')
-        # Same FFTs as before, but process every block in one NumPy batch. This
-        # removes the Python loop on the Pi 3B+ without changing samples,
-        # windowing, FFT size, percentile, thresholds or confirmation logic.
+
+        # Process all FFT blocks in one NumPy batch. Samples, windowing, FFT
+        # size, percentiles and thresholds are unchanged.
         matrix=np.asarray(iq[:rows_count*n],dtype=np.complex64).reshape(rows_count,n).copy()
         matrix-=np.mean(matrix,axis=1,keepdims=True)
         win=self._fft_window_cache.get(n)
