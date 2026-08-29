@@ -3,9 +3,9 @@ from collections import deque
 import os, select, struct, threading, time
 from pathlib import Path
 
-# GoodTFT MHS35 calibration values. The Raspberry Pi piscreen overlay already
-# applies touchscreen-swapped-x-y in the kernel, so do not swap the axes again
-# in userspace.
+# Live four-corner calibration on the RF Eye MHS35/XPT2046 panel.
+# Linux exposes XPT2046 through the ADS7846-compatible driver and the piscreen
+# overlay already swaps the controller axes before evdev events are emitted.
 RAW_X_TOP = 3936.0
 RAW_X_BOTTOM = 227.0
 RAW_Y_LEFT = 268.0
@@ -29,18 +29,15 @@ def _event_device():
     return None
 
 
-def _map(app,raw_x,raw_y):
-    # piscreen already swaps controller X/Y before /dev/input/event* is emitted.
-    # ABS_X therefore maps horizontally. ABS_Y uses the GoodTFT X calibration,
-    # then the portrait Y axis is inverted once so screen top maps to UI top.
-    x=_clamp((float(raw_x)-RAW_Y_LEFT)/(RAW_Y_RIGHT-RAW_Y_LEFT))
-    y=_clamp((float(raw_y)-RAW_X_TOP)/(RAW_X_BOTTOM-RAW_X_TOP))
-    ux=int(round(x*319.0)); uy=479-int(round(y*479.0))
-    if app.cfg.get('rotation','cw')=='ccw':
-        ux=319-ux; uy=479-uy
-    if app.cfg.get('touch_invert_x',False): ux=319-ux
-    if app.cfg.get('touch_invert_y',False): uy=479-uy
-    return ux,uy
+def _map(raw_x,raw_y):
+    # Measured physical axes:
+    #   left/right = event ABS_Y, low -> high
+    #   top/bottom = event ABS_X, low -> high
+    # RF Eye's displayed portrait canvas is mounted 180 degrees relative to
+    # those raw panel axes, so invert both once after scaling.
+    nx=_clamp((float(raw_y)-RAW_Y_LEFT)/(RAW_Y_RIGHT-RAW_Y_LEFT))
+    ny=_clamp((float(raw_x)-RAW_X_BOTTOM)/(RAW_X_TOP-RAW_X_BOTTOM))
+    return 319-int(round(nx*319.0)),479-int(round(ny*479.0))
 
 
 def install(app):
@@ -64,7 +61,7 @@ def install(app):
                             elif etype==EV_ABS and code==ABS_Y: raw_y=value
                             elif etype==EV_KEY and code==BTN_TOUCH and value==1: pending=True
                             elif etype==EV_SYN and code==SYN_REPORT and pending:
-                                app._direct_touch_queue.append(_map(app,raw_x,raw_y)); pending=False
+                                app._direct_touch_queue.append(_map(raw_x,raw_y)); pending=False
                 finally:
                     os.close(fd)
             except Exception:
