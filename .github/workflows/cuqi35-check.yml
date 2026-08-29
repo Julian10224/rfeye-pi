@@ -34,13 +34,14 @@ jobs:
           rfeye/compact_wifi_ui.py
           scripts/generate-plymouth-assets-cuqi35.py
           scripts/patch-startup-splash.py
+          scripts/patch-fast-app-start.py
           scripts/patch-radar-buzzer.py
           scripts/patch-fast-scan.py
           scripts/patch-persistent-sdr.py
           scripts/patch-ctypes-sdr.py
           scripts/patch-debug-menu.py
           scripts/patch-debug-fix.py
-      - name: Verify CUQI layout and MHS35 touch assumptions
+      - name: Verify CUQI layout and MHS35 boot assumptions
         run: |
           python3 - <<'PY'
           import sys
@@ -57,7 +58,11 @@ jobs:
           PY
           grep -q '319-int(round(nx\*319.0)),479-int(round(ny\*479.0))' rfeye/compact_touch.py
           grep -q 'Plymouth.SetRefreshFunction' config/plymouth/rfeye/rfeye.script
+          ! grep -q 'Window.GetX' config/plymouth/rfeye/rfeye.script
+          ! grep -q 'Window.GetY' config/plymouth/rfeye/rfeye.script
           grep -q 'dev-dri-renderD128' scripts/apply-cuqi35-system-fixes.sh
+          grep -q 'systemd-user-sessions.service' scripts/apply-cuqi35-system-fixes.sh
+          grep -q 'network.target' scripts/apply-cuqi35-system-fixes.sh
           grep -q 'pressure-max' scripts/apply-cuqi35-system-fixes.sh
       - name: Exercise full installer patch chain
         run: |
@@ -65,6 +70,7 @@ jobs:
           cp rfeye/app.py /tmp/rfeye-patch-test/app.py
           cp rfeye/sdr_backend.py /tmp/rfeye-patch-test/sdr_backend.py
           python3 scripts/patch-startup-splash.py /tmp/rfeye-patch-test/app.py
+          python3 scripts/patch-fast-app-start.py /tmp/rfeye-patch-test/app.py
           python3 scripts/patch-radar-buzzer.py /tmp/rfeye-patch-test/app.py
           python3 scripts/patch-fast-scan.py /tmp/rfeye-patch-test/sdr_backend.py
           python3 scripts/patch-persistent-sdr.py /tmp/rfeye-patch-test/sdr_backend.py
@@ -73,4 +79,6 @@ jobs:
           grep -q 'center=False, right=False' /tmp/rfeye-patch-test/app.py
           grep -q 'ready_chime_done' /tmp/rfeye-patch-test/app.py
           grep -q 'pygame.display.init()' /tmp/rfeye-patch-test/app.py
+          grep -q 'RFEYE_BOOT pygame-imported' /tmp/rfeye-patch-test/app.py
+          grep -q 'from sdr_backend import SDRBackend' /tmp/rfeye-patch-test/app.py
           grep -q 'CTYPES PERSISTENT' /tmp/rfeye-patch-test/sdr_backend.py
