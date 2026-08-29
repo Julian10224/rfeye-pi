@@ -312,7 +312,6 @@ class App:
             by_ssid = {}
             scan = subprocess.run(["nmcli","dev","wifi","rescan","ifname","wlan0"], capture_output=True, text=True, timeout=12)
             if scan.returncode == 0:
-                # NetworkManager completes scans asynchronously. Merge several cache reads.
                 for _ in range(5):
                     time.sleep(1.5)
                     cp = subprocess.run([
@@ -334,9 +333,6 @@ class App:
                         if old is None or item[3] or sig > old[1]:
                             by_ssid[ssid]=item
             else:
-                # A process started outside the active desktop seat can be denied by
-                # NetworkManager/polkit. wpa_supplicant exposes its control socket to
-                # the netdev group, so use that as a non-privileged scan fallback.
                 wp = subprocess.run(["wpa_cli","-i","wlan0","scan"], capture_output=True, text=True, timeout=8)
                 if wp.returncode != 0 or "OK" not in wp.stdout:
                     msg=(scan.stderr or scan.stdout or wp.stderr or wp.stdout).strip()
@@ -504,9 +500,16 @@ class App:
         self._text("ENTER",399,682,self.font_s,WHITE,center=True)
 
     def _toggle_mute(self):
-        self.cfg["muted"] = not self.cfg.get("muted", False)
+        was_muted = bool(self.cfg.get("muted", False))
+        self.cfg["muted"] = not was_muted
         if self.cfg["muted"]:
             self.buzzer.off()
+        else:
+            self.buzzer.beep(
+                frequency=int(self.cfg.get("buzzer_low_hz", 900)),
+                duration_ms=65,
+            )
+            self.last_beep = time.time()
         save_config(self.cfg)
 
     def _toggle_demo(self):
@@ -602,7 +605,6 @@ class App:
 
     def _gear(self, cx, cy, size=42):
         import math
-        # Blue gear only, transparent background.
         teeth = 8
         outer = size * 0.46
         inner = size * 0.34
@@ -646,7 +648,6 @@ class App:
         status_col = GREEN if status == "LIVE" else BLUE if status == "DEMO" else RED
         pygame.draw.circle(self.ui, status_col, (432, 44), 7)
 
-        # Clear RTL-SDR hardware/status indication on the main screen.
         if status == "LIVE":
             sdr_text = "SDR: CONNECTED"
             sdr_col = GREEN
@@ -658,7 +659,6 @@ class App:
             sdr_col = RED
         self._text(sdr_text, 240, 88, self.font_s, sdr_col, center=True)
 
-        # Settings button in the physical top-right corner after rotation.
         self._draw_settings_icon(38, 38)
 
         peaks = snap["peaks"][:3]
@@ -714,11 +714,9 @@ class App:
         self._text(state, 398, 708, state_font, col, center=True)
         self._text("STATUS", 398, 762, self.font_s, DIM, center=True)
 
-
     def _draw_settings(self):
         self.ui.fill(BG)
 
-        # Header
         pygame.draw.rect(self.ui, (7, 11, 16), (0, 0, 480, 92))
         pygame.draw.circle(self.ui, (18, 31, 41), (38, 45), 24)
         self._text("‹", 38, 43, self.font_xl, BLUE_BRIGHT, center=True)
