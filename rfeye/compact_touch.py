@@ -31,11 +31,11 @@ def _event_device():
 
 def _map(app,raw_x,raw_y):
     # piscreen already swaps controller X/Y before /dev/input/event* is emitted.
-    # ABS_X therefore uses the GoodTFT Y calibration and ABS_Y the inverted X
-    # calibration. Applying SwapAxes again made Settings/Mute land elsewhere.
+    # ABS_X therefore maps horizontally. ABS_Y uses the GoodTFT X calibration,
+    # then the portrait Y axis is inverted once so screen top maps to UI top.
     x=_clamp((float(raw_x)-RAW_Y_LEFT)/(RAW_Y_RIGHT-RAW_Y_LEFT))
     y=_clamp((float(raw_y)-RAW_X_TOP)/(RAW_X_BOTTOM-RAW_X_TOP))
-    ux=int(round(x*319.0)); uy=int(round(y*479.0))
+    ux=int(round(x*319.0)); uy=479-int(round(y*479.0))
     if app.cfg.get('rotation','cw')=='ccw':
         ux=319-ux; uy=479-uy
     if app.cfg.get('touch_invert_x',False): ux=319-ux
