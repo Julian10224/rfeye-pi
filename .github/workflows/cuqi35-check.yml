@@ -8,6 +8,8 @@ on:
     paths:
       - 'install-cuqi35.sh'
       - 'rfeye/compact_*.py'
+      - 'config/plymouth/rfeye/rfeye.script'
+      - 'scripts/apply-cuqi35-system-fixes.sh'
       - 'scripts/patch-*.py'
       - 'scripts/build-release.sh'
       - 'scripts/generate-plymouth-assets-cuqi35.py'
@@ -20,6 +22,7 @@ jobs:
       - name: Check installer and release shell syntax
         run: |
           bash -n install-cuqi35.sh
+          bash -n scripts/apply-cuqi35-system-fixes.sh
           bash -n scripts/build-release.sh
       - name: Check compact and main patch Python syntax
         run: >-
@@ -27,6 +30,7 @@ jobs:
           rfeye/compact_display_patch.py
           rfeye/compact_ui_controls.py
           rfeye/compact_ui_draw.py
+          rfeye/compact_touch.py
           rfeye/compact_wifi_ui.py
           scripts/generate-plymouth-assets-cuqi35.py
           scripts/patch-startup-splash.py
@@ -36,17 +40,25 @@ jobs:
           scripts/patch-ctypes-sdr.py
           scripts/patch-debug-menu.py
           scripts/patch-debug-fix.py
-      - name: Verify CUQI layout stays inside 320x480
+      - name: Verify CUQI layout and MHS35 touch assumptions
         run: |
           python3 - <<'PY'
           import sys
           sys.path.insert(0, 'rfeye')
           import compact_ui_draw as ui
+          import compact_touch as touch
           settings_bottom = ui.SETTINGS_TOP + (ui.SETTINGS_COUNT - 1) * ui.SETTINGS_STEP + ui.SETTINGS_HEIGHT
           assert settings_bottom <= 480, settings_bottom
           assert hasattr(ui, 'draw_debug')
+          assert hasattr(ui, 'draw_gear')
+          assert touch.RAW_X_TOP > touch.RAW_X_BOTTOM
+          assert touch.RAW_Y_RIGHT > touch.RAW_Y_LEFT
           print('settings bottom:', settings_bottom)
           PY
+          grep -q '479-int(round(y\*479.0))' rfeye/compact_touch.py
+          grep -q 'Plymouth.SetRefreshFunction' config/plymouth/rfeye/rfeye.script
+          grep -q 'dev-dri-renderD128' scripts/apply-cuqi35-system-fixes.sh
+          grep -q 'pressure-max' scripts/apply-cuqi35-system-fixes.sh
       - name: Exercise full installer patch chain
         run: |
           mkdir -p /tmp/rfeye-patch-test
