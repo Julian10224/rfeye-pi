@@ -122,7 +122,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.21",
+    "app_version": "0.7.22",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/update/manifest.json",
     "title": "RF EYE",
 }
