@@ -8,9 +8,16 @@ if len(sys.argv) != 2:
 app = Path(sys.argv[1])
 s = app.read_text()
 
-# Keep the latest main behavior: one very early splash draw only. The inserted
-# splash uses relative geometry so it stays proportional on both the standard
-# 480x800 canvas and the CUQI 320x480 portrait canvas.
+# Match current main startup optimization without inheriting its fixed
+# 480x800 splash geometry. CUQI renders natively on a 320x480 portrait canvas.
+s = s.replace(
+    '        pygame.init()\n        pygame.font.init()\n',
+    '        pygame.display.init()\n        pygame.font.init()\n',
+    1,
+)
+
+# Keep exactly one early splash draw. Geometry is relative so the same patch is
+# safe for the compact CUQI canvas while preserving main's faster startup path.
 if 'def _startup_splash(' not in s:
     font_needle = '        self.font_xl = pygame.font.Font(None, 56)\n'
     if font_needle not in s:
