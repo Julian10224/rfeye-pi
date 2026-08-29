@@ -36,6 +36,10 @@ git clone --depth 1 --branch "$REPO_BRANCH" "https://github.com/${REPO_SLUG}.git
 
 echo "[CUQI 2/8] Installing RF Eye appliance core..."
 RFEYE_LOCAL_SOURCE="$TMP_ROOT/src" RFEYE_REPO="$REPO_SLUG" bash "$TMP_ROOT/src/install.sh"
+# Start importing Pygame while Labwc is still coming up and defer SDR/NumPy
+# until after the display path is ready. OTA builds apply the same transform.
+python3 "$TMP_ROOT/src/scripts/patch-fast-app-start.py" /opt/rfeye/rfeye/app.py
+python3 -m py_compile /opt/rfeye/rfeye/app.py
 
 BOOT=/boot/firmware
 [[ -d "$BOOT" ]] || BOOT=/boot
@@ -72,8 +76,6 @@ for line in lines:
         continue
     out.append(line)
 
-# Native landscape framebuffer; RF Eye rotates its 320x480 UI exactly once.
-# xohms=60 matches the GoodTFT MHS35 XPT2046/ADS7846 vendor profile.
 out += [
     "", "# rfeye-cuqi35-display-start",
     "# MHS35 3.5in 480x320: ILI9486/piscreen SPI DRM + XPT2046 touch",
@@ -130,11 +132,9 @@ if [[ -f "$LABWC" ]]; then
   sed -i '/\/usr\/bin\/kanshi[[:space:]]*&/d' "$LABWC"
 fi
 
-# Apply the measured MHS35-specific fixes:
-# - remove LightDM's nonexistent renderD128 dependency (~89 s boot timeout),
-# - build a pressure-max=1024 XPT2046 overlay for lighter taps,
-# - map ADS7846/XPT2046 to SPI-1 and suppress duplicate SDL touch events,
-# - keep Plymouth centered when firmware FB switches to the 480x320 SPI FB.
+# Apply measured MHS35 fixes: no nonexistent renderD128 wait, no network wait
+# before the local display, lighter XPT2046 taps, direct touch, no unused audio
+# stack on the critical path, and stable Plymouth centering across fb handoff.
 RFEYE_SOURCE_ROOT="$TMP_ROOT/src" RFEYE_CUQI_SPI_HZ="$SPI_HZ" \
   bash "$TMP_ROOT/src/scripts/apply-cuqi35-system-fixes.sh"
 
@@ -168,6 +168,12 @@ grep -B1 -A6 -Ei 'ADS7846|XPT2046|Touchscreen' /proc/bus/input/devices 2>/dev/nu
 echo ""
 echo "LightDM render dependency:"
 systemctl show lightdm.service -p Wants -p After --no-pager 2>/dev/null || true
+echo ""
+echo "User-session ordering:"
+systemctl show systemd-user-sessions.service -p After --no-pager 2>/dev/null || true
+echo ""
+echo "Boot timing:"
+systemd-analyze 2>/dev/null || true
 echo ""
 echo "Kernel display/touch messages:"
 dmesg | grep -iE 'ili9486|piscreen|ads7846|spi|drm' | tail -n 80 || true
