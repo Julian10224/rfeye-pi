@@ -152,6 +152,12 @@ def load_config():
             cfg.update(json.loads(p.read_text()))
     except Exception:
         pass
+    # Current RF Eye hardware profile is fixed. Override stale saved values so
+    # an OTA update also migrates units that previously used BCM GPIO18.
+    cfg["buzzer_gpio"] = 26
+    cfg["buzzer_model"] = "TMB12A03"
+    cfg["buzzer_passive"] = False
+    cfg["buzzer_active_high"] = True
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
     return cfg
