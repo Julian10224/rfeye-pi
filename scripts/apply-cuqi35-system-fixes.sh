@@ -6,37 +6,61 @@ TARGET_USER="${SUDO_USER:-$(logname 2>/dev/null || echo pi)}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 [[ -n "$TARGET_HOME" ]] || { echo 'Could not determine target home.' >&2; exit 1; }
 
-# MHS35/piscreen DRM exposes /dev/dri/card0 but no renderD128. Raspberry Pi OS
-# LightDM waits roughly 90 seconds for renderD128 unless that dependency is
-# replaced for this SPI-only appliance profile.
-mkdir -p /etc/systemd/system/lightdm.service.d
-cat > /etc/systemd/system/lightdm.service.d/30-rfeye-spi-drm.conf <<'EOF'
-[Unit]
-Wants=
-Wants=dev-dri-card0.device
-After=
-After=systemd-user-sessions.service dev-dri-card0.device plymouth-quit.service
-EOF
-
 BOOT=/boot/firmware
 [[ -d "$BOOT" ]] || BOOT=/boot
 CONFIG="$BOOT/config.txt"
-python3 - "$CONFIG" <<'PY'
+OVERLAYS="$BOOT/overlays"
+SPI_HZ="${RFEYE_CUQI_SPI_HZ:-18000000}"
+
+# Raspberry Pi OS LightDM wants both card0 and renderD128. The SPI-only MHS35
+# DRM driver creates card0 but never creates renderD128, causing the measured
+# ~89 second device timeout before LightDM starts. Dependency lists from the
+# vendor unit cannot reliably be subtracted with a drop-in, so install a full
+# /etc override and remove only the nonexistent render node.
+VENDOR_LIGHTDM=/usr/lib/systemd/system/lightdm.service
+[[ -f "$VENDOR_LIGHTDM" ]] || VENDOR_LIGHTDM=/lib/systemd/system/lightdm.service
+if [[ -f "$VENDOR_LIGHTDM" ]]; then
+  cp "$VENDOR_LIGHTDM" /etc/systemd/system/lightdm.service
+  sed -i 's/[[:space:]]dev-dri-renderD128\.device//g' /etc/systemd/system/lightdm.service
+  rm -rf /etc/systemd/system/lightdm.service.d/30-rfeye-spi-drm.conf
+fi
+
+# Build an RF Eye MHS35 overlay from the kernel's matching piscreen overlay.
+# It keeps the exact display/GPIO definitions from this OS image but raises
+# ADS7846/XPT2046 pressure-max from 255 to 1024 so lighter taps are accepted.
+if command -v dtc >/dev/null 2>&1 && [[ -f "$OVERLAYS/piscreen.dtbo" ]]; then
+  TMP="$(mktemp -d /tmp/rfeye-mhs35-overlay.XXXXXX)"
+  trap 'rm -rf "$TMP"' EXIT
+  dtc -I dtb -O dts -o "$TMP/piscreen.dts" "$OVERLAYS/piscreen.dtbo" 2>/dev/null || true
+  python3 - "$TMP/piscreen.dts" <<'PY'
 from pathlib import Path
 import sys
-p=Path(sys.argv[1]); s=p.read_text()
+p=Path(sys.argv[1])
+if not p.exists(): raise SystemExit(0)
+s=p.read_text()
+old='ti,pressure-max = [00 ff];'
+if old in s:
+    p.write_text(s.replace(old,'ti,pressure-max = [04 00];',1))
+PY
+  if [[ -s "$TMP/piscreen.dts" ]] && dtc -@ -I dts -O dtb -o "$OVERLAYS/rfeye-mhs35.dtbo" "$TMP/piscreen.dts" 2>/dev/null; then
+    python3 - "$CONFIG" "$SPI_HZ" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); speed=sys.argv[2]
 lines=[]
-for line in s.splitlines():
-    if line.strip().startswith('dtoverlay=piscreen') and 'drm' in line:
-        parts=[x for x in line.strip().split(',') if not x.startswith('xohms=')]
-        parts.append('xohms=60')
-        line=','.join(parts)
+for line in p.read_text().splitlines():
+    st=line.strip()
+    if st.startswith('dtoverlay=piscreen') or st.startswith('dtoverlay=rfeye-mhs35'):
+        continue
     lines.append(line)
+lines.append(f'dtoverlay=rfeye-mhs35,speed={speed},drm,rotate=0,xohms=60')
 p.write_text('\n'.join(lines).rstrip()+'\n')
 PY
+  fi
+fi
 
-# Linux reports XPT2046 through the ADS7846-compatible driver. Keep Labwc
-# aware of the correct SPI connector even though RF Eye reads evdev directly.
+# Linux calls XPT2046 an ADS7846-compatible touchscreen. Keep Labwc mapped to
+# SPI-1, but RF Eye itself reads evdev directly with MHS35 calibration.
 mkdir -p "$TARGET_HOME/.config/labwc"
 cat > "$TARGET_HOME/.config/labwc/rc.xml" <<'EOF'
 <?xml version="1.0"?>
@@ -53,32 +77,13 @@ if [[ -f "$SERVICE" ]]; then
   chown "$TARGET_USER:$TARGET_USER" "$SERVICE"
 fi
 
-THEME=/usr/share/plymouth/themes/rfeye/rfeye.script
-if [[ -f "$THEME" ]]; then
-cat > "$THEME" <<'PLY'
-Window.SetBackgroundTopColor(0, 0, 0);
-Window.SetBackgroundBottomColor(0, 0, 0);
-logo.image = Image("splash.png"); logo.sprite = Sprite(logo.image);
-progress_box.image = Image("progress_box.png"); progress_box.sprite = Sprite(progress_box.image);
-progress_bar.original_image = Image("progress_bar.png"); progress_bar.sprite = Sprite();
-fun refresh_callback()
-{
-  sx=Window.GetX(); sy=Window.GetY(); sw=Window.GetWidth(); sh=Window.GetHeight();
-  lx=sx+(sw-logo.image.GetWidth())/2; ly=sy+(sh-logo.image.GetHeight())/2;
-  logo.sprite.SetPosition(lx,ly,-10);
-  bx=sx+((sw-progress_box.image.GetWidth())/2)-28; by=sy+(sh-progress_box.image.GetHeight())/2;
-  progress_box.sprite.SetPosition(bx,by,0); progress_bar.sprite.SetPosition(bx+4,by+4,1);
-}
-Plymouth.SetRefreshFunction(refresh_callback); refresh_callback();
-fun progress_callback(duration, progress)
-{
-  visible=progress*1.20; if (visible<0.0) visible=0.0; if (visible>0.96) visible=0.96;
-  height=Math.Int(progress_bar.original_image.GetHeight()*visible); if (height<3) height=3;
-  progress_bar.image=progress_bar.original_image.Scale(progress_bar.original_image.GetWidth(),height);
-  progress_bar.sprite.SetImage(progress_bar.image);
-}
-Plymouth.SetBootProgressFunction(progress_callback);
-PLY
+# Reinstall the repository Plymouth script. It recenters every refresh because
+# this Pi changes from a 720x480 firmware framebuffer to the 480x320 SPI DRM
+# framebuffer during boot; one-time coordinates visibly jump down/right.
+SRC_ROOT="${RFEYE_SOURCE_ROOT:-/opt/rfeye-src}"
+THEME_DIR=/usr/share/plymouth/themes/rfeye
+if [[ -f "$SRC_ROOT/config/plymouth/rfeye/rfeye.script" && -d "$THEME_DIR" ]]; then
+  install -m 0644 "$SRC_ROOT/config/plymouth/rfeye/rfeye.script" "$THEME_DIR/rfeye.script"
   plymouth-set-default-theme -R rfeye
 fi
 
