@@ -122,7 +122,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.20",
+    "app_version": "0.7.21",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/update/manifest.json",
     "title": "RF EYE",
 }
@@ -145,8 +145,6 @@ def load_config():
             cfg.update(json.loads(p.read_text()))
     except Exception:
         pass
-    # RF Eye hardware profile is fixed for this branch too. Migrate stale
-    # persisted GPIO18 settings when an existing unit receives the OTA update.
     cfg["buzzer_gpio"] = 26
     cfg["buzzer_model"] = "TMB12A03"
     cfg["buzzer_passive"] = False
