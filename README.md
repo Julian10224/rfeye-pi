@@ -7,7 +7,7 @@ RF Eye currently has two display variants:
 | Variant | Display | Connection | Portrait UI | Installer |
 | --- | --- | --- | --- | --- |
 | **Standard** | Elecrow 5-inch 800x480 | HDMI + touch | 480x800 | `main/install.sh` |
-| **CUQI 3.5** | CUQI 3.5-inch 480x320 | 26-pin SPI + touch | 320x480 | `display-cuqi-35-portrait/install-cuqi35.sh` |
+| **CUQI / MHS35 3.5** | 3.5-inch 480x320 | 26-pin SPI + XPT2046 touch | 320x480 | `display-cuqi-35-portrait/install-cuqi35.sh` |
 
 ## Main features
 
@@ -43,8 +43,6 @@ This is the standard RF Eye build. It uses the Elecrow 5-inch 800x480 HDMI touch
 
 ### Install
 
-On a fresh Raspberry Pi OS Desktop installation, run:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/install.sh | sudo bash
 sudo reboot
@@ -56,17 +54,15 @@ After reboot the intended flow is:
 
 `power on -> RF EYE boot splash -> RF EYE application loading screen -> RF EYE fullscreen`
 
-The Plymouth PNG assets are generated locally during installation by `scripts/generate-plymouth-assets.py`, so the repository contains the complete reproducible boot configuration without storing board-specific initramfs images.
+## Display variant 2 — CUQI / MHS35 3.5-inch 480x320 SPI touchscreen
 
-## Display variant 2 — CUQI 3.5-inch 480x320 SPI touchscreen
-
-A separate RF Eye display fork is available for the CUQI 3.5-inch **480x320 26-pin SPI touchscreen**.
+This branch targets the 3.5-inch **480x320 26-pin MHS35-style SPI display**. The tested touch controller is **XPT2046**, which Linux reports as `ADS7846 Touchscreen` because it uses the compatible `ads7846` driver.
 
 Branch:
 
 `display-cuqi-35-portrait`
 
-This build uses a native **320x480 portrait UI**. After software rotation, those pixels map directly to the physical 480x320 panel. The compact build contains dedicated layouts for the main screen, Settings, Wi-Fi setup, on-screen keyboard, connected-network details, Debug and Spectrum.
+The compact build uses a native **320x480 portrait UI** and dedicated Home, Settings, Wi-Fi, Debug and Spectrum layouts.
 
 ### Install
 
@@ -75,45 +71,66 @@ curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-3
 sudo reboot
 ```
 
-The CUQI installer:
+The MHS35/CUQI installer:
 
 - installs the normal RF Eye SDR, Wi-Fi, buzzer, updater and appliance components
 - enables Raspberry Pi SPI
-- configures the panel through the kernel `piscreen` DRM path instead of legacy `fbturbo`/`fbdev` display drivers
-- uses `dtoverlay=piscreen,speed=18000000,drm,rotate=0`
-- removes conflicting legacy `mhs35`, `tft35a`, `ads7846`, `99-fbturbo.conf` and `99-fbdev.conf` configuration where applicable
-- configures RF Eye for a 480x320 physical framebuffer and 320x480 portrait UI
-- generates a 480x320-specific Plymouth boot splash
-- installs a display diagnostics command
+- uses the kernel `piscreen` DRM path instead of legacy fbturbo/fbdev graphics
+- uses native 480x320 physical and 320x480 logical portrait geometry
+- keeps the XPT2046 on SPI0.1 with GPIO17 PENIRQ
+- uses the GoodTFT MHS35 X-plate value of 60 ohm
+- builds an OS-matched `rfeye-mhs35.dtbo` with touch `pressure-max=1024` for lighter taps
+- reads XPT2046 touch directly from evdev with MHS35 calibration
+- suppresses duplicate Wayland/SDL pointer events from the same physical tap
+- removes the nonexistent LightDM `renderD128` dependency that was measured to add about 89 seconds to boot
+- dynamically re-centers Plymouth when boot switches from the firmware framebuffer to the 480x320 SPI framebuffer
+- generates a 480x320 RF Eye boot splash
+- installs `rfeye-cuqi35-status` diagnostics
 
-### CUQI diagnostics
+The full legacy `goodtft/LCD-show` installer is intentionally not run. Its MHS35 touch values were used as reference, but its X11/fbcp/fbturbo graphics stack is unnecessary on the current DRM-based Raspberry Pi OS setup and could overwrite the working display configuration.
 
-After reboot:
+### Compact Home layout
+
+The 320x480 Home screen includes:
+
+- a sharp vector settings gear on the left
+- taller radar bars
+- no Noise dB line on Home
+- default labels `381.000`, `382.500` and `384.000 MHz`
+- sticky frequency labels that retain the last real detection for each column
+- larger hit regions for Settings, Mute and Spectrum
+
+### MHS35 diagnostics
 
 ```bash
 sudo rfeye-cuqi35-status
 ```
 
-This reports DRM devices, SPI devices, touchscreen detection and relevant kernel display messages.
+Useful checks include:
 
-If the image is upside-down, reinstall with counter-clockwise RF Eye rotation:
+```bash
+grep -E 'spi|piscreen|rfeye-mhs35' /boot/firmware/config.txt
+grep -B1 -A6 -Ei 'ADS7846|XPT2046|Touchscreen' /proc/bus/input/devices
+systemctl show lightdm.service -p Wants -p After
+evtest /dev/input/event0
+```
+
+If the complete image is upside-down, reinstall with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/install-cuqi35.sh | sudo env RFEYE_ROTATION=ccw bash
 sudo reboot
 ```
 
-Different 3.5-inch SPI clones can wire the resistive touch controller differently. Touch-axis compatibility options such as `invx`, `invy` and `swapxy` are therefore configurable rather than hardcoded.
+Do not add a second `swapxy` setting to the default MHS35 profile: the kernel `piscreen` overlay already swaps the XPT2046 axes and RF Eye accounts for that exactly once.
 
-Full CUQI-specific documentation is available on the display branch:
+Full documentation:
 
-**[CUQI 3.5-inch setup and diagnostics](https://github.com/Julian10224/rfeye-pi/blob/display-cuqi-35-portrait/docs/CUQI35.md)**
-
-> The Amazon listing identifies the CUQI panel as a 3.5-inch 480x320 26-pin SPI touchscreen but does not publish the LCD controller IC. The RF Eye fork targets the common ILI9486/piscreen-compatible implementation used by this display family. Run `sudo rfeye-cuqi35-status` after the first boot if the panel does not initialize correctly.
+**[CUQI / MHS35 3.5-inch setup and diagnostics](https://github.com/Julian10224/rfeye-pi/blob/display-cuqi-35-portrait/docs/CUQI35.md)**
 
 ## Buzzer / speaker wiring on Raspberry Pi 3B+
 
-RF Eye uses a **TMB12A03 active buzzer** on **BCM GPIO26**, which is **physical pin 37** on the Raspberry Pi 3B+ 40-pin header. GPIO26 is outside the first 26 header pins used by the CUQI display, so it remains available on that build.
+RF Eye uses a **TMB12A03 active buzzer** on **BCM GPIO26**, which is **physical pin 37** on the Raspberry Pi 3B+ 40-pin header. GPIO26 is outside the first 26 header pins used by the 3.5-inch SPI display.
 
 Recommended signal wiring:
 
@@ -127,23 +144,21 @@ The exact power connection depends on the buzzer/module version. Do not put 5 V 
 
 Do **not** connect a normal 4 ohm or 8 ohm loudspeaker directly to GPIO26. Use an audio amplifier for a real loudspeaker, and use a transistor/driver if the buzzer current exceeds what a GPIO signal can safely supply.
 
-See the complete wiring and hardware-test guide:
-
-**[docs/SPEAKER_WIRING_RPI3BPLUS.md](docs/SPEAKER_WIRING_RPI3BPLUS.md)**
+See `docs/SPEAKER_WIRING_RPI3BPLUS.md` for the complete wiring and hardware-test guide.
 
 ## Wi-Fi setup
 
-Open **Settings > Wi-Fi**. The screen starts a fresh scan in the background. While scanning, the button shows `SCANNING...`; when complete it shows the number of networks found. Tap **RESCAN** to repeat the scan.
-
-Tap the currently connected network to view its IP address, gateway, DNS, signal level and security. Tap another network to open the password page; the on-screen keyboard is shown only while entering a Wi-Fi password.
+Open **Settings > Wi-Fi**. The screen starts a fresh scan in the background. Tap **RESCAN** to repeat the scan. Tap the connected network for IP, gateway, DNS, signal and security details, or choose another network to enter its password.
 
 ## Spectrum threshold
 
-The **Sensitivity** dB value in Settings is also drawn in Spectrum as a yellow threshold line. The line is positioned at the current measured noise floor plus the configured threshold value.
+The **Sensitivity** dB value in Settings is also drawn in Spectrum as a yellow threshold line at the current noise floor plus the configured threshold.
 
 ## Software updates over Wi-Fi
 
-Open **Settings > Software update**. RF Eye downloads its update manifest, compares versions, downloads the update ZIP, verifies its SHA-256 checksum, creates a backup and installs the new application files.
+Open **Settings > Software update**. RF Eye downloads its manifest, compares versions, downloads the update ZIP, verifies SHA-256, creates a backup and replaces application files.
+
+Application OTA updates run as the desktop user. System-level MHS35 changes such as Device Tree, Plymouth and LightDM require root, so an existing 0.7.20 or older MHS35 installation should run `install-cuqi35.sh` again once for the 0.7.21 system fixes.
 
 Without an RTL-SDR the app shows `SDR: NOT CONNECTED` and stays idle; demo mode is only enabled manually.
 
@@ -155,6 +170,4 @@ For the standard `main` build, update `VERSION` and `rfeye/config.py`, then run:
 ./scripts/build-release.sh
 ```
 
-Commit and push the updated source, `update/manifest.json` and `update/rfeye-update.zip` together so installed units never receive a partial release.
-
-The CUQI display fork is maintained separately on `display-cuqi-35-portrait` so display-specific driver, boot and UI changes do not break the standard Elecrow installation.
+The MHS35/CUQI display fork is maintained separately on `display-cuqi-35-portrait` so display-specific driver, boot and UI changes do not break the standard Elecrow installation.
