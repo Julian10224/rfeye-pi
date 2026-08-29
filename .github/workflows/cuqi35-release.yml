@@ -1,25 +1,25 @@
-name: Build CUQI update artifact
+name: Build RF Eye main update artifact
 
 on:
   push:
     branches:
-      - display-cuqi-35-portrait
+      - main
 
 permissions:
   contents: write
 
 jobs:
   release:
-    if: ${{ !contains(github.event.head_commit.message, 'Build CUQI release artifact') }}
+    if: ${{ !contains(github.event.head_commit.message, 'Build RF Eye release artifact') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: display-cuqi-35-portrait
+          ref: main
           fetch-depth: 0
-      - name: Build branch update ZIP and manifest
+      - name: Build main update ZIP and manifest
         env:
-          RFEYE_BRANCH: display-cuqi-35-portrait
+          RFEYE_BRANCH: main
         run: |
           chmod +x scripts/build-release.sh
           ./scripts/build-release.sh
@@ -33,5 +33,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add update/manifest.json update/rfeye-update.zip
-          git commit -m "Build CUQI release artifact ${VERSION}"
-          git push origin HEAD:display-cuqi-35-portrait
+          git commit -m "Build RF Eye release artifact ${VERSION}"
+          git push origin HEAD:main
