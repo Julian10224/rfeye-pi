@@ -3,7 +3,9 @@ from collections import deque
 import os, select, struct, threading, time
 from pathlib import Path
 
-# GoodTFT MHS35 calibration for the XPT2046-compatible ADS7846 driver.
+# GoodTFT MHS35 calibration values. The Raspberry Pi piscreen overlay already
+# applies touchscreen-swapped-x-y in the kernel, so do not swap the axes again
+# in userspace.
 RAW_X_TOP = 3936.0
 RAW_X_BOTTOM = 227.0
 RAW_Y_LEFT = 268.0
@@ -28,13 +30,12 @@ def _event_device():
 
 
 def _map(app,raw_x,raw_y):
-    # GoodTFT MHS35 uses SwapAxes=1.  This maps the raw resistive controller
-    # directly into RF Eye's native 320x480 portrait canvas.
-    x=_clamp((float(raw_y)-RAW_Y_LEFT)/(RAW_Y_RIGHT-RAW_Y_LEFT))
-    y=_clamp((float(raw_x)-RAW_X_TOP)/(RAW_X_BOTTOM-RAW_X_TOP))
+    # piscreen already swaps controller X/Y before /dev/input/event* is emitted.
+    # ABS_X therefore uses the GoodTFT Y calibration and ABS_Y the inverted X
+    # calibration. Applying SwapAxes again made Settings/Mute land elsewhere.
+    x=_clamp((float(raw_x)-RAW_Y_LEFT)/(RAW_Y_RIGHT-RAW_Y_LEFT))
+    y=_clamp((float(raw_y)-RAW_X_TOP)/(RAW_X_BOTTOM-RAW_X_TOP))
     ux=int(round(x*319.0)); uy=int(round(y*479.0))
-    # The alternate application rotation is the same physical panel mounted
-    # 180 degrees the other way, so invert both portrait axes.
     if app.cfg.get('rotation','cw')=='ccw':
         ux=319-ux; uy=479-uy
     if app.cfg.get('touch_invert_x',False): ux=319-ux
@@ -46,8 +47,7 @@ def install(app):
     path=_event_device()
     app._direct_touch_queue=deque(maxlen=8)
     app._direct_touch_path=path
-    if not path:
-        return
+    if not path: return
     def worker():
         raw_x=2048; raw_y=2048; pending=False
         while getattr(app,'running',True):
@@ -76,5 +76,4 @@ def drain(app):
     q=getattr(app,'_direct_touch_queue',None)
     if not q: return
     while q:
-        x,y=q.popleft()
-        app._tap(x,y)
+        x,y=q.popleft(); app._tap(x,y)
