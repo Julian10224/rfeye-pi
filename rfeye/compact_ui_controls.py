@@ -14,12 +14,13 @@ def tap(app, x, y):
     app._last_compact_tap=now
 
     if app.page == 'main':
-        # Settings gear is now on the left.
-        if x <= 68 and y <= 76:
+        # Slightly generous hit zones make the small resistive MHS35 easier to
+        # use without overlapping the adjacent controls.
+        if x <= 105 and y <= 115:
             app.page = 'settings'
-        elif y >= 366 and x < 104:
+        elif y >= 338 and x < 118:
             app._toggle_mute()
-        elif y >= 366 and 106 <= x <= 216:
+        elif y >= 338 and 118 <= x <= 222:
             app.page = 'spectrum'
         return
 
