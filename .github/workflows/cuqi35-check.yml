@@ -55,7 +55,7 @@ jobs:
           assert touch.RAW_Y_RIGHT > touch.RAW_Y_LEFT
           print('settings bottom:', settings_bottom)
           PY
-          grep -q '479-int(round(y\*479.0))' rfeye/compact_touch.py
+          grep -q '319-int(round(nx\*319.0)),479-int(round(ny\*479.0))' rfeye/compact_touch.py
           grep -q 'Plymouth.SetRefreshFunction' config/plymouth/rfeye/rfeye.script
           grep -q 'dev-dri-renderD128' scripts/apply-cuqi35-system-fixes.sh
           grep -q 'pressure-max' scripts/apply-cuqi35-system-fixes.sh
