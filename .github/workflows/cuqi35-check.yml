@@ -1,9 +1,9 @@
-name: CUQI 3.5 fork checks
+name: RF Eye MHS35 main checks
 
 on:
   push:
     branches:
-      - display-cuqi-35-portrait
+      - main
   pull_request:
     paths:
       - 'install-cuqi35.sh'
@@ -41,7 +41,7 @@ jobs:
           scripts/patch-ctypes-sdr.py
           scripts/patch-debug-menu.py
           scripts/patch-debug-fix.py
-      - name: Verify CUQI layout and MHS35 boot assumptions
+      - name: Verify MHS35 layout, boot and main OTA assumptions
         run: |
           python3 - <<'PY'
           import sys
@@ -64,6 +64,8 @@ jobs:
           grep -q 'systemd-user-sessions.service' scripts/apply-cuqi35-system-fixes.sh
           grep -q 'network.target' scripts/apply-cuqi35-system-fixes.sh
           grep -q 'pressure-max' scripts/apply-cuqi35-system-fixes.sh
+          grep -q 'rfeye-pi/main/update/manifest.json' rfeye/config.py
+          grep -q 'RFEYE_BRANCH:-main' scripts/build-release.sh
       - name: Exercise full installer patch chain
         run: |
           mkdir -p /tmp/rfeye-patch-test
