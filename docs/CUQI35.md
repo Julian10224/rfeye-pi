@@ -1,11 +1,11 @@
-# RF Eye — CUQI / MHS35 3.5-inch 480x320 portrait fork
+# RF Eye — MHS35 / CUQI 3.5-inch 480x320 main firmware
 
-This branch targets the CUQI/MHS35-style 3.5-inch 480x320 Raspberry Pi SPI touchscreen. The tested touch controller is **XPT2046**, exposed by Linux through the compatible `ads7846` driver.
+The RF Eye `main` branch targets the MHS35/CUQI-style 3.5-inch 480x320 Raspberry Pi SPI touchscreen. The tested touch controller is **XPT2046**, exposed by Linux through the compatible `ads7846` driver.
 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/install-cuqi35.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/install-cuqi35.sh | sudo bash
 sudo reboot
 ```
 
@@ -15,7 +15,7 @@ The LCD remains in native 480x320 landscape orientation. RF Eye renders a native
 
 RF Eye intentionally does **not** run GoodTFT/LCD-show as a full legacy installer. The current Raspberry Pi kernel already provides a working `piscreen` DRM display driver and the XPT2046-compatible `ads7846` touch driver. Running the complete legacy LCD-show script would replace modern graphics configuration with X11/fbcp/fbturbo pieces that are not required by this appliance.
 
-The fork instead keeps the modern DRM stack and applies only the MHS35-specific values that were verified against GoodTFT:
+The firmware instead keeps the modern DRM stack and applies only the MHS35-specific values that were verified against GoodTFT:
 
 - SPI display: ILI9486/piscreen-compatible, 480x320
 - touch: XPT2046 through Linux `ADS7846 Touchscreen`
@@ -23,16 +23,16 @@ The fork instead keeps the modern DRM stack and applies only the MHS35-specific 
 - PENIRQ: GPIO17
 - X-plate resistance: 60 ohm
 - direct RF Eye evdev reader for `/dev/input/event*`
-- GoodTFT MHS35 calibration values
+- MHS35 calibration values
 - kernel `touchscreen-swapped-x-y` is respected exactly once
-- portrait Y is inverted once so physical top maps to RF Eye top
+- final touch orientation is calibrated to the portrait RF Eye UI
 - duplicate SDL/Wayland touch and mouse events are ignored
 
 The installer builds a local `rfeye-mhs35.dtbo` from the OS-supplied `piscreen.dtbo` and raises `ti,pressure-max` from 255 to 1024. This keeps the same display/GPIO definitions as the installed kernel while accepting lighter resistive touches.
 
 ## UI changes for 320x480
 
-The compact build has dedicated layouts for Home, Settings, Wi-Fi, Debug and Spectrum. Home uses:
+The compact firmware has dedicated layouts for Home, Settings, Wi-Fi, Debug and Spectrum. Home uses:
 
 - a sharp vector settings gear on the left
 - three taller radar meters
@@ -43,7 +43,7 @@ The compact build has dedicated layouts for Home, Settings, Wi-Fi, Debug and Spe
 
 ## Boot fixes
 
-Two separate boot problems were measured on the live MHS35 Raspberry Pi.
+Several boot problems were measured on the live MHS35 Raspberry Pi.
 
 ### 1. About 89 seconds waiting for renderD128
 
@@ -51,15 +51,27 @@ The SPI DRM driver creates `/dev/dri/card0` but not `/dev/dri/renderD128`. Raspb
 
 The installer creates a full LightDM unit override in `/etc/systemd/system/lightdm.service` based on the OS vendor unit and removes only `dev-dri-renderD128.device`. The valid `dev-dri-card0.device` dependency remains.
 
-### 2. Plymouth loading screen jumps down/right
+### 2. Network ordering delayed the graphical session
 
-Early boot first exposes a 720x480 firmware framebuffer and later the real 480x320 SPI framebuffer. A one-time Plymouth position calculated on 720x480 therefore became 120 pixels too far right and 80 pixels too low after the framebuffer switch.
+The stock `systemd-user-sessions.service` ordered itself after `network.target`, putting NetworkManager on the local display critical path even though RF Eye does not require networking to show the radar screen.
 
-The RF Eye Plymouth script now recalculates all positions during every refresh using the current framebuffer dimensions. The progress bar is also capped below 100% until handoff so it no longer appears completely finished while systemd is still waiting.
+The MHS35 appliance override removes only that network ordering. Wi-Fi still starts normally in parallel.
+
+### 3. Plymouth loading screen moved during framebuffer handoff
+
+Early boot exposes a firmware framebuffer and later the real 480x320 SPI framebuffer. Plymouth must therefore center against the current window dimensions without carrying an output-origin offset from the earlier framebuffer.
+
+The RF Eye Plymouth script recalculates its position every refresh and uses only the active window width and height. The progress bar is capped below 100% until handoff.
+
+### 4. Application startup
+
+RF Eye starts Pygame as early as possible while Labwc is still becoming ready. The SDR backend import is deferred until the display path is available, so graphical startup and Python import work overlap instead of running serially.
+
+Unused PipeWire/WirePlumber desktop audio services and unused NFS/RPC client services are removed from the appliance startup path.
 
 ## Buzzer / speaker pin
 
-The fork uses a **TMB12A03 active buzzer on BCM GPIO26 / physical pin 37**. Ground can use physical pin 39.
+The firmware uses a **TMB12A03 active buzzer on BCM GPIO26 / physical pin 37**. Ground can use physical pin 39.
 
 ```text
 TMB12A03 / compatible driver signal -> physical pin 37 (BCM GPIO26)
@@ -73,11 +85,11 @@ GPIO26 is outside the first 26 physical header pins used by this display.
 Default RF Eye portrait direction is clockwise. If the complete image is mounted upside-down:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-35-portrait/install-cuqi35.sh | sudo env RFEYE_ROTATION=ccw bash
+curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/install-cuqi35.sh | sudo env RFEYE_ROTATION=ccw bash
 sudo reboot
 ```
 
-The direct XPT2046 mapping follows the RF Eye rotation setting. Do not add another `swapxy` overlay option on top of this profile; the kernel piscreen overlay already swaps the controller axes.
+Do not add another `swapxy` overlay option on top of this profile; the kernel piscreen overlay already swaps the controller axes and RF Eye accounts for the final portrait mapping.
 
 ## Diagnostics
 
@@ -92,11 +104,23 @@ grep -E 'spi|piscreen|rfeye-mhs35|rfeye-cuqi35' /boot/firmware/config.txt
 ls -l /dev/fb* /dev/dri/* 2>/dev/null
 grep -B1 -A6 -Ei 'ADS7846|XPT2046|Touchscreen' /proc/bus/input/devices
 systemctl show lightdm.service -p Wants -p After
+systemctl show systemd-user-sessions.service -p After
+systemd-analyze
 evtest /dev/input/event0
 ```
 
 A healthy MHS35 touch device normally appears as `ADS7846 Touchscreen`; that is expected for XPT2046-compatible hardware.
 
-## Existing installation: system fixes
+## OTA updates
 
-Application OTA updates can replace RF Eye files without root privileges, but bootloader, Device Tree, Plymouth and LightDM changes require root. On an already installed unit, run the branch installer again to apply all system-level 0.7.21 fixes, then reboot.
+From RF Eye 0.7.24 onward the firmware reads its OTA manifest from:
+
+```text
+https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json
+```
+
+The main GitHub Actions release workflow builds the OTA ZIP and writes a SHA-256-protected manifest after version changes.
+
+The former `display-cuqi-35-portrait` branch name can remain temporarily as a compatibility alias to `main` so already installed 0.7.23 units can receive the migration update. It is not maintained as a separate firmware branch.
+
+Application OTA updates can replace RF Eye files without root privileges. Bootloader, Device Tree, Plymouth and systemd changes require root and are applied by rerunning `install-cuqi35.sh`.
