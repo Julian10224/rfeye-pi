@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# RF Eye installer for the CUQI/MHS35 3.5-inch 480x320 GPIO SPI touchscreen.
+# RF Eye installer for the MHS35/CUQI 3.5-inch 480x320 GPIO SPI touchscreen.
 # The display uses the Raspberry Pi kernel piscreen DRM stack; XPT2046 touch is
 # handled by the ADS7846-compatible kernel driver plus RF Eye direct evdev input.
 
 REPO_SLUG="${RFEYE_REPO:-Julian10224/rfeye-pi}"
-REPO_BRANCH="${RFEYE_BRANCH:-display-cuqi-35-portrait}"
+REPO_BRANCH="${RFEYE_BRANCH:-main}"
 SPI_HZ="${RFEYE_CUQI_SPI_HZ:-18000000}"
 APP_ROTATION="${RFEYE_ROTATION:-cw}"
 
@@ -24,17 +24,17 @@ TARGET_USER="${SUDO_USER:-$(logname 2>/dev/null || echo pi)}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 [[ -n "$TARGET_HOME" ]] || { echo "Could not determine home directory for $TARGET_USER"; exit 1; }
 
-echo "[CUQI 1/8] Preparing RF Eye display fork..."
+echo "[MHS35 1/8] Preparing RF Eye main firmware..."
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 libinput-tools evtest device-tree-compiler
 
-TMP_ROOT="$(mktemp -d /tmp/rfeye-cuqi35.XXXXXX)"
+TMP_ROOT="$(mktemp -d /tmp/rfeye-mhs35.XXXXXX)"
 cleanup() { rm -rf "$TMP_ROOT"; }
 trap cleanup EXIT
 
 git clone --depth 1 --branch "$REPO_BRANCH" "https://github.com/${REPO_SLUG}.git" "$TMP_ROOT/src"
 
-echo "[CUQI 2/8] Installing RF Eye appliance core..."
+echo "[MHS35 2/8] Installing RF Eye appliance core..."
 RFEYE_LOCAL_SOURCE="$TMP_ROOT/src" RFEYE_REPO="$REPO_SLUG" bash "$TMP_ROOT/src/install.sh"
 # Start importing Pygame while Labwc is still coming up and defer SDR/NumPy
 # until after the display path is ready. OTA builds apply the same transform.
@@ -44,9 +44,9 @@ python3 -m py_compile /opt/rfeye/rfeye/app.py
 BOOT=/boot/firmware
 [[ -d "$BOOT" ]] || BOOT=/boot
 CONFIG="$BOOT/config.txt"
-cp -n "$CONFIG" "${CONFIG}.rfeye-cuqi35-backup" || true
+cp -n "$CONFIG" "${CONFIG}.rfeye-mhs35-backup" || true
 
-echo "[CUQI 3/8] Configuring native 480x320 MHS35 SPI/DRM display..."
+echo "[MHS35 3/8] Configuring native 480x320 SPI/DRM display..."
 python3 - "$CONFIG" "$SPI_HZ" <<'PY'
 from pathlib import Path
 import sys
@@ -72,7 +72,7 @@ for line in lines:
     )):
         continue
     if stripped.startswith("dtoverlay=vc4-kms-v3d") or stripped.startswith("dtoverlay=vc4-fkms-v3d"):
-        out.append("# RF Eye CUQI disabled primary HDMI KMS: " + stripped)
+        out.append("# RF Eye MHS35 disabled primary HDMI KMS: " + stripped)
         continue
     out.append(line)
 
@@ -94,7 +94,7 @@ cat > "$TARGET_HOME/.config/kanshi/config" <<'EOF'
 # MHS35 SPI panel uses its native DRM mode. No HDMI override is required.
 EOF
 
-echo "[CUQI 4/8] Applying native 320x480 portrait UI and XPT2046 profile..."
+echo "[MHS35 4/8] Applying native 320x480 portrait UI and XPT2046 profile..."
 CFG_DIR="$TARGET_HOME/.config/rfeye"
 CFG_FILE="$CFG_DIR/config.json"
 mkdir -p "$CFG_DIR"
@@ -138,7 +138,7 @@ fi
 RFEYE_SOURCE_ROOT="$TMP_ROOT/src" RFEYE_CUQI_SPI_HZ="$SPI_HZ" \
   bash "$TMP_ROOT/src/scripts/apply-cuqi35-system-fixes.sh"
 
-echo "[CUQI 5/8] Rebuilding boot splash for 480x320..."
+echo "[MHS35 5/8] Rebuilding boot splash for 480x320..."
 THEME_DIR=/usr/share/plymouth/themes/rfeye
 if [[ -d "$THEME_DIR" ]]; then
   install -m 0644 "$TMP_ROOT/src/config/plymouth/rfeye/rfeye.script" "$THEME_DIR/rfeye.script"
@@ -147,11 +147,11 @@ if [[ -d "$THEME_DIR" ]]; then
   plymouth-set-default-theme -R rfeye
 fi
 
-echo "[CUQI 6/8] Installing display diagnostics..."
+echo "[MHS35 6/8] Installing display diagnostics..."
 cat > /usr/local/bin/rfeye-cuqi35-status <<'EOF'
 #!/usr/bin/env bash
 set -u
-echo "=== RF Eye MHS35/CUQI display status ==="
+echo "=== RF Eye MHS35 display status ==="
 echo "Model: $(tr -d '\0' </proc/device-tree/model 2>/dev/null || echo unknown)"
 echo ""
 echo "DRM connectors:"
@@ -180,7 +180,7 @@ dmesg | grep -iE 'ili9486|piscreen|ads7846|spi|drm' | tail -n 80 || true
 EOF
 chmod +x /usr/local/bin/rfeye-cuqi35-status
 
-echo "[CUQI 7/8] Verifying configuration..."
+echo "[MHS35 7/8] Verifying configuration..."
 grep -Eq '^dtoverlay=(rfeye-mhs35|piscreen),.*drm' "$CONFIG" || {
   echo "ERROR: MHS35 DRM overlay was not written to $CONFIG"; exit 1;
 }
@@ -195,10 +195,10 @@ assert (cfg.get('physical_width'),cfg.get('physical_height')) == (480,320)
 PY
 
 sync
-echo "[CUQI 8/8] Done."
+echo "[MHS35 8/8] Done."
 cat <<EOF
 
-RF Eye MHS35/CUQI 3.5 portrait fork is installed.
+RF Eye MHS35 3.5 portrait firmware is installed.
 
 Display:  MHS35-compatible 3.5 inch SPI touchscreen
 Touch:    XPT2046 (Linux ADS7846 driver), direct calibrated RF Eye input
