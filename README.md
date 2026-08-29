@@ -1,6 +1,6 @@
 # RF Eye for Raspberry Pi
 
-RF Eye is a portrait RF-activity display for Raspberry Pi with RTL-SDR support, Wi-Fi configuration, spectrum view, software updates and an optional GPIO buzzer.
+RF Eye is a portrait RF-activity display for Raspberry Pi with RTL-SDR support, Wi-Fi configuration, spectrum view, software updates and a GPIO alert buzzer.
 
 RF Eye currently has two display variants:
 
@@ -16,7 +16,7 @@ RF Eye currently has two display variants:
 - CLEAR / FAR / MID / NEAR indication
 - three large centered signal meters with MHz labels
 - blue settings interface
-- GPIO18 buzzer with mute support
+- TMB12A03 active buzzer on **BCM GPIO26 / physical pin 37** with mute support
 - Settings menu with demo, sensitivity, brightness, Wi-Fi and update controls
 - spectrum view with a visible threshold line derived from the configured dB threshold
 - Wi-Fi setup with asynchronous rescanning, connected-network details and on-screen password keyboard
@@ -66,7 +66,7 @@ Branch:
 
 `display-cuqi-35-portrait`
 
-This build uses a native **320x480 portrait UI**. After software rotation, those pixels map directly to the physical 480x320 panel. The compact build contains dedicated layouts for the main screen, Settings, Wi-Fi setup, on-screen keyboard, connected-network details and Spectrum.
+This build uses a native **320x480 portrait UI**. After software rotation, those pixels map directly to the physical 480x320 panel. The compact build contains dedicated layouts for the main screen, Settings, Wi-Fi setup, on-screen keyboard, connected-network details, Debug and Spectrum.
 
 ### Install
 
@@ -113,19 +113,21 @@ Full CUQI-specific documentation is available on the display branch:
 
 ## Buzzer / speaker wiring on Raspberry Pi 3B+
 
-RF Eye uses **BCM GPIO18**, which is **physical pin 12** on the Raspberry Pi 3B+ 40-pin header. The default configuration is for a passive piezo buzzer.
+RF Eye uses a **TMB12A03 active buzzer** on **BCM GPIO26**, which is **physical pin 37** on the Raspberry Pi 3B+ 40-pin header. GPIO26 is outside the first 26 header pins used by the CUQI display, so it remains available on that build.
 
-Recommended basic connection:
+Recommended signal wiring:
 
 ```text
-Passive 3.3 V piezo buzzer
-+  -> Raspberry Pi physical pin 12 (BCM GPIO18)
--  -> Raspberry Pi physical pin 14 (GND)
+TMB12A03 active buzzer / driver input
+SIG or +  -> Raspberry Pi physical pin 37 (BCM GPIO26)
+GND or -  -> Raspberry Pi physical pin 39 (GND)
 ```
 
-Do **not** connect a normal 4 ohm or 8 ohm loudspeaker directly to GPIO18. Use a transistor driver for a higher-current buzzer or an audio amplifier for a real loudspeaker.
+The exact power connection depends on the buzzer/module version. Do not put 5 V onto GPIO26. RF Eye treats the TMB12A03 as an active buzzer and switches it on/off in rhythm; it does not use GPIO PWM to change pitch.
 
-See the complete installation, pinout, transistor wiring, active/passive buzzer explanation, loudspeaker option and hardware test in:
+Do **not** connect a normal 4 ohm or 8 ohm loudspeaker directly to GPIO26. Use an audio amplifier for a real loudspeaker, and use a transistor/driver if the buzzer current exceeds what a GPIO signal can safely supply.
+
+See the complete wiring and hardware-test guide:
 
 **[docs/SPEAKER_WIRING_RPI3BPLUS.md](docs/SPEAKER_WIRING_RPI3BPLUS.md)**
 

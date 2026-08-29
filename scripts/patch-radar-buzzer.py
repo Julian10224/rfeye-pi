@@ -8,18 +8,26 @@ if len(sys.argv) != 2:
 p = Path(sys.argv[1])
 s = p.read_text()
 
-# RF Eye hardware build now targets the TMB12A03 active buzzer. Force active
-# mode even when an older persisted config still contains buzzer_passive=true.
+# RF Eye hardware build targets the TMB12A03 active buzzer on BCM GPIO26
+# (physical pin 37). Force the hardware profile even when an older persisted
+# config still contains GPIO18 or buzzer_passive=true.
 needle = '        self.buzzer = GPIOBuzzer(\n'
 if needle in s and 'TMB12A03 active buzzer' not in s:
     s = s.replace(
         needle,
-        '        # TMB12A03 active buzzer: do not drive its internal oscillator with PWM.\n'
+        '        # TMB12A03 active buzzer on BCM GPIO26 / physical pin 37.\n'
+        '        self.cfg["buzzer_gpio"] = 26\n'
         '        self.cfg["buzzer_passive"] = False\n'
         '        self.cfg["buzzer_model"] = "TMB12A03"\n'
         + needle,
         1,
     )
+elif needle in s and 'self.cfg["buzzer_gpio"] = 26' not in s:
+    # Keep reruns safe if an older version of this patch already inserted the
+    # active-buzzer block without the GPIO26 override.
+    old = '        self.cfg["buzzer_passive"] = False\n        self.cfg["buzzer_model"] = "TMB12A03"\n'
+    if old in s:
+        s = s.replace(old, '        self.cfg["buzzer_gpio"] = 26\n' + old, 1)
 
 # One-shot boot acknowledgement. Do not sound merely because the UI exists:
 # wait until the RF backend reports LIVE, so the rhythm confirms functionality.
@@ -59,27 +67,21 @@ new = '''    def _sound_logic(self, snap):
 
         # TMB12A03 has one fixed internal tone, so make the LOW/MEDIUM/HIGH
         # zones deliberately different by rhythm rather than tiny pitch changes.
-        # Each ON time is kept comfortably above the buzzer's response time.
         if lv > 0.72:
-            # HIGH/red: urgent triple burst with very short gaps.
             on_ms = int(self.cfg.get("buzzer_red_ms", 105))
             gap_ms = int(self.cfg.get("buzzer_red_gap_ms", 45))
             pattern = [(on_ms, gap_ms), (on_ms, gap_ms), (on_ms, 0)]
             base_interval = 0.46
         elif lv > 0.43:
-            # MEDIUM/yellow: unmistakable double beep.
             on_ms = int(self.cfg.get("buzzer_yellow_ms", 130))
             gap_ms = int(self.cfg.get("buzzer_yellow_gap_ms", 135))
             pattern = [(on_ms, gap_ms), (on_ms, 0)]
             base_interval = 0.95
         else:
-            # LOW/green: one long, calm pulse with a large quiet gap.
             on_ms = int(self.cfg.get("buzzer_green_ms", 185))
             pattern = [(on_ms, 0)]
             base_interval = 1.85
 
-        # Keep a little within-zone acceleration, but never enough to erase
-        # the strong one/double/triple-beep distinction between the colours.
         if self.cfg.get("audio_mode", "adaptive") == "adaptive":
             if lv > 0.72:
                 zone_n = max(0.0, min(1.0, (lv - 0.72) / 0.28))
@@ -93,9 +95,6 @@ new = '''    def _sound_logic(self, snap):
         else:
             interval = base_interval
 
-        # Ensure a complete pattern always has time to finish before a new one
-        # is started. beep_pattern itself is generation-safe, but this also makes
-        # the audible rhythm much cleaner and easier to recognise.
         pattern_ms = sum(on + gap for on, gap in pattern)
         interval = max(interval, pattern_ms / 1000.0 + 0.08)
 

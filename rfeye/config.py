@@ -111,8 +111,8 @@ DEFAULTS = {
     "audio_mode": "adaptive",
 
     # TMB12A03 is an ACTIVE electromagnetic buzzer with an internal oscillator.
-    # Do not PWM it as a passive piezo; pulse it on/off instead.
-    "buzzer_gpio": 18,
+    # RF Eye drives it on BCM GPIO26 (physical pin 37) and pulses it on/off.
+    "buzzer_gpio": 26,
     "buzzer_model": "TMB12A03",
     "buzzer_passive": False,
     "buzzer_active_high": True,
@@ -129,7 +129,7 @@ DEFAULTS = {
     "touch_invert_x": False,
     "touch_invert_y": False,
 
-    "app_version": "0.7.15",
+    "app_version": "0.7.16",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
