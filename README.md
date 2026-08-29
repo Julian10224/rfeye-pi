@@ -2,9 +2,9 @@
 
 RF Eye is a portrait RF-activity display for Raspberry Pi with RTL-SDR support, Wi-Fi configuration, spectrum view, OTA updates and a GPIO alert buzzer.
 
-## Current main firmware
+## Main firmware
 
-`main` now targets the **MHS35 / CUQI-style 3.5-inch 480x320 SPI touchscreen** with an **XPT2046** touch controller. Linux exposes the controller through the compatible `ADS7846 Touchscreen` driver.
+`main` is the **only supported RF Eye firmware branch** and targets the **MHS35 / CUQI-style 3.5-inch 480x320 SPI touchscreen** with an **XPT2046** touch controller. Linux exposes the controller through the compatible `ADS7846 Touchscreen` driver.
 
 The firmware renders a native **320x480 portrait UI** and rotates it once onto the physical 480x320 panel.
 
@@ -35,7 +35,7 @@ sudo reboot
 - Wi-Fi setup and rescanning
 - spectrum analyzer with threshold line
 - TMB12A03 active buzzer on BCM GPIO26 / physical pin 37
-- OTA software updates from the `main` branch
+- OTA software updates exclusively from `main`
 - appliance-style boot and RF Eye Plymouth splash
 - persistent RTL-SDR session, ctypes SDR path and optimized FFT/scanning code
 - startup optimizations for the SPI-only DRM display
@@ -55,7 +55,7 @@ The MHS35 profile uses:
 - a local `rfeye-mhs35.dtbo` derived from the OS `piscreen.dtbo`
 - `pressure-max=1024` for lighter taps
 
-The application suppresses the duplicate SDL/Wayland pointer events so a single physical tap is processed only once.
+The application suppresses duplicate SDL/Wayland pointer events so a single physical tap is processed only once.
 
 ## Boot optimizations
 
@@ -102,19 +102,17 @@ See `docs/SPEAKER_WIRING_RPI3BPLUS.md` for the full wiring guide.
 
 ## Software updates
 
-Open **Settings > Software update**. RF Eye reads:
+Open **Settings > Software update**. RF Eye reads only:
 
 ```text
 https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json
 ```
 
-The updater compares versions, downloads the main OTA ZIP, verifies its SHA-256 checksum, creates a backup and replaces the RF Eye application files.
+The updater compares versions, downloads the OTA ZIP from `main`, verifies its SHA-256 checksum, creates a backup and replaces the RF Eye application files.
 
-From version **0.7.24** onward the installed firmware permanently uses `main` for OTA updates.
+From version **0.7.24** onward the installed firmware permanently uses `main` for OTA updates. Future versions (`0.7.25`, `0.7.26`, and later) continue through the same `main` manifest and ZIP path.
 
-For compatibility with already installed 0.7.23 units, the former `display-cuqi-35-portrait` branch name may remain temporarily as an alias to the same main firmware. This prevents old units from losing access to their migration manifest. It is not a separate firmware line.
-
-System-level changes such as Device Tree, Plymouth and systemd overrides require root and therefore are applied by `install-cuqi35.sh`. Application-only OTA updates do not need root.
+System-level changes such as Device Tree, Plymouth and systemd overrides require root and are applied by `install-cuqi35.sh`. Application-only OTA updates do not need root.
 
 ## Publishing a new update
 
@@ -129,7 +127,7 @@ update/manifest.json
 update/rfeye-update.zip
 ```
 
-The generated manifest and ZIP URL both point to `main`, so subsequent updates continue from the same firmware branch.
+The generated manifest and ZIP URL both point to `main`, so every subsequent update remains on the same firmware branch.
 
 ## Documentation
 
