@@ -17,10 +17,18 @@ cp -a "$ROOT/rfeye/." "$STAGE/rfeye/"
 # Build the OTA payload from the same transformed runtime code produced by a
 # fresh installation. This keeps existing CUQI units aligned with install.sh.
 python3 "$ROOT/scripts/patch-startup-splash.py" "$STAGE/rfeye/app.py"
+python3 "$ROOT/scripts/patch-fast-app-start.py" "$STAGE/rfeye/app.py"
 python3 "$ROOT/scripts/patch-radar-buzzer.py" "$STAGE/rfeye/app.py"
 python3 "$ROOT/scripts/patch-fast-scan.py" "$STAGE/rfeye/sdr_backend.py"
 python3 "$ROOT/scripts/patch-persistent-sdr.py" "$STAGE/rfeye/sdr_backend.py"
-python3 -m py_compile "$STAGE/rfeye/app.py" "$STAGE/rfeye/sdr_backend.py" "$STAGE/rfeye/compact_display_patch.py" "$STAGE/rfeye/compact_ui_controls.py" "$STAGE/rfeye/compact_ui_draw.py" "$STAGE/rfeye/compact_wifi_ui.py"
+python3 -m py_compile \
+  "$STAGE/rfeye/app.py" \
+  "$STAGE/rfeye/sdr_backend.py" \
+  "$STAGE/rfeye/compact_display_patch.py" \
+  "$STAGE/rfeye/compact_ui_controls.py" \
+  "$STAGE/rfeye/compact_ui_draw.py" \
+  "$STAGE/rfeye/compact_touch.py" \
+  "$STAGE/rfeye/compact_wifi_ui.py"
 find "$STAGE/rfeye" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGE/rfeye" -name '*.pyc' -delete
 
