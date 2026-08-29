@@ -1,174 +1,151 @@
 # RF Eye buzzer / speaker installation — Raspberry Pi 3B+
 
-RF Eye currently drives its alert sound from **BCM GPIO18** using `RPi.GPIO`. On a Raspberry Pi 3B+ this is **physical header pin 12**.
+RF Eye drives its alert sound from **BCM GPIO26**, which is **physical header pin 37** on a Raspberry Pi 3B+. The supported RF Eye hardware profile is the **TMB12A03 active buzzer**.
 
 The software defaults are:
 
 ```text
-buzzer_gpio = 18
-buzzer_passive = true
+buzzer_gpio = 26
+buzzer_model = TMB12A03
+buzzer_passive = false
 buzzer_active_high = true
-buzzer_low_hz = 900
-buzzer_high_hz = 1500
-buzzer_duration_ms = 85
 ```
 
-The recommended hardware is a **small passive piezo buzzer**. Do **not** connect a normal 4 Ω or 8 Ω loudspeaker directly to a Raspberry Pi GPIO pin.
+RF Eye uses BCM numbering. `GPIO26` means BCM26 / physical pin 37, not physical pin 26.
 
 ## Raspberry Pi 3B+ pins used
 
-With the USB/Ethernet connectors at the bottom and the 40-pin header at the top of the board:
+Near the bottom end of the 40-pin header:
 
 ```text
 Raspberry Pi 3B+ 40-pin header
 
-        3V3  (1) (2)  5V
-              .   .
-              .   .
-              .   .
- GPIO18 (12)  .   . (11) GPIO17
-     GND (14) .   . (13) GPIO27
-              .   .
+ GPIO20 (38)  .   . (37) GPIO26  <- RF Eye alert signal
+     GND (40) .   . (39) GND     <- recommended nearby ground
 ```
 
 For RF Eye:
 
 | Function | BCM name | Physical pin |
 |---|---:|---:|
-| Alert output | GPIO18 | 12 |
-| Ground | GND | 14 (or another GND pin) |
-| 3.3 V, if required | 3V3 | 1 or 17 |
+| Alert output | GPIO26 | 37 |
+| Ground | GND | 39 (or another GND pin) |
+| 3.3 V, if required by a module | 3V3 | 1 or 17 |
 | 5 V, only if the selected module requires it | 5V | 2 or 4 |
 
-**Important:** RF Eye uses BCM numbering. `GPIO18` means BCM18 / physical pin 12, not physical pin 18.
+GPIO26 is outside the first 26 physical header pins used by the CUQI 3.5-inch SPI display, so the RF Eye CUQI display fork can use GPIO26 without consuming one of the display's 26-pin connections.
 
 ---
 
-## Option A — recommended: small passive piezo buzzer
+## Recommended RF Eye hardware — TMB12A03 active buzzer
 
-For a low-current passive piezo buzzer that is explicitly suitable for 3.3 V GPIO drive:
+The TMB12A03 is an **active buzzer**: it contains its own oscillator and therefore produces its own fixed pitch when enabled. RF Eye creates different alert states with different beep rhythms rather than PWM pitch changes.
+
+For a module or driver input that is confirmed to accept 3.3 V GPIO logic:
 
 ```text
-Pi pin 12 / GPIO18  --------  buzzer +
-Pi pin 14 / GND     --------  buzzer -
+Pi physical pin 37 / BCM GPIO26  ---> SIG / control input
+Pi physical pin 39 / GND         ---> GND
+module VCC                         ---> supply required by the module
 ```
 
-A passive buzzer does not generate its own fixed tone. RF Eye supplies PWM and therefore can use the configured 900 Hz and 1500 Hz alert tones.
+If the buzzer is a bare two-lead component and its current is not explicitly safe for direct GPIO drive, use a transistor driver rather than drawing buzzer current directly from GPIO26.
 
-### Installation
-
-1. Shut the Raspberry Pi down completely.
-2. Disconnect USB-C/micro-USB power before touching the GPIO header.
-3. Connect the buzzer positive lead to **physical pin 12 (GPIO18)**.
-4. Connect the buzzer negative lead to **physical pin 14 (GND)**.
-5. Check polarity if the buzzer has `+` and `-` markings.
-6. Power the Pi back on.
-
-Use this direct connection only for a small, low-current piezo device. If the component is magnetic, has an unknown current requirement, or draws more than a small GPIO load, use Option B.
+Do **not** put 5 V onto GPIO26. Raspberry Pi GPIO is 3.3 V logic.
 
 ---
 
-## Option B — preferred for a louder buzzer: transistor driver
+## Transistor driver for a higher-current buzzer
 
-A transistor prevents the buzzer current from being supplied by GPIO18 itself. This is the safer layout for a larger passive buzzer or a small magnetic sounder.
+A transistor is the preferred arrangement when the buzzer current is above a small GPIO load or when the current requirement is unknown.
 
-Parts:
+Typical parts:
 
 - NPN transistor such as **2N2222**, **PN2222** or **BC547**
-- **1 kΩ** resistor between GPIO18 and transistor base
-- buzzer rated for the supply voltage used
-- optional flyback diode for a magnetic/inductive buzzer; it is not required for an ordinary piezo element
+- approximately **1 kΩ** base resistor
+- buzzer rated for the selected supply voltage
+- flyback diode if the sounder is magnetic/inductive and its datasheet requires one
 
-Wiring:
+Typical control wiring:
 
 ```text
-                         +3.3 V or +5 V
-                              |
+                         +3.3 V or +5 V, as required by buzzer
                               |
                            buzzer +
                            buzzer -
                               |
                               +--------- Collector
                                         NPN transistor
-Pi GPIO18 / pin 12 -- 1kΩ -- Base
+Pi GPIO26 / pin 37 -- 1kΩ -- Base
                                         Emitter
                                            |
-Pi GND / pin 14 ---------------------------+
+Pi GND / pin 39 ---------------------------+
 ```
 
-If the buzzer is a magnetic/inductive type, place a flyback diode across the buzzer according to the buzzer/transistor datasheet. Do not guess the polarity or supply voltage: use the voltage printed on the component/module.
-
-GPIO18 remains a **3.3 V logic signal**, even if the buzzer itself is powered from 5 V through the transistor.
+The Pi and buzzer driver must share ground. The buzzer supply voltage does not change the GPIO signal level: GPIO26 remains a 3.3 V logic output.
 
 ---
 
-## Option C — actual 4 Ω / 8 Ω loudspeaker
+## Normal 4 Ω / 8 Ω loudspeaker
 
-Do **not** wire a normal loudspeaker between GPIO18 and GND. Its impedance is far too low for a Raspberry Pi GPIO pin.
+Do **not** wire a normal loudspeaker directly between GPIO26 and GND. Its impedance is too low for a Raspberry Pi GPIO.
 
-Use a small audio amplifier/module between the Pi and speaker, for example a 3.3/5 V amplifier that accepts a logic/PWM or audio input. The basic arrangement is:
+Use an audio amplifier/module between the Pi and speaker. The basic arrangement is:
 
 ```text
-GPIO18 / pin 12  ---> amplifier input
-Pi GND            ---> amplifier GND
-amplifier OUT     ---> 4 Ω / 8 Ω speaker
-amplifier power   ---> supply specified by amplifier manufacturer
+GPIO26 / pin 37  ---> amplifier/control input
+Pi GND           ---> amplifier GND
+amplifier OUT    ---> 4 Ω / 8 Ω speaker
+amplifier power  ---> supply specified by amplifier manufacturer
 ```
 
-The amplifier and Pi must share ground unless the amplifier documentation explicitly says otherwise.
-
-RF Eye currently outputs simple PWM alert tones on GPIO18; it is not a hi-fi analogue audio output. A passive piezo buzzer is therefore the simplest supported choice.
+RF Eye's current alert implementation is intended for the TMB12A03 active buzzer. It outputs timed on/off alert patterns, not hi-fi analogue audio.
 
 ---
 
 ## Three-pin buzzer module
 
-Some buzzer boards have pins marked `S`, `+`, `-` or `SIG`, `VCC`, `GND`.
+Some buzzer modules expose `S`, `+`, `-` or `SIG`, `VCC`, `GND`.
 
-Typical connection **only when the module documentation confirms 3.3 V logic compatibility**:
+When the module documentation confirms 3.3 V logic compatibility:
 
 ```text
-S / SIG  -> Pi physical pin 12 / GPIO18
-- / GND  -> Pi physical pin 14 / GND
-+ / VCC  -> 3.3 V or 5 V according to the module specification
+S / SIG  -> Pi physical pin 37 / GPIO26
+- / GND  -> Pi physical pin 39 / GND
++ / VCC  -> voltage required by the module
 ```
 
-Do not connect a module marked 5 V-only to the 3.3 V rail and do not put 5 V onto GPIO18.
+Do not connect a 5 V signal output to GPIO26.
 
 ---
 
 ## Software configuration
 
-RF Eye already defaults to GPIO18 and a passive buzzer, so no configuration change is normally required.
-
 The relevant defaults are in `rfeye/config.py`:
 
 ```python
-"buzzer_gpio": 18,
-"buzzer_passive": True,
+"buzzer_gpio": 26,
+"buzzer_model": "TMB12A03",
+"buzzer_passive": False,
 "buzzer_active_high": True,
-"buzzer_low_hz": 900,
-"buzzer_high_hz": 1500,
-"buzzer_duration_ms": 85,
 ```
 
-The driver is implemented in `rfeye/buzzer.py` and uses PWM when `buzzer_passive` is enabled.
+The installation/runtime patch also forces the current RF Eye hardware profile to GPIO26. This intentionally overrides an older persisted configuration that may still contain `buzzer_gpio: 18`.
 
-### Active buzzer instead of passive buzzer
+The driver is implemented in `rfeye/buzzer.py`. Because the TMB12A03 is active, RF Eye switches the output on and off instead of using PWM to select a tone.
 
-An active buzzer already contains its own oscillator. For that hardware set:
+The current alert rhythms are:
 
-```json
-"buzzer_passive": false
-```
-
-RF Eye will then switch GPIO18 on/off rather than trying to generate different PWM pitches. With an active buzzer the 900/1500 Hz distinction is generally not audible because the buzzer determines its own pitch.
+- LOW/green: one calm pulse
+- MEDIUM/yellow: double beep
+- HIGH/red: urgent triple beep
+- startup acknowledgement: short-short-long, once the SDR reaches `LIVE`
 
 ---
 
 ## Quick hardware test
 
-After wiring a supported passive buzzer, the following test can be run on the Pi:
+After wiring the TMB12A03 or its driver input, run:
 
 ```bash
 cd /opt/rfeye/rfeye
@@ -176,17 +153,15 @@ cd /opt/rfeye/rfeye
 import time
 from buzzer import GPIOBuzzer
 
-b = GPIOBuzzer(pin=18, passive=True, active_high=True)
+b = GPIOBuzzer(pin=26, passive=False, active_high=True)
 print("buzzer available:", b.available)
-b.beep(900, 250, 50)
-time.sleep(0.4)
-b.beep(1500, 250, 50)
-time.sleep(0.4)
+b.beep_pattern([(100, 80), (100, 80), (220, 0)])
+time.sleep(1.0)
 b.close()
 PY
 ```
 
-Expected result: two short tones, with the second tone higher than the first.
+Expected result: a short-short-long beep pattern.
 
 If `buzzer available: False` is printed, check the `RPi.GPIO` installation and GPIO permissions. The RF Eye installer installs the required Raspberry Pi GPIO package and adds the RF Eye user to the `gpio` group.
 
@@ -198,29 +173,27 @@ If `buzzer available: False` is printed, check the `RPi.GPIO` installation and G
 
 Check, in this order:
 
-1. Pi is fully powered and RF Eye is not muted.
-2. Buzzer `+` really goes to GPIO18 / physical pin 12.
-3. Buzzer `-` goes to GND, for example physical pin 14.
-4. The component is a **passive** buzzer when `buzzer_passive=true`.
-5. Run the quick hardware test above.
-6. Check the component voltage/current specification.
+1. RF Eye is not muted.
+2. The signal/control wire goes to **BCM GPIO26 / physical pin 37**.
+3. Ground is connected, preferably to physical pin 39.
+4. The buzzer/module has the correct supply voltage.
+5. The buzzer is an active TMB12A03-compatible device or uses a suitable driver.
+6. Run the quick hardware test above.
 
-### Only one fixed tone
+### Buzzer stays on continuously
 
-You probably have an active buzzer. Either replace it with a passive piezo buzzer or set `buzzer_passive` to `false`.
+Check whether the module is active-low rather than active-high, and verify that its signal pin is not being tied directly to a supply rail. RF Eye's default is `buzzer_active_high=true`.
 
 ### Pi becomes unstable or GPIO gets hot
 
-Disconnect power immediately. Do not drive a low-impedance speaker or high-current buzzer directly from GPIO. Use the transistor or amplifier arrangement described above.
+Disconnect power immediately. Do not power a high-current buzzer or low-impedance loudspeaker directly from GPIO26. Use a transistor driver or amplifier.
 
-## Recommended RF Eye build
-
-For the simplest reliable installation on a Raspberry Pi 3B+:
+## Recommended RF Eye connection
 
 ```text
-Passive 3.3 V piezo buzzer
-+  -> physical pin 12 (BCM GPIO18)
--  -> physical pin 14 (GND)
+TMB12A03 active buzzer / compatible driver
+signal -> physical pin 37 (BCM GPIO26)
+ground -> physical pin 39 (GND)
 ```
 
-For anything louder or with an unknown current draw, use a transistor driver rather than powering it directly from GPIO18.
+Use a transistor driver whenever the buzzer's input/current specification is not clearly safe for direct 3.3 V GPIO logic.

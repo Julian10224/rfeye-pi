@@ -9,7 +9,7 @@ curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/display-cuqi-3
 sudo reboot
 ```
 
-The LCD controller stays in its native 480x320 landscape orientation. RF Eye itself uses a native 320x480 portrait canvas and rotates that once into the physical framebuffer. There is no aspect-ratio scaling: the main screen, settings, Wi-Fi keyboard, connected-network details and spectrum page all have dedicated 320x480 layouts and touch regions.
+The LCD controller stays in its native 480x320 landscape orientation. RF Eye itself uses a native 320x480 portrait canvas and rotates that once into the physical framebuffer. There is no aspect-ratio scaling: the main screen, settings, Wi-Fi keyboard, connected-network details, Debug and spectrum page all have dedicated 320x480 layouts and touch regions.
 
 ## What the installer changes
 
@@ -22,6 +22,19 @@ The LCD controller stays in its native 480x320 landscape orientation. RF Eye its
 - Uses a 20 FPS UI target to balance responsiveness and SPI/CPU load.
 - Regenerates the RF Eye Plymouth boot artwork at native 480x320.
 - Installs `rfeye-cuqi35-status` for DRM, framebuffer, SPI and touchscreen diagnostics.
+
+## Buzzer / speaker pin
+
+This fork uses the same current RF Eye buzzer profile as `main`: **TMB12A03 active buzzer on BCM GPIO26 / physical pin 37**. A nearby ground is **physical pin 39**.
+
+GPIO26 is outside the first 26 physical header pins occupied by the CUQI SPI display, so the buzzer signal does not consume one of the display's 26-pin connections.
+
+```text
+TMB12A03 / compatible driver signal -> physical pin 37 (BCM GPIO26)
+GND                                  -> physical pin 39 (GND)
+```
+
+Do not put 5 V onto GPIO26. If the buzzer current is not explicitly safe for a GPIO signal, use a transistor/driver. See `docs/SPEAKER_WIRING_RPI3BPLUS.md` for the full wiring guide.
 
 ## Rotation
 
