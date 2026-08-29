@@ -10,23 +10,22 @@ progress_box.sprite = Sprite(progress_box.image);
 progress_bar.original_image = Image("progress_bar.png");
 progress_bar.sprite = Sprite();
 
-# Raspberry Pi can expose the firmware framebuffer first (for example 720x480)
-# and the MHS35 SPI DRM framebuffer later (480x320). Recalculate every refresh;
-# otherwise coordinates computed for the first mode survive the switch and the
-# RF Eye splash appears 120 px right / 80 px down and gets clipped.
+# The Pi exposes a 720x480 firmware framebuffer first and the 480x320 MHS35
+# DRM framebuffer later. Plymouth can assign the later output a non-zero
+# Window.GetX()/GetY() origin. Adding that origin to sprite coordinates makes
+# the centered image jump into a corner. Re-center from the active window size
+# only; sprite coordinates are already local to the Plymouth window.
 fun refresh_callback()
 {
-    screen_x = Window.GetX();
-    screen_y = Window.GetY();
     screen_width = Window.GetWidth();
     screen_height = Window.GetHeight();
 
-    logo.x = screen_x + (screen_width - logo.image.GetWidth()) / 2;
-    logo.y = screen_y + (screen_height - logo.image.GetHeight()) / 2;
+    logo.x = (screen_width - logo.image.GetWidth()) / 2;
+    logo.y = (screen_height - logo.image.GetHeight()) / 2;
     logo.sprite.SetPosition(logo.x, logo.y, -10);
 
-    progress_box.x = screen_x + ((screen_width - progress_box.image.GetWidth()) / 2) - 28;
-    progress_box.y = screen_y + (screen_height - progress_box.image.GetHeight()) / 2;
+    progress_box.x = ((screen_width - progress_box.image.GetWidth()) / 2) - 28;
+    progress_box.y = (screen_height - progress_box.image.GetHeight()) / 2;
     progress_box.sprite.SetPosition(progress_box.x, progress_box.y, 0);
 
     progress_bar.x = progress_box.x + 4;
@@ -38,9 +37,6 @@ refresh_callback();
 
 fun progress_callback(duration, progress)
 {
-    # Never present a completely finished bar while systemd is still handing
-    # over the display. The old 2x mapping reached 100% far too early and then
-    # looked frozen during a system timeout.
     visible = progress * 1.20;
     if (visible < 0.0) visible = 0.0;
     if (visible > 0.96) visible = 0.96;
