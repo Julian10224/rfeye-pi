@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_SLUG="${RFEYE_REPO:-Julian10224/rfeye-pi}"
-REPO_BRANCH="${RFEYE_BRANCH:-display-cuqi-35-portrait}"
+REPO_BRANCH="${RFEYE_BRANCH:-main}"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 ZIP="$ROOT/update/rfeye-update.zip"
 MANIFEST="$ROOT/update/manifest.json"
@@ -15,7 +15,7 @@ mkdir -p "$STAGE/rfeye"
 cp -a "$ROOT/rfeye/." "$STAGE/rfeye/"
 
 # Build the OTA payload from the same transformed runtime code produced by a
-# fresh installation. This keeps existing CUQI units aligned with install.sh.
+# fresh installation. This keeps existing MHS35 units aligned with install.sh.
 python3 "$ROOT/scripts/patch-startup-splash.py" "$STAGE/rfeye/app.py"
 python3 "$ROOT/scripts/patch-fast-app-start.py" "$STAGE/rfeye/app.py"
 python3 "$ROOT/scripts/patch-radar-buzzer.py" "$STAGE/rfeye/app.py"
