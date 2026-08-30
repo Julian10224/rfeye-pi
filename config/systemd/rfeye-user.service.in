@@ -1,0 +1,21 @@
+[Unit]
+Description=RF Eye user display service
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rfeye/rfeye
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=SDL_VIDEODRIVER=wayland
+Environment=PYGAME_HIDE_SUPPORT_PROMPT=1
+Environment=RFEYE_DISPLAY_PROFILE=cuqi35
+Environment=RFEYE_CONFIG=@HOME@/.config/rfeye/config.json
+# Poll frequently instead of sleeping in two-second chunks. This removes up to
+# almost two seconds of avoidable startup latency after Wayland becomes ready.
+ExecStart=/opt/rfeye/start-rfeye.sh
+Restart=always
+RestartSec=0.5
+
+[Install]
+WantedBy=default.target

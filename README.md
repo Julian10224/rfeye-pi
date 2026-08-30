@@ -1,75 +1,179 @@
-# RF Eye for Raspberry Pi
+# RF Eye 0.7.28 for Raspberry Pi
 
-RF Eye is a portrait RF-activity display for Raspberry Pi with RTL-SDR support, Wi-Fi configuration, spectrum view, OTA updates and a GPIO alert buzzer.
+This repository contains the complete **RF Eye 0.7.28 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
-## Main firmware
+`main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
-`main` is the **only supported RF Eye firmware branch** and targets the **MHS35 / CUQI-style 3.5-inch 480x320 SPI touchscreen** with an **XPT2046** touch controller. Linux exposes the controller through the compatible `ADS7846 Touchscreen` driver.
+## Supported hardware
 
-The firmware renders a native **320x480 portrait UI** and rotates it once onto the physical 480x320 panel.
+Reference setup:
 
-### Install
+- Raspberry Pi with Raspberry Pi OS, systemd, LightDM and Labwc
+- 3.5-inch MHS35/CUQI-style 480x320 SPI display
+- ILI9486/piscreen-compatible DRM display path
+- XPT2046 resistive touch exposed by Linux as `ADS7846 Touchscreen`
+- RTL-SDR compatible receiver
+- TMB12A03 active buzzer on BCM GPIO26 / physical pin 37
+- Wi-Fi through NetworkManager
+
+RF Eye renders a native **320x480 portrait UI** and rotates it once onto the physical **480x320** SPI framebuffer.
+
+## Install a new Raspberry Pi
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/install-cuqi35.sh | sudo bash
 sudo reboot
 ```
 
-If the complete image is upside-down:
+If the complete picture is upside-down:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/install-cuqi35.sh | sudo env RFEYE_ROTATION=ccw bash
 sudo reboot
 ```
 
-## Main features
+Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye ships its own tested Device Tree overlay and startup configuration.
 
-- native 320x480 portrait interface for MHS35/CUQI 3.5-inch displays
-- XPT2046 resistive touch with direct calibrated evdev input
-- RTL-SDR status and RF activity monitoring
-- CLEAR / FAR / MID / NEAR indication
-- three large radar meters with sticky MHz labels
-- default labels `381.000`, `382.500` and `384.000 MHz` before the first detection
-- sharp vector settings gear on the left
-- Settings, Mute and Spectrum touch controls
-- Wi-Fi setup and rescanning
-- spectrum analyzer with threshold line
-- TMB12A03 active buzzer on BCM GPIO26 / physical pin 37
-- OTA software updates exclusively from `main`
-- appliance-style boot and RF Eye Plymouth splash
-- persistent RTL-SDR session, ctypes SDR path and optimized FFT/scanning code
-- startup optimizations for the SPI-only DRM display
+## What a fresh install reproduces
 
-## MHS35 display and touch stack
+The installer reproduces the working 0.7.28 appliance path:
 
-RF Eye intentionally uses the Raspberry Pi kernel `piscreen` DRM path rather than installing the complete legacy GoodTFT/LCD-show graphics stack.
+- `/opt/rfeye/rfeye/` receives the final runtime from this repository
+- `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
+- `/opt/rfeye/.venv` is created for the application
+- the committed `rfeye-mhs35.dts` is compiled into the exact reference `rfeye-mhs35.dtbo`
+- boot selects `rfeye-mhs35` at 18 MHz SPI with DRM/XPT2046 settings
+- the reference LightDM and `systemd-user-sessions` units remove measured startup waits
+- `rfeye-user.service` starts RF Eye directly through `/opt/rfeye/start-rfeye.sh`
+- Labwc starts without Raspberry Pi desktop chrome
+- Kanshi leaves the SPI panel at its native DRM mode
+- unused desktop audio, NFS/RPC, cloud-init, printing and other appliance-unneeded services are disabled or masked
+- Plymouth and `Made by: Julian` startup artwork are installed into initramfs
+- NetworkManager remains enabled and associates in parallel with local display startup
+- OTA updates permanently use the `main` manifest
 
-The MHS35 profile uses:
+A fresh installation also receives `config/reference-config-cuqi35.json` as its initial **non-secret** RF Eye settings. It captures the working reference unit's display profile, current 22 dB sensitivity and touch calibration. Existing installations keep their own settings during reinstall/update.
 
-- 480x320 ILI9486/piscreen-compatible SPI display
-- XPT2046 through Linux `ADS7846 Touchscreen`
-- SPI0.1 touch chip select
-- GPIO17 PENIRQ
-- X-plate value `xohms=60`
-- RF Eye direct evdev touch reader
-- a local `rfeye-mhs35.dtbo` derived from the OS `piscreen.dtbo`
-- `pressure-max=1024` for lighter taps
+Wi-Fi credentials and other account/machine secrets are **not** stored in this repository.
 
-The application suppresses duplicate SDL/Wayland pointer events so a single physical tap is processed only once.
+## Reference startup path
 
-## Boot optimizations
+```text
+boot firmware
+  -> RF Eye Plymouth splash
+  -> systemd-user-sessions.service without network.target wait
+  -> LightDM without renderD128 wait
+  -> Labwc user session
+  -> rfeye-user.service
+  -> /opt/rfeye/start-rfeye.sh
+  -> /opt/rfeye/.venv/bin/python /opt/rfeye/rfeye/app.py
+```
 
-The MHS35 firmware contains the boot fixes measured on the live Raspberry Pi:
+The app waits for the Wayland socket before display initialization, so the user service does not need another shell polling loop. The service restarts automatically with `Restart=always` and `RestartSec=0.5`.
 
-- removes LightDM's invalid `/dev/dri/renderD128` dependency while retaining `/dev/dri/card0`
-- removes the network ordering dependency from the local graphical-session critical path
-- disables unused NFS/RPC boot services for the RF Eye appliance
-- disables unused PipeWire/WirePlumber desktop audio services in the RF Eye user session
-- starts RF Eye/Pygame as early as possible while Labwc is coming up
-- defers the SDR backend import until the display path is ready
-- keeps Plymouth centered across the firmware-framebuffer to SPI-framebuffer handoff
+## Captured 0.7.28 startup files
 
-The previous `renderD128` bug caused roughly 89 seconds of unnecessary waiting on the tested Pi.
+- `config/systemd/lightdm.service` — card0 dependency without nonexistent renderD128
+- `config/systemd/systemd-user-sessions.service` — no network.target wait
+- `config/systemd/rfeye-user.service.in` — direct RF Eye user-service template
+- `config/systemd/rfeye-user-fast-ui.conf` — reference SDL/GTK startup environment
+- `config/labwc-autostart` — removes panel/file-manager/on-screen-keyboard processes
+- `config/labwc/rc.xml` — maps ADS7846/XPT2046 touch to the SPI output
+- `config/kanshi-config` — native SPI display profile without HDMI override
+- `config/overlays/rfeye-mhs35.dts` — tested display/touch source that recompiles byte-for-byte to the reference overlay
+
+The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
+
+## User interface in 0.7.28
+
+The compact profile contains:
+
+- 320x480 portrait home screen
+- three RF activity meters with retained MHz labels
+- settings gear and large touch targets
+- Sound/Mute and Spectrum controls on the home screen
+- Settings with eight rows
+- sensitivity slider from 12 to 30 dB
+- brightness slider
+- Wi-Fi scan/connection UI
+- software update action
+- Debug performance page
+- touch calibration available only from Debug
+- RF recording with an explicit large **NEE / JA** confirmation page
+- `Made by: Julian` in Settings/startup artwork
+
+Audio mode stays on the adaptive RF Eye behavior. The active TMB12A03 buzzer uses rhythm changes rather than pitch changes.
+
+## Touch input
+
+RF Eye reads the XPT2046 controller directly through Linux evdev. SDL/Wayland duplicate pointer events are filtered so one physical press cannot activate two controls.
+
+The reference calibration is included for a new install. If a replacement panel differs, use:
+
+```text
+Settings -> Debug -> Touch calibration
+```
+
+The five-point affine calibration is saved immediately in the local RF Eye config.
+
+## RF activity scanner
+
+The SDR backend keeps a persistent `librtlsdr` handle open where possible and uses FFT-based scanning over the configured bands. It includes confirmation/hysteresis, burst gating, site/mobile pairing logic and rejection of broadband impulsive interference.
+
+The display reports RF activity/status only; it does not identify a transmitter or determine an exact physical distance.
+
+## RF recording
+
+**Record RF** stores a short time series for later analysis. Recording starts only after a deliberate press on the lower **JA** button; the upper **NEE** area cancels and returns to Settings.
+
+Captured JSON files are stored locally under:
+
+```text
+~/.local/share/rfeye/captures/
+```
+
+They are not committed to GitHub automatically.
+
+## Buzzer wiring
+
+RF Eye 0.7.28 uses a **TMB12A03 active buzzer**:
+
+```text
+TMB12A03 signal -> physical pin 37 (BCM GPIO26)
+GND             -> physical pin 39 (GND)
+```
+
+Do not put 5 V onto GPIO26. A normal low-impedance speaker must not be connected directly to the GPIO. See `docs/SPEAKER_WIRING_RPI3BPLUS.md` for the wiring notes.
+
+## Software updates
+
+RF Eye checks only the `main` manifest:
+
+```text
+https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json
+```
+
+That manifest points to the deterministic OTA package on `main`:
+
+```text
+https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/rfeye-update.zip
+```
+
+The updater downloads the ZIP, verifies its SHA-256, makes a backup and replaces the RF Eye application files.
+
+Application-only OTA updates update `/opt/rfeye/rfeye`. Device Tree, systemd, Plymouth and boot-service changes are applied by `install-cuqi35.sh` and therefore require root.
+
+## Release build
+
+`VERSION` and `rfeye/config.py` identify this release as **0.7.28**.
+
+Build the OTA package with:
+
+```bash
+./scripts/build-release.sh
+```
+
+The build normalizes archive metadata so unchanged source produces the same ZIP SHA-256. GitHub Actions rebuilds the `main` manifest/ZIP after a release commit and runs syntax, compact-UI, startup-snapshot and deterministic-release checks.
 
 ## Diagnostics
 
@@ -77,58 +181,51 @@ The previous `renderD128` bug caused roughly 89 seconds of unnecessary waiting o
 sudo rfeye-cuqi35-status
 ```
 
-Useful manual checks:
+Useful checks:
 
 ```bash
-grep -E 'spi|piscreen|rfeye-mhs35' /boot/firmware/config.txt
+grep -E 'rfeye-mhs35|spi|disable_splash|auto_initramfs' /boot/firmware/config.txt
 grep -B1 -A6 -Ei 'ADS7846|XPT2046|Touchscreen' /proc/bus/input/devices
 systemctl show lightdm.service -p Wants -p After
+systemctl show systemd-user-sessions.service -p After
+systemctl --user cat rfeye-user.service
 systemd-analyze
-evtest /dev/input/event0
 ```
 
-## Buzzer wiring
+The installed overlay can be compared with the repository using:
 
-RF Eye uses a **TMB12A03 active buzzer** on **BCM GPIO26**, physical pin **37**. Ground can use physical pin **39**.
+```bash
+sha256sum /boot/firmware/overlays/rfeye-mhs35.dtbo
+```
+
+## Repository layout
 
 ```text
-TMB12A03 signal -> physical pin 37 (BCM GPIO26)
-GND             -> physical pin 39 (GND)
+rfeye/                         final runtime copied to /opt/rfeye/rfeye
+scripts/start-rfeye.sh         direct application launcher
+scripts/apply-cuqi35-system-fixes.sh
+scripts/optimize-rpi-appliance.sh
+config/overlays/               exact MHS35 Device Tree source
+config/systemd/                reference startup units/templates
+config/labwc-autostart         reference appliance session
+config/labwc/rc.xml            touch/output mapping
+config/kanshi-config           native SPI profile
+config/reference-config-cuqi35.json
+config/plymouth/rfeye/         boot splash theme
+update/manifest.json           OTA metadata for main
+update/rfeye-update.zip        deterministic OTA package
 ```
 
-Do not put 5 V onto GPIO26. A normal 4-ohm or 8-ohm loudspeaker requires an amplifier and must not be connected directly to the GPIO.
+## Source-of-truth rule
 
-See `docs/SPEAKER_WIRING_RPI3BPLUS.md` for the full wiring guide.
+For 0.7.28 and later, do not add install-time Python patch chains that mutate the application after checkout. The files under `rfeye/` are the final tested runtime. A fresh install and an OTA build must receive the same application files.
 
-## Software updates
+When publishing a later release:
 
-Open **Settings > Software update**. RF Eye reads only:
+1. change and test the runtime under `rfeye/`;
+2. update `VERSION` and `rfeye/config.py` together;
+3. update any required reference startup/config files explicitly;
+4. run the repository checks and `scripts/build-release.sh`;
+5. commit the tested snapshot to `main`.
 
-```text
-https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json
-```
-
-The updater compares versions, downloads the OTA ZIP from `main`, verifies its SHA-256 checksum, creates a backup and replaces the RF Eye application files.
-
-From version **0.7.24** onward the installed firmware permanently uses `main` for OTA updates. Future versions (`0.7.25`, `0.7.26`, and later) continue through the same `main` manifest and ZIP path.
-
-System-level changes such as Device Tree, Plymouth and systemd overrides require root and are applied by `install-cuqi35.sh`. Application-only OTA updates do not need root.
-
-## Publishing a new update
-
-1. Increase `VERSION`.
-2. Set the same version in `rfeye/config.py`.
-3. Commit and push to `main`.
-
-GitHub Actions automatically runs the MHS35 checks and rebuilds:
-
-```text
-update/manifest.json
-update/rfeye-update.zip
-```
-
-The generated manifest and ZIP URL both point to `main`, so every subsequent update remains on the same firmware branch.
-
-## Documentation
-
-See [docs/CUQI35.md](docs/CUQI35.md) for MHS35 display, touch and boot details.
+That keeps GitHub `main` installable as a complete RF Eye appliance rather than as a partial code dump.

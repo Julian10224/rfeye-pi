@@ -1,86 +1,76 @@
-name: RF Eye MHS35 main checks
+name: RF Eye 0.7.28 appliance checks
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    paths:
-      - 'install-cuqi35.sh'
-      - 'rfeye/compact_*.py'
-      - 'config/plymouth/rfeye/rfeye.script'
-      - 'scripts/apply-cuqi35-system-fixes.sh'
-      - 'scripts/patch-*.py'
-      - 'scripts/build-release.sh'
-      - 'scripts/generate-plymouth-assets-cuqi35.py'
 
 jobs:
-  syntax:
+  source-of-truth:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check installer and release shell syntax
+      - name: Install Device Tree compiler
+        run: sudo apt-get update && sudo apt-get install -y device-tree-compiler
+      - name: Check shell and Python syntax
         run: |
-          bash -n install-cuqi35.sh
-          bash -n scripts/apply-cuqi35-system-fixes.sh
-          bash -n scripts/build-release.sh
-      - name: Check compact and main patch Python syntax
-        run: >-
-          python3 -m py_compile
-          rfeye/compact_display_patch.py
-          rfeye/compact_ui_controls.py
-          rfeye/compact_ui_draw.py
-          rfeye/compact_touch.py
-          rfeye/compact_wifi_ui.py
-          scripts/generate-plymouth-assets-cuqi35.py
-          scripts/patch-startup-splash.py
-          scripts/patch-fast-app-start.py
-          scripts/patch-radar-buzzer.py
-          scripts/patch-fast-scan.py
-          scripts/patch-persistent-sdr.py
-          scripts/patch-ctypes-sdr.py
-          scripts/patch-debug-menu.py
-          scripts/patch-debug-fix.py
-      - name: Verify MHS35 layout, boot and main OTA assumptions
+          bash -n install.sh install-cuqi35.sh scripts/start-rfeye.sh \
+            scripts/apply-cuqi35-system-fixes.sh scripts/optimize-rpi-appliance.sh \
+            scripts/install-networkmanager-policy.sh scripts/build-release.sh
+          python3 -m py_compile rfeye/*.py scripts/generate-plymouth-assets.py \
+            scripts/generate-plymouth-assets-cuqi35.py
+      - name: Verify release identity and compact UI
+        run: |
+          test "$(tr -d '[:space:]' < VERSION)" = "0.7.28"
+          grep -q '"app_version": "0.7.28"' rfeye/config.py
+          grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
+          grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
+          grep -q 'if app.page == "record_confirm"' rfeye/compact_ui_controls.py
+          grep -q 'if 350 <= y <= 455' rfeye/compact_ui_controls.py
+          grep -q 'TOUCH CALIBRATION' rfeye/compact_ui_draw.py
+          grep -q 'Made by: Julian' rfeye/compact_ui_draw.py
+          grep -q '"audio_mode": "adaptive"' rfeye/config.py
+          ! grep -q 'python3 scripts/patch-' install.sh install-cuqi35.sh scripts/build-release.sh
+      - name: Verify captured reference startup files
+        run: |
+          printf '%s  %s\n' \
+            '4a24897b09e3dfee4c99a1c39fc8b28a6489fc7bbd7f0709e176e70099b686af' 'config/systemd/lightdm.service' \
+            '18dceb032fac2d7bbf871e07199bc1b1ea8fb3291fa24b07fe78ec8956a6961d' 'config/systemd/systemd-user-sessions.service' \
+            '2876bfda5ce3a28cc6c08213ba637f34fe3c647dfdc6c23252d1e00a2d044884' 'config/systemd/rfeye-user-fast-ui.conf' \
+            'b2c64ea2a80c4bf785780f8f6d2cc4cb3ee4132c90fb089e08776e8dc9625f76' 'config/labwc-autostart' \
+            '9d74c1cdbd13b40c0e502a953a26ed2b9abff763b62715943796aeabc7617c96' 'config/kanshi-config' \
+            'be5c897064e26e8120f40502286fc811b4ddfbef2f2fcfbc5a56fd3fbbba813f' 'scripts/start-rfeye.sh' \
+            | sha256sum -c -
+          ! grep -q 'renderD128' config/systemd/lightdm.service
+          grep -q 'dev-dri-card0.device' config/systemd/lightdm.service
+          ! grep -q 'network.target' config/systemd/systemd-user-sessions.service
+          grep -q '^ExecStart=/opt/rfeye/start-rfeye.sh$' config/systemd/rfeye-user.service.in
+          grep -q 'config/overlays/rfeye-mhs35.dts' scripts/apply-cuqi35-system-fixes.sh
+          grep -q 'config/systemd/lightdm.service' scripts/apply-cuqi35-system-fixes.sh
+          grep -q 'reference-config-cuqi35.json' install-cuqi35.sh
+          dtc -@ -I dts -O dtb -o /tmp/rfeye-mhs35-test.dtbo config/overlays/rfeye-mhs35.dts
+          echo '1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34  /tmp/rfeye-mhs35-test.dtbo' | sha256sum -c -
+      - name: Verify fresh-install reference settings
         run: |
           python3 - <<'PY'
-          import sys
-          sys.path.insert(0, 'rfeye')
-          import compact_ui_draw as ui
-          import compact_touch as touch
-          settings_bottom = ui.SETTINGS_TOP + (ui.SETTINGS_COUNT - 1) * ui.SETTINGS_STEP + ui.SETTINGS_HEIGHT
-          assert settings_bottom <= 480, settings_bottom
-          assert hasattr(ui, 'draw_debug')
-          assert hasattr(ui, 'draw_gear')
-          assert touch.RAW_X_TOP > touch.RAW_X_BOTTOM
-          assert touch.RAW_Y_RIGHT > touch.RAW_Y_LEFT
-          print('settings bottom:', settings_bottom)
+          import json
+          c=json.load(open('config/reference-config-cuqi35.json'))
+          assert c['app_version']=='0.7.28'
+          assert c['display_profile']=='cuqi35'
+          assert (c['ui_width'],c['ui_height'])==(320,480)
+          assert (c['physical_width'],c['physical_height'])==(480,320)
+          assert c['threshold_db']==22.0
+          assert c['audio_mode']=='adaptive'
+          assert len(c['touch_calibration_affine'])==6
+          assert 'password' not in ''.join(c).lower()
           PY
-          grep -q '319-int(round(nx\*319.0)),479-int(round(ny\*479.0))' rfeye/compact_touch.py
-          grep -q 'Plymouth.SetRefreshFunction' config/plymouth/rfeye/rfeye.script
-          ! grep -q 'Window.GetX' config/plymouth/rfeye/rfeye.script
-          ! grep -q 'Window.GetY' config/plymouth/rfeye/rfeye.script
-          grep -q 'dev-dri-renderD128' scripts/apply-cuqi35-system-fixes.sh
-          grep -q 'systemd-user-sessions.service' scripts/apply-cuqi35-system-fixes.sh
-          grep -q 'network.target' scripts/apply-cuqi35-system-fixes.sh
-          grep -q 'pressure-max' scripts/apply-cuqi35-system-fixes.sh
-          grep -q 'rfeye-pi/main/update/manifest.json' rfeye/config.py
-          grep -q 'RFEYE_BRANCH:-main' scripts/build-release.sh
-      - name: Exercise full installer patch chain
+      - name: Verify deterministic OTA artifact
         run: |
-          mkdir -p /tmp/rfeye-patch-test
-          cp rfeye/app.py /tmp/rfeye-patch-test/app.py
-          cp rfeye/sdr_backend.py /tmp/rfeye-patch-test/sdr_backend.py
-          python3 scripts/patch-startup-splash.py /tmp/rfeye-patch-test/app.py
-          python3 scripts/patch-fast-app-start.py /tmp/rfeye-patch-test/app.py
-          python3 scripts/patch-radar-buzzer.py /tmp/rfeye-patch-test/app.py
-          python3 scripts/patch-fast-scan.py /tmp/rfeye-patch-test/sdr_backend.py
-          python3 scripts/patch-persistent-sdr.py /tmp/rfeye-patch-test/sdr_backend.py
-          python3 -m py_compile /tmp/rfeye-patch-test/app.py /tmp/rfeye-patch-test/sdr_backend.py
-          grep -q 'def _draw_debug' /tmp/rfeye-patch-test/app.py
-          grep -q 'center=False, right=False' /tmp/rfeye-patch-test/app.py
-          grep -q 'ready_chime_done' /tmp/rfeye-patch-test/app.py
-          grep -q 'pygame.display.init()' /tmp/rfeye-patch-test/app.py
-          grep -q 'RFEYE_BOOT pygame-imported' /tmp/rfeye-patch-test/app.py
-          grep -q 'from sdr_backend import SDRBackend' /tmp/rfeye-patch-test/app.py
-          grep -q 'CTYPES PERSISTENT' /tmp/rfeye-patch-test/sdr_backend.py
+          chmod +x scripts/build-release.sh
+          ./scripts/build-release.sh
+          H1="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
+          ./scripts/build-release.sh
+          H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
+          test "$H1" = "$H2"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.28"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"

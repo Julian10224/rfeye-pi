@@ -14,13 +14,12 @@ trap cleanup EXIT
 mkdir -p "$STAGE/rfeye"
 cp -a "$ROOT/rfeye/." "$STAGE/rfeye/"
 
-# Build the OTA payload from the same transformed runtime code produced by a
-# fresh installation. This keeps existing MHS35 units aligned with install.sh.
-python3 "$ROOT/scripts/patch-startup-splash.py" "$STAGE/rfeye/app.py"
-python3 "$ROOT/scripts/patch-fast-app-start.py" "$STAGE/rfeye/app.py"
-python3 "$ROOT/scripts/patch-radar-buzzer.py" "$STAGE/rfeye/app.py"
-python3 "$ROOT/scripts/patch-fast-scan.py" "$STAGE/rfeye/sdr_backend.py"
-python3 "$ROOT/scripts/patch-persistent-sdr.py" "$STAGE/rfeye/sdr_backend.py"
+# The repository runtime is the source of truth. Do not mutate it with legacy
+# post-install patchers; fresh installs and OTA updates must receive identical code.
+find "$STAGE/rfeye" -type d -name '.backup-*' -prune -exec rm -rf {} +
+find "$STAGE/rfeye" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$STAGE/rfeye" -name '*.bak*' -delete
+
 python3 -m py_compile \
   "$STAGE/rfeye/app.py" \
   "$STAGE/rfeye/sdr_backend.py" \
@@ -32,10 +31,12 @@ python3 -m py_compile \
 find "$STAGE/rfeye" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGE/rfeye" -name '*.pyc' -delete
 
+# Normalize metadata so rebuilding unchanged source produces the same OTA SHA.
+find "$STAGE/rfeye" -exec touch -h -t 202001010000 {} +
 rm -f "$ZIP"
 (
   cd "$STAGE"
-  zip -qr "$ZIP" rfeye
+  find rfeye -type f -print | LC_ALL=C sort | zip -X -q "$ZIP" -@
 )
 SHA="$(sha256sum "$ZIP" | awk '{print $1}')"
 URL="https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/update/rfeye-update.zip"
@@ -48,5 +49,5 @@ cat > "$MANIFEST" <<EOF
 }
 EOF
 
-echo "Built patched RF Eye ${VERSION} for ${REPO_BRANCH}"
+echo "Built RF Eye ${VERSION} source-of-truth release for ${REPO_BRANCH}"
 echo "SHA256: ${SHA}"

@@ -1,12 +1,14 @@
 #!/bin/sh
-
-# RF Eye appliance session: no desktop panel or on-screen keyboard.
-/usr/bin/kanshi &
-sleep 2
-
-# Kill anything left from a previous graphical session.
-pkill -x wf-panel-pi 2>/dev/null || true
-pkill -x lxpanel 2>/dev/null || true
-pkill -x squeekboard 2>/dev/null || true
-
-# RF Eye is managed by rfeye-user.service to prevent duplicate RTL-SDR access.
+(
+  i=0
+  while [ "$i" -lt 30 ]; do
+    pgrep -f '^/bin/sh /usr/bin/lwrespawn /usr/bin/wf-panel-pi$' | xargs -r kill 2>/dev/null || true
+    pgrep -f '^/bin/sh /usr/bin/lwrespawn /usr/bin/pcmanfm-pi$' | xargs -r kill 2>/dev/null || true
+    pkill -x wf-panel-pi 2>/dev/null || true
+    pkill -x pcmanfm-pi 2>/dev/null || true
+    pkill -x pcmanfm 2>/dev/null || true
+    pkill -x squeekboard 2>/dev/null || true
+    i=$((i + 1))
+    sleep 0.5
+  done
+) &

@@ -1,24 +1,17 @@
 """Direct XPT2046/ADS7846 touch reader for the MHS35 compact profile."""
 from collections import deque
 import os, select, struct, threading, time
-from pathlib import Path
 
-# Live four-corner calibration on the RF Eye MHS35/XPT2046 panel.
-# Linux exposes XPT2046 through the ADS7846-compatible driver and the piscreen
-# overlay already swaps the controller axes before evdev events are emitted.
-RAW_X_TOP = 3936.0
-RAW_X_BOTTOM = 227.0
-RAW_Y_LEFT = 268.0
-RAW_Y_RIGHT = 3880.0
+# Factory affine transform derived from the working MHS35 four-corner values.
+# ui_x = a*raw_x + b*raw_y + c ; ui_y = d*raw_x + e*raw_y + f
+FACTORY_AFFINE = [0.0, -0.08831672203765227, 342.6688815060908,
+                  -0.12914532218926936, 0.0, 508.31598813696417]
 EV_KEY=1; EV_ABS=3; EV_SYN=0
 BTN_TOUCH=330; ABS_X=0; ABS_Y=1; SYN_REPORT=0
 EVENT=struct.Struct("llHHi")
 
-
-def _clamp(v): return max(0.0,min(1.0,v))
-
-
 def _event_device():
+    from pathlib import Path
     for name in Path('/sys/class/input').glob('event*/device/name'):
         try:
             label=name.read_text().strip().lower()
@@ -28,49 +21,63 @@ def _event_device():
             pass
     return None
 
+def _coeffs(app):
+    values=app.cfg.get('touch_calibration_affine', FACTORY_AFFINE)
+    try:
+        values=[float(v) for v in values]
+        if len(values)==6: return values
+    except Exception:
+        pass
+    return list(FACTORY_AFFINE)
 
-def _map(raw_x,raw_y):
-    # Measured physical axes:
-    #   left/right = event ABS_Y, low -> high
-    #   top/bottom = event ABS_X, low -> high
-    # RF Eye's displayed portrait canvas is mounted 180 degrees relative to
-    # those raw panel axes, so invert both once after scaling.
-    nx=_clamp((float(raw_y)-RAW_Y_LEFT)/(RAW_Y_RIGHT-RAW_Y_LEFT))
-    ny=_clamp((float(raw_x)-RAW_X_BOTTOM)/(RAW_X_TOP-RAW_X_BOTTOM))
-    return 319-int(round(nx*319.0)),479-int(round(ny*479.0))
-
+def _map(app,raw_x,raw_y):
+    a,b,c,d,e,f=_coeffs(app)
+    x=a*float(raw_x)+b*float(raw_y)+c
+    y=d*float(raw_x)+e*float(raw_y)+f
+    return max(0,min(319,int(round(x)))), max(0,min(479,int(round(y))))
 
 def install(app):
     path=_event_device()
-    app._direct_touch_queue=deque(maxlen=8)
+    app._direct_touch_queue=deque(maxlen=12)
     app._direct_touch_path=path
     if not path: return
     def worker():
-        raw_x=2048; raw_y=2048; pending=False
+        raw_x=2048; raw_y=2048; pending=False; touching=False; dirty=False; last_emit=0.0
         while getattr(app,'running',True):
             try:
                 fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK)
-                try:
-                    while getattr(app,'running',True):
-                        ready,_,_=select.select([fd],[],[],0.25)
-                        if not ready: continue
-                        data=os.read(fd,EVENT.size*32)
-                        for off in range(0,len(data)-EVENT.size+1,EVENT.size):
-                            _sec,_usec,etype,code,value=EVENT.unpack_from(data,off)
-                            if etype==EV_ABS and code==ABS_X: raw_x=value
-                            elif etype==EV_ABS and code==ABS_Y: raw_y=value
-                            elif etype==EV_KEY and code==BTN_TOUCH and value==1: pending=True
-                            elif etype==EV_SYN and code==SYN_REPORT and pending:
-                                app._direct_touch_queue.append(_map(raw_x,raw_y)); pending=False
-                finally:
-                    os.close(fd)
+                while getattr(app,'running',True):
+                    ready,_,_=select.select([fd],[],[],0.25)
+                    if not ready: continue
+                    data=os.read(fd,EVENT.size*32)
+                    for off in range(0,len(data)-EVENT.size+1,EVENT.size):
+                        _sec,_usec,etype,code,value=EVENT.unpack_from(data,off)
+                        if etype==EV_ABS and code==ABS_X: raw_x=value; dirty=True
+                        elif etype==EV_ABS and code==ABS_Y: raw_y=value; dirty=True
+                        elif etype==EV_KEY and code==BTN_TOUCH:
+                            if value==1: touching=True; pending=True
+                            elif value==0: touching=False
+                        elif etype==EV_SYN and code==SYN_REPORT:
+                            mapped=_map(app,raw_x,raw_y); now=time.monotonic()
+                            slider_drag=(touching and dirty and getattr(app,'page',None)=='settings' and ((135<=mapped[1]<=190) or (205<=mapped[1]<=260)) and now-last_emit>=0.06)
+                            if pending or slider_drag:
+                                app._direct_touch_queue.append((raw_x,raw_y,mapped[0],mapped[1])); last_emit=now
+                            pending=False; dirty=False
+                os.close(fd)
             except Exception:
                 time.sleep(0.5)
     threading.Thread(target=worker,name='rfeye-xpt2046',daemon=True).start()
-
 
 def drain(app):
     q=getattr(app,'_direct_touch_queue',None)
     if not q: return
     while q:
-        x,y=q.popleft(); app._tap(x,y)
+        raw_x,raw_y,x,y=q.popleft()
+        try:
+            with open('/tmp/rfeye-touch.log','a') as f: f.write(f'{time.time():.3f} raw={raw_x},{raw_y} ui={x},{y} page={app.page}\n')
+        except Exception: pass
+        if getattr(app,'page',None)=='calibration':
+            from compact_ui_controls import capture_calibration
+            capture_calibration(app,raw_x,raw_y)
+        else:
+            app._tap(x,y)

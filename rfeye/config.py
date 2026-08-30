@@ -87,6 +87,8 @@ DEFAULTS = {
     "duplex_pair_tolerance_hz": 1000.0,
     "duplex_pair_min_quality": 0.28,
     "require_duplex_pair": True,
+    "require_current_duplex_pair": True,
+    "max_mobile_candidates_per_sweep": 12,
     "candidate_min_confidence": 0.48,
     "confidence_attack": 0.58,
     "confidence_release": 0.20,
@@ -95,7 +97,11 @@ DEFAULTS = {
     "ui_fps": 20,
     "gain": "auto",
     "ppm": 0,
-    "threshold_db": 10.0,
+    "threshold_db": 12.0,
+    "threshold_min_db": 12.0,
+    "threshold_max_db": 30.0,
+    "threshold_step_db": 1.0,
+    "rf_record_duration_s": 15.0,
     "confirm_hits": 2,
     "clear_hits": 2,
     "mobile_band_start_hz": 380_000_000,
@@ -107,6 +113,7 @@ DEFAULTS = {
     "demo_mode": False,
     "auto_demo_if_no_sdr": False,
     "audio_mode": "adaptive",
+    "touch_calibration_affine": [0.0, -0.08831672203765227, 342.6688815060908, -0.12914532218926936, 0.0, 508.31598813696417],
     "buzzer_gpio": 26,
     "buzzer_model": "TMB12A03",
     "buzzer_passive": False,
@@ -122,7 +129,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.24",
+    "app_version": "0.7.28",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -145,12 +152,23 @@ def load_config():
             cfg.update(json.loads(p.read_text()))
     except Exception:
         pass
+    # RF Eye hardware profile is fixed for this branch too. Migrate stale
+    # persisted GPIO18 settings when an existing unit receives the OTA update.
     cfg["buzzer_gpio"] = 26
     cfg["buzzer_model"] = "TMB12A03"
     cfg["buzzer_passive"] = False
     cfg["buzzer_active_high"] = True
+    cfg["audio_mode"] = "adaptive"
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
+    # Sensitivity is a bounded relative burst threshold. Migrate older saved
+    # values (the former UI allowed 6..24 dB) into the new 12..30 dB range.
+    lo = float(cfg.get("threshold_min_db", DEFAULTS["threshold_min_db"]))
+    hi = float(cfg.get("threshold_max_db", DEFAULTS["threshold_max_db"]))
+    try:
+        cfg["threshold_db"] = max(lo, min(hi, float(cfg.get("threshold_db", DEFAULTS["threshold_db"]))))
+    except (TypeError, ValueError):
+        cfg["threshold_db"] = float(DEFAULTS["threshold_db"])
     return cfg
 
 

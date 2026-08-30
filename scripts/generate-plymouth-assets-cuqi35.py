@@ -20,9 +20,11 @@ font_path = next((p for p in font_candidates if Path(p).exists()), None)
 if font_path:
     title = ImageFont.truetype(font_path, 48)
     subtitle = ImageFont.truetype(font_path, 14)
+    maker = ImageFont.truetype(font_path, 11)
 else:
     title = ImageFont.load_default()
     subtitle = title
+    maker = title
 
 def centered(text, y, font, fill):
     box = draw.textbbox((0, 0), text, font=font)
@@ -31,6 +33,7 @@ def centered(text, y, font, fill):
 
 centered('RF EYE', 168, title, blue)
 centered('STARTING SYSTEM', 234, subtitle, dim)
+centered('Made by: Julian', 444, maker, (62, 92, 108))
 logical.rotate(-90, expand=True).save(out / 'splash.png')
 
 # Plymouth animates height in raw framebuffer coordinates. With the physical

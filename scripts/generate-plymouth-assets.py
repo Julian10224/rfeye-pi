@@ -21,9 +21,11 @@ font_path = next((p for p in font_candidates if Path(p).exists()), None)
 if font_path:
     title = ImageFont.truetype(font_path, 72)
     subtitle = ImageFont.truetype(font_path, 18)
+    maker = ImageFont.truetype(font_path, 15)
 else:
     title = ImageFont.load_default()
     subtitle = title
+    maker = title
 
 def centered(text, y, font, fill):
     box = draw.textbbox((0, 0), text, font=font)
@@ -32,6 +34,7 @@ def centered(text, y, font, fill):
 
 centered('RF EYE', 280, title, blue)
 centered('STARTING SYSTEM', 382, subtitle, dim)
+centered('Made by: Julian', 742, maker, (62, 92, 108))
 logical.rotate(-90, expand=True).save(out / 'splash.png')
 
 # A horizontal portrait progress bar must be vertical in the raw 800x480

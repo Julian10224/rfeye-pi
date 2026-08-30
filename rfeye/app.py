@@ -8,11 +8,11 @@ from pathlib import Path
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-import numpy as np
+print(f"RFEYE_BOOT python-entry {time.monotonic():.3f}", flush=True)
 import pygame
+print(f"RFEYE_BOOT pygame-imported {time.monotonic():.3f}", flush=True)
 
 from config import load_config, save_config
-from sdr_backend import SDRBackend
 from buzzer import GPIOBuzzer
 from updater import fetch_manifest, download_update, install_zip_bytes, version_tuple
 
@@ -34,7 +34,12 @@ def clamp(v, lo=0.0, hi=1.0):
 class App:
     def __init__(self, cfg, fullscreen=True):
         self.cfg = cfg
-        pygame.init()
+        if os.getenv("WAYLAND_DISPLAY"):
+            sock=Path(os.getenv("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / os.getenv("WAYLAND_DISPLAY")
+            while not sock.exists():
+                time.sleep(0.05)
+        print(f"RFEYE_BOOT wayland-ready {time.monotonic():.3f}", flush=True)
+        pygame.display.init()
         pygame.font.init()
 
         self.uw = int(cfg["ui_width"])
@@ -44,6 +49,7 @@ class App:
 
         flags = pygame.NOFRAME
         self.screen = pygame.display.set_mode((self.pw, self.ph), flags)
+        print(f"RFEYE_BOOT display-ready {time.monotonic():.3f}", flush=True)
         pygame.display.set_caption(cfg.get("title", "RF EYE"))
 
         self.ui = pygame.Surface((self.uw, self.uh))
@@ -55,21 +61,30 @@ class App:
         self.font_m = pygame.font.Font(None, 30)
         self.font_l = pygame.font.Font(None, 40)
         self.font_xl = pygame.font.Font(None, 56)
+        self.font_boot = pygame.font.Font(None, 54 if self.uw <= 320 else 82)
+
+        self._startup_splash(0.18, "STARTING")
 
         self.settings_icon = None
-        try:
-            icon_path = Path(__file__).resolve().parent / "assets" / "settings_icon.png"
-            icon = pygame.image.load(str(icon_path)).convert_alpha()
-            self.settings_icon = pygame.transform.smoothscale(icon, (48, 48))
-        except Exception:
-            self.settings_icon = None
+        if os.getenv("RFEYE_DISPLAY_PROFILE", "").lower() != "cuqi35":
+            try:
+                icon_path = Path(__file__).resolve().parent / "assets" / "settings_icon.png"
+                icon = pygame.image.load(str(icon_path)).convert_alpha()
+                self.settings_icon = pygame.transform.smoothscale(icon, (48, 48))
+            except Exception:
+                self.settings_icon = None
 
+        from sdr_backend import SDRBackend
         self.backend = SDRBackend(cfg)
         self.backend.start()
+        print(f"RFEYE_BOOT backend-started {time.monotonic():.3f}", flush=True)
 
         self.page = "main"
         self.running = True
         self.last_beep = 0.0
+        self.debug_frame_ms = 0.0
+        self.debug_last_frame = time.perf_counter()
+        self.ready_chime_done = False
         self.update_message = "CHECK"
         self.update_busy = False
         self.update_manifest = None
@@ -80,15 +95,47 @@ class App:
         self.wifi_details = None
         self.wifi_scan_busy = False
         self.wifi_last_scan = 0.0
+        # TMB12A03 active buzzer on BCM GPIO26 / physical pin 37.
+        self.cfg["buzzer_gpio"] = 26
+        self.cfg["buzzer_passive"] = False
+        self.cfg["buzzer_model"] = "TMB12A03"
         self.buzzer = GPIOBuzzer(
             pin=self.cfg.get("buzzer_gpio", 18),
             passive=self.cfg.get("buzzer_passive", True),
             active_high=self.cfg.get("buzzer_active_high", True),
         )
 
+    def _startup_splash(self, progress, status):
+        self.ui.fill((0, 0, 0))
+        cx = self.uw // 2
+        title_y = int(self.uh * 0.394)
+        status_y = int(self.uh * 0.478)
+        track_w = max(180, int(self.uw * 0.77))
+        track_h = max(10, int(self.uh * 0.0175))
+        track_x = (self.uw - track_w) // 2
+        track_y = int(self.uh * 0.556)
+        self._text("RF EYE", cx, title_y, self.font_boot, BLUE_BRIGHT, center=True)
+        self._text(status, cx, status_y, self.font_s, (86, 126, 146), center=True)
+        self._text("Made by: Julian", cx, int(self.uh * 0.92), self.font_s, (70, 95, 108), center=True)
+        track = pygame.Rect(track_x, track_y, track_w, track_h)
+        radius = max(4, track_h // 2)
+        pygame.draw.rect(self.ui, (18, 27, 34), track, border_radius=radius)
+        pygame.draw.rect(self.ui, (43, 67, 80), track, 1, border_radius=radius)
+        fill_w = max(6, int((track.width - 4) * max(0.0, min(1.0, progress))))
+        pygame.draw.rect(
+            self.ui,
+            BLUE_BRIGHT,
+            (track.x + 2, track.y + 2, fill_w, max(4, track.height - 4)),
+            border_radius=max(2, radius - 2),
+        )
+        self._present_rotated()
+        pygame.display.flip()
+        pygame.event.pump()
+
     def _make_beep(self, freq, ms, volume):
         try:
             sr = 22050
+            import numpy as np
             t = np.linspace(0, ms / 1000.0, int(sr * ms / 1000.0), False)
             wave = (np.sin(2 * np.pi * freq * t) * 32767 * volume).astype(np.int16)
             return pygame.sndarray.make_sound(wave)
@@ -100,6 +147,9 @@ class App:
         clock = pygame.time.Clock()
 
         while self.running:
+            now_frame = time.perf_counter()
+            self.debug_frame_ms = (now_frame - self.debug_last_frame) * 1000.0
+            self.debug_last_frame = now_frame
             self._events()
             if self.last_mouse_motion and time.time() - self.last_mouse_motion > self.mouse_hide_delay:
                 pygame.mouse.set_visible(False)
@@ -113,6 +163,12 @@ class App:
                 self._draw_settings()
             elif self.page == "wifi":
                 self._draw_wifi()
+            elif self.page == "debug":
+                self._draw_debug(snap)
+            elif self.page == "calibration":
+                self._draw_calibration()
+            elif self.page == "record_confirm":
+                self._draw_record_confirm()
             else:
                 self._draw_spectrum(snap)
 
@@ -207,8 +263,8 @@ class App:
                 self.page = "main"
                 return
 
-            top = 116
-            rh = 66
+            top = 104
+            rh = 58
             idx = int((y - top) / rh)
             if idx < 0:
                 return
@@ -223,6 +279,7 @@ class App:
                 "wifi",
                 "update",
                 "spectrum",
+                "debug",
             ]
             if idx >= len(keys):
                 return
@@ -234,9 +291,10 @@ class App:
                 self._toggle_demo()
                 self.page = "main"
             elif key == "threshold_db":
-                v = float(self.cfg["threshold_db"]) + 3.0
-                self.cfg["threshold_db"] = 6.0 if v > 24.0 else v
-                save_config(self.cfg)
+                lo=float(self.cfg.get("threshold_min_db",12.0)); hi=float(self.cfg.get("threshold_max_db",30.0)); step=max(0.1,float(self.cfg.get("threshold_step_db",1.0)))
+                x0,x1=250.0,430.0
+                n=max(0.0,min(1.0,(float(x)-x0)/(x1-x0))); v=round((lo+n*(hi-lo))/step)*step
+                self.cfg["threshold_db"] = max(lo,min(hi,v)); save_config(self.cfg)
             elif key == "audio_mode":
                 self.cfg["audio_mode"] = "standard" if self.cfg.get("audio_mode") == "adaptive" else "adaptive"
                 save_config(self.cfg)
@@ -254,6 +312,8 @@ class App:
                 self._update_action()
             elif key == "spectrum":
                 self.page = "spectrum"
+            elif key == "debug":
+                self.page = "debug"
 
         elif self.page == "wifi":
             if self.wifi_details:
@@ -300,6 +360,10 @@ class App:
             if y < 90 or y > 725:
                 self.page = "main"
 
+        elif self.page == "debug":
+            if y < 100 or y > 710:
+                self.page = "settings"
+
     def _wifi_scan(self):
         if self.wifi_scan_busy:
             return
@@ -312,6 +376,7 @@ class App:
             by_ssid = {}
             scan = subprocess.run(["nmcli","dev","wifi","rescan","ifname","wlan0"], capture_output=True, text=True, timeout=12)
             if scan.returncode == 0:
+                # NetworkManager completes scans asynchronously. Merge several cache reads.
                 for _ in range(5):
                     time.sleep(1.5)
                     cp = subprocess.run([
@@ -333,6 +398,9 @@ class App:
                         if old is None or item[3] or sig > old[1]:
                             by_ssid[ssid]=item
             else:
+                # A process started outside the active desktop seat can be denied by
+                # NetworkManager/polkit. wpa_supplicant exposes its control socket to
+                # the netdev group, so use that as a non-privileged scan fallback.
                 wp = subprocess.run(["wpa_cli","-i","wlan0","scan"], capture_output=True, text=True, timeout=8)
                 if wp.returncode != 0 or "OK" not in wp.stdout:
                     msg=(scan.stderr or scan.stdout or wp.stderr or wp.stdout).strip()
@@ -500,16 +568,12 @@ class App:
         self._text("ENTER",399,682,self.font_s,WHITE,center=True)
 
     def _toggle_mute(self):
-        was_muted = bool(self.cfg.get("muted", False))
-        self.cfg["muted"] = not was_muted
+        self.cfg["muted"] = not self.cfg.get("muted", False)
         if self.cfg["muted"]:
             self.buzzer.off()
         else:
-            self.buzzer.beep(
-                frequency=int(self.cfg.get("buzzer_low_hz", 900)),
-                duration_ms=65,
-            )
-            self.last_beep = time.time()
+            self.buzzer.beep_pattern([(70, 0)])
+            self.last_beep = time.time() + 0.25
         save_config(self.cfg)
 
     def _toggle_demo(self):
@@ -561,32 +625,72 @@ class App:
 
     def _sound_logic(self, snap):
         if self.cfg.get("muted", False):
+            self.buzzer.off()
             return
+
+        # TMB12A03 is an active buzzer with one fixed pitch, so the startup
+        # "jingle" is a distinct short-short-long rhythm. It is played exactly
+        # once, only after a real SDR scan has reached LIVE state.
+        if not self.ready_chime_done and snap.get("status") == "LIVE":
+            self.ready_chime_done = True
+            if self.cfg.get("startup_chime", True):
+                self.buzzer.beep_pattern([(70, 55), (70, 60), (175, 0)])
+                self.last_beep = time.time() + 0.25
+            return
+
         peaks = snap["peaks"]
         if not peaks:
             return
+
         lv = max(float(p.get("level", 0.0)) for p in peaks)
-        if lv < 0.28:
+        if lv < 0.15:
             return
+
+        # TMB12A03 has one fixed internal tone, so make the LOW/MEDIUM/HIGH
+        # zones deliberately different by rhythm rather than tiny pitch changes.
+        if lv > 0.72:
+            on_ms = int(self.cfg.get("buzzer_red_ms", 105))
+            gap_ms = int(self.cfg.get("buzzer_red_gap_ms", 45))
+            pattern = [(on_ms, gap_ms), (on_ms, gap_ms), (on_ms, 0)]
+            base_interval = 0.46
+        elif lv > 0.43:
+            on_ms = int(self.cfg.get("buzzer_yellow_ms", 130))
+            gap_ms = int(self.cfg.get("buzzer_yellow_gap_ms", 135))
+            pattern = [(on_ms, gap_ms), (on_ms, 0)]
+            base_interval = 0.95
+        else:
+            on_ms = int(self.cfg.get("buzzer_green_ms", 185))
+            pattern = [(on_ms, 0)]
+            base_interval = 1.85
+
+        if self.cfg.get("audio_mode", "adaptive") == "adaptive":
+            if lv > 0.72:
+                zone_n = max(0.0, min(1.0, (lv - 0.72) / 0.28))
+                interval = max(0.40, base_interval - 0.06 * zone_n)
+            elif lv > 0.43:
+                zone_n = max(0.0, min(1.0, (lv - 0.43) / 0.29))
+                interval = max(0.82, base_interval - 0.13 * zone_n)
+            else:
+                zone_n = max(0.0, min(1.0, (lv - 0.15) / 0.28))
+                interval = max(1.45, base_interval - 0.40 * zone_n)
+        else:
+            interval = base_interval
+
+        pattern_ms = sum(on + gap for on, gap in pattern)
+        interval = max(interval, pattern_ms / 1000.0 + 0.08)
+
         now = time.time()
-        interval = max(0.42, 3.3 - 2.7 * lv) if self.cfg.get("audio_mode", "adaptive") == "adaptive" else 2.5
         if now - self.last_beep >= interval:
-            freq = (
-                int(self.cfg.get("buzzer_high_hz", 1500))
-                if lv > 0.72
-                else int(self.cfg.get("buzzer_low_hz", 900))
-            )
-            self.buzzer.beep(
-                frequency=freq,
-                duration_ms=int(self.cfg.get("buzzer_duration_ms", 85)),
-            )
+            self.buzzer.beep_pattern(pattern)
             self.last_beep = now
 
-    def _text(self, txt, x, y, font, color, center=False):
+    def _text(self, txt, x, y, font, color, center=False, right=False):
         s = font.render(str(txt), True, color)
         r = s.get_rect()
         if center:
             r.center = (int(x), int(y))
+        elif right:
+            r.topright = (int(x), int(y))
         else:
             r.topleft = (int(x), int(y))
         self.ui.blit(s, r)
@@ -605,18 +709,24 @@ class App:
 
     def _gear(self, cx, cy, size=42):
         import math
-        teeth = 8
-        outer = size * 0.46
-        inner = size * 0.34
-        pts=[]
-        for i in range(teeth*4):
-            a = -math.pi/2 + i * math.pi/(teeth*2)
-            phase = i % 4
-            r = outer if phase in (1,2) else inner
-            pts.append((cx + int(math.cos(a)*r), cy + int(math.sin(a)*r)))
-        pygame.draw.polygon(self.ui, BLUE_BRIGHT, pts)
-        pygame.draw.circle(self.ui, BLUE_BRIGHT, (cx,cy), int(size*0.29))
-        pygame.draw.circle(self.ui, BG, (cx,cy), int(size*0.12))
+        # Supersampled vector gear for clean edges on the small SPI panel.
+        scale = 4
+        side = max(48, int(size * scale))
+        icon = pygame.Surface((side, side), pygame.SRCALPHA)
+        cc = side // 2
+        teeth = 10
+        outer = size * 0.48 * scale
+        root = size * 0.34 * scale
+        pts = []
+        for i in range(teeth * 4):
+            angle = -math.pi / 2 + i * math.pi / (teeth * 2)
+            radius = outer if i % 4 in (1, 2) else root
+            pts.append((cc + int(math.cos(angle) * radius), cc + int(math.sin(angle) * radius)))
+        pygame.draw.polygon(icon, BLUE_BRIGHT, pts)
+        pygame.draw.circle(icon, BLUE_BRIGHT, (cc, cc), int(size * 0.30 * scale))
+        pygame.draw.circle(icon, (0, 0, 0, 0), (cc, cc), int(size * 0.115 * scale))
+        icon = pygame.transform.smoothscale(icon, (int(size), int(size)))
+        self.ui.blit(icon, icon.get_rect(center=(int(cx), int(cy))))
 
     def _speaker(self, cx, cy, muted):
         pygame.draw.polygon(
@@ -648,6 +758,7 @@ class App:
         status_col = GREEN if status == "LIVE" else BLUE if status == "DEMO" else RED
         pygame.draw.circle(self.ui, status_col, (432, 44), 7)
 
+        # Clear RTL-SDR hardware/status indication on the main screen.
         if status == "LIVE":
             sdr_text = "SDR: CONNECTED"
             sdr_col = GREEN
@@ -659,6 +770,7 @@ class App:
             sdr_col = RED
         self._text(sdr_text, 240, 88, self.font_s, sdr_col, center=True)
 
+        # Settings button in the physical top-right corner after rotation.
         self._draw_settings_icon(38, 38)
 
         peaks = snap["peaks"][:3]
@@ -714,9 +826,11 @@ class App:
         self._text(state, 398, 708, state_font, col, center=True)
         self._text("STATUS", 398, 762, self.font_s, DIM, center=True)
 
+
     def _draw_settings(self):
         self.ui.fill(BG)
 
+        # Header
         pygame.draw.rect(self.ui, (7, 11, 16), (0, 0, 480, 92))
         pygame.draw.circle(self.ui, (18, 31, 41), (38, 45), 24)
         self._text("‹", 38, 43, self.font_xl, BLUE_BRIGHT, center=True)
@@ -726,39 +840,80 @@ class App:
         rows = [
             ("Sound", "MUTED" if self.cfg.get("muted") else "ON", "toggle"),
             ("Demo mode", "ON" if self.cfg.get("demo_mode") else "OFF", "toggle"),
-            ("Sensitivity", f'{self.cfg.get("threshold_db", 12):.0f} dB', "value"),
+            ("Sensitivity", f'{self.cfg.get("threshold_db", 12):.0f} dB', "slider"),
             ("Audio mode", self.cfg.get("audio_mode", "adaptive").upper(), "value"),
             ("Brightness", f'{int(self.cfg.get("brightness", 1.0) * 100)}%', "value"),
             ("Frequency labels", "ON" if self.cfg.get("show_frequency") else "OFF", "toggle"),
             ("Wi-Fi", self._wifi_text(), "status"),
             ("Software update", self.update_message, "action"),
             ("Spectrum", "OPEN", "action"),
+            ("Debug", "OPEN", "action"),
         ]
 
-        top = 116
-        rh = 66
+        top = 104
+        rh = 58
         for i, (label, value, kind) in enumerate(rows):
             y = top + i * rh
-            pygame.draw.rect(self.ui, (9, 13, 18), (20, y, 440, 56), border_radius=13)
-            pygame.draw.line(self.ui, (19, 28, 36), (34, y + 55), (446, y + 55), 1)
-            self._text(label, 40, y + 17, self.font_m, WHITE)
+            pygame.draw.rect(self.ui, (9, 13, 18), (20, y, 440, 50), border_radius=13)
+            pygame.draw.line(self.ui, (19, 28, 36), (34, y + 49), (446, y + 49), 1)
+            self._text(label, 40, y + 14, self.font_m, WHITE)
 
-            if kind == "toggle":
+            if kind == "slider":
+                lo=float(self.cfg.get("threshold_min_db",12.0)); hi=float(self.cfg.get("threshold_max_db",30.0)); val=max(lo,min(hi,float(self.cfg.get("threshold_db",12.0))))
+                n=0.0 if hi<=lo else (val-lo)/(hi-lo); x0,x1=250,430; sx=x0+int(round(n*(x1-x0)))
+                self._text(value, 410, y + 12, self.font_s, (150, 201, 226), center=True)
+                pygame.draw.line(self.ui,(38,43,49),(x0,y+35),(x1,y+35),5); pygame.draw.line(self.ui,BLUE,(x0,y+35),(sx,y+35),5); pygame.draw.circle(self.ui,WHITE,(sx,y+35),8)
+            elif kind == "toggle":
                 enabled = value == "ON"
-                pill = pygame.Rect(362, y + 13, 72, 30)
+                pill = pygame.Rect(362, y + 10, 72, 30)
                 pygame.draw.rect(self.ui, BLUE if enabled else (38, 43, 49), pill, border_radius=15)
                 knob_x = 419 if enabled else 377
-                pygame.draw.circle(self.ui, WHITE, (knob_x, y + 28), 11)
+                pygame.draw.circle(self.ui, WHITE, (knob_x, y + 25), 11)
             elif kind == "status":
                 col = GREEN if value == "CONNECTED" else RED
-                pygame.draw.circle(self.ui, col, (352, y + 28), 6)
-                self._text(value, 405, y + 28, self.font_s, col, center=True)
+                pygame.draw.circle(self.ui, col, (352, y + 25), 6)
+                self._text(value, 405, y + 25, self.font_s, col, center=True)
             else:
                 col = BLUE_BRIGHT if kind == "action" else (150, 201, 226)
-                self._text(value, 410, y + 28, self.font_s, col, center=True)
+                self._text(value, 410, y + 25, self.font_s, col, center=True)
 
         self._text("Click a row to change", 240, 728, self.font_s, DIM, center=True)
         self._text("ESC or ‹ to return", 240, 758, self.font_s, DIM, center=True)
+
+    def _draw_debug(self, snap):
+        self.ui.fill(BG)
+        pygame.draw.rect(self.ui, (7, 11, 16), (0, 0, 480, 92))
+        pygame.draw.circle(self.ui, (18, 31, 41), (38, 45), 24)
+        self._text("‹", 38, 43, self.font_xl, BLUE_BRIGHT, center=True)
+        self._text("DEBUG", 82, 24, self.font_l, WHITE)
+        self._text("LIVE PERFORMANCE", 84, 61, self.font_s, DIM)
+
+        age_ms = max(0.0, (time.time() - float(snap.get("last_update", 0.0))) * 1000.0) if snap.get("last_update") else 0.0
+        frame_ms = max(0.001, float(self.debug_frame_ms))
+        actual_fps = 1000.0 / frame_ms
+        rows = [
+            ("UI refresh", f"{frame_ms:5.1f} ms  {actual_fps:4.1f} FPS"),
+            ("Data age", f"{age_ms:7.0f} ms"),
+            ("Full cycle", f"{float(snap.get('cycle_ms',0)):7.0f} ms"),
+            ("Mobile sweep", f"{float(snap.get('mobile_scan_ms',0)):7.0f} ms"),
+            ("Site sweep", f"{float(snap.get('site_scan_ms',0)):7.0f} ms"),
+            ("Last capture", f"{float(snap.get('capture_ms',0)):7.0f} ms"),
+            ("Tune windows", str(int(snap.get('scan_windows',0)))),
+            ("SDR path", str(snap.get('sdr_path','?'))),
+            ("Backend", str(snap.get('status','?'))),
+        ]
+        y=112
+        for label,value in rows:
+            pygame.draw.rect(self.ui,(9,13,18),(20,y,440,54),border_radius=11)
+            self._text(label,38,y+16,self.font_s,DIM)
+            col = GREEN if label == "Backend" and value == "LIVE" else BLUE_BRIGHT
+            self._text(value,440,y+27,self.font_s,col,right=True)
+            y += 61
+
+        err=str(snap.get('error','')).strip()
+        if err:
+            self._text("ERR " + err[-46:], 240, 681, self.font_s, RED, center=True)
+        self._text("tap top or bottom to return", 240, 758, self.font_s, DIM, center=True)
 
     def _draw_spectrum(self, snap):
         self.ui.fill(BG)
@@ -772,7 +927,7 @@ class App:
         p = snap["spectrum"]
         if len(p) > 2:
             pmin = snap["noise"] - 12
-            pmax = max(float(np.max(p)), pmin + 45)
+            pmax = max(max(float(v) for v in p), pmin + 45)
             pts = []
             for i, v in enumerate(p):
                 x = plot.left + int(i * (plot.width - 1) / (len(p) - 1))

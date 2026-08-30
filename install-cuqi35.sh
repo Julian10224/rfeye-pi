@@ -38,13 +38,15 @@ echo "[MHS35 2/8] Installing RF Eye appliance core..."
 RFEYE_LOCAL_SOURCE="$TMP_ROOT/src" RFEYE_REPO="$REPO_SLUG" bash "$TMP_ROOT/src/install.sh"
 # Start importing Pygame while Labwc is still coming up and defer SDR/NumPy
 # until after the display path is ready. OTA builds apply the same transform.
-python3 "$TMP_ROOT/src/scripts/patch-fast-app-start.py" /opt/rfeye/rfeye/app.py
 python3 -m py_compile /opt/rfeye/rfeye/app.py
 
 BOOT=/boot/firmware
 [[ -d "$BOOT" ]] || BOOT=/boot
 CONFIG="$BOOT/config.txt"
 cp -n "$CONFIG" "${CONFIG}.rfeye-mhs35-backup" || true
+mkdir -p "$BOOT/overlays"
+dtc -@ -I dts -O dtb -o "$BOOT/overlays/rfeye-mhs35.dtbo" "$TMP_ROOT/src/config/overlays/rfeye-mhs35.dts"
+echo "1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34  $BOOT/overlays/rfeye-mhs35.dtbo" | sha256sum -c -
 
 echo "[MHS35 3/8] Configuring native 480x320 SPI/DRM display..."
 python3 - "$CONFIG" "$SPI_HZ" <<'PY'
@@ -80,8 +82,8 @@ out += [
     "", "# rfeye-cuqi35-display-start",
     "# MHS35 3.5in 480x320: ILI9486/piscreen SPI DRM + XPT2046 touch",
     "dtparam=spi=on",
-    f"dtoverlay=piscreen,speed={speed},drm,rotate=0,xohms=60",
     "# rfeye-cuqi35-display-end",
+    f"dtoverlay=rfeye-mhs35,speed={speed},drm,rotate=0,xohms=60",
 ]
 path.write_text("\n".join(out).rstrip() + "\n")
 PY
@@ -91,13 +93,18 @@ rm -f /usr/share/X11/xorg.conf.d/99-fbturbo.conf \
 
 mkdir -p "$TARGET_HOME/.config/kanshi"
 cat > "$TARGET_HOME/.config/kanshi/config" <<'EOF'
-# MHS35 SPI panel uses its native DRM mode. No HDMI override is required.
+# CUQI SPI panel uses its native DRM mode. No HDMI mode override is required.
 EOF
 
 echo "[MHS35 4/8] Applying native 320x480 portrait UI and XPT2046 profile..."
 CFG_DIR="$TARGET_HOME/.config/rfeye"
 CFG_FILE="$CFG_DIR/config.json"
 mkdir -p "$CFG_DIR"
+# A fresh Pi starts from the non-secret settings captured from the working
+# 0.7.28 reference unit. Existing installations keep their own user settings.
+if [[ ! -f "$CFG_FILE" ]]; then
+  install -m 0644 "$TMP_ROOT/src/config/reference-config-cuqi35.json" "$CFG_FILE"
+fi
 python3 - "$CFG_FILE" "$APP_ROTATION" <<'PY'
 from pathlib import Path
 import json, sys
