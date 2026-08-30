@@ -1,0 +1,56 @@
+name: Repair and apply reference Pi snapshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-and-apply-reference-snapshot.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Repair transfer, verify and apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/apply-reference-snapshot.yml')
+          s = p.read_text()
+          old = '            zgPUl/BoqX'
+          new = '            ggzPUl/BoqX'
+          if s.count(old) != 1:
+              raise SystemExit(f'expected exactly one transport defect, found {s.count(old)}')
+          p.write_text(s.replace(old, new))
+          lines = p.read_text().splitlines()
+          out = []
+          inside = False
+          for line in lines:
+              if line.strip() == 'PATCH_B64: |':
+                  inside = True
+                  continue
+              if inside:
+                  if line.startswith('            '):
+                      out.append(line[12:])
+                  else:
+                      break
+          Path('/tmp/reference-pi.patch.gz.b64').write_text(''.join(out))
+          PY
+          base64 -d /tmp/reference-pi.patch.gz.b64 | gzip -d > /tmp/reference-pi.patch
+          test "$(sha256sum /tmp/reference-pi.patch | awk '{print $1}')" = f75b01fd834502e068b4bcd91538f7bfdde49020478d8f62ddec18778e8f09e5
+          git apply --index --binary /tmp/reference-pi.patch
+          bash scripts/build-release.sh
+          rm -f .github/workflows/apply-reference-snapshot.yml .github/workflows/fix-and-apply-reference-snapshot.yml
+          git add -A
+          test "$(git write-tree)" = c5acf9f0c038114bba542fbbfcd1f5dba64ceb72
+          git config user.name 'RF Eye Snapshot Bot'
+          git config user.email 'rfeye-snapshot@users.noreply.github.com'
+          git commit -m 'Snapshot working Raspberry Pi appliance as source of truth'
+          git push origin HEAD:main
