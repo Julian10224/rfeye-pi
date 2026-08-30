@@ -46,8 +46,9 @@ with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED,allowZip64=True) as 
         zi=zipfile.ZipInfo(rel,date_time=(2020,1,1,0,0,0))
         zi.create_system=3
         zi.compress_type=zipfile.ZIP_STORED
-        mode=stat.S_IMODE(path.stat().st_mode)
-        zi.external_attr=((stat.S_IFREG | mode) << 16)
+        # OTA runtime files are data/source files; pin permissions so the ZIP
+        # is independent of the checkout umask/group-write setting.
+        zi.external_attr=((stat.S_IFREG | 0o644) << 16)
         zi.flag_bits=0
         zf.writestr(zi,path.read_bytes())
 PYZIP
