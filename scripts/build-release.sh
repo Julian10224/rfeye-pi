@@ -31,13 +31,26 @@ python3 -m py_compile \
 find "$STAGE/rfeye" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGE/rfeye" -name '*.pyc' -delete
 
-# Normalize metadata so rebuilding unchanged source produces the same OTA SHA.
-find "$STAGE/rfeye" -exec touch -h -t 202001010000 {} +
+# Build the archive with Python and fully specified ZIP metadata. This avoids
+# zlib/Info-ZIP implementation differences between Raspberry Pi OS and GitHub
+# Actions, so identical RF Eye source produces byte-identical OTA packages.
 rm -f "$ZIP"
-(
-  cd "$STAGE"
-  find rfeye -type f -print | LC_ALL=C sort | zip -X -q "$ZIP" -@
-)
+python3 - "$STAGE" "$ZIP" <<'PYZIP'
+from pathlib import Path
+import stat, sys, zipfile
+root=Path(sys.argv[1]); out=Path(sys.argv[2])
+files=sorted(p for p in (root/'rfeye').rglob('*') if p.is_file())
+with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED,allowZip64=True) as zf:
+    for path in files:
+        rel=path.relative_to(root).as_posix()
+        zi=zipfile.ZipInfo(rel,date_time=(2020,1,1,0,0,0))
+        zi.create_system=3
+        zi.compress_type=zipfile.ZIP_STORED
+        mode=stat.S_IMODE(path.stat().st_mode)
+        zi.external_attr=((stat.S_IFREG | mode) << 16)
+        zi.flag_bits=0
+        zf.writestr(zi,path.read_bytes())
+PYZIP
 SHA="$(sha256sum "$ZIP" | awk '{print $1}')"
 URL="https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/update/rfeye-update.zip"
 
