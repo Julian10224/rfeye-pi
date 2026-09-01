@@ -24,9 +24,50 @@ TARGET_USER="${SUDO_USER:-$(logname 2>/dev/null || echo pi)}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 [[ -n "$TARGET_HOME" ]] || { echo "Could not determine home directory for $TARGET_USER"; exit 1; }
 
+# Raspberry Pi OS desktop images can start PackageKit immediately after first
+# boot. If packagekitd or apt-daily owns an APT lock, do not fail the RF Eye
+# installer: stop PackageKit gracefully and retry lock-related APT failures.
+apt_retry() {
+  local attempts="${RFEYE_APT_LOCK_RETRIES:-120}"
+  local delay="${RFEYE_APT_LOCK_RETRY_DELAY:-3}"
+  local attempt=1 rc output_file
+  output_file="$(mktemp /tmp/rfeye-apt.XXXXXX)"
+
+  while true; do
+    : > "$output_file"
+    set +e
+    "$@" >"$output_file" 2>&1
+    rc=$?
+    set -e
+
+    if (( rc == 0 )); then
+      cat "$output_file"
+      rm -f "$output_file"
+      return 0
+    fi
+
+    if grep -qiE 'Could not get lock|Unable to acquire.*lock|Unable to lock directory|held by process|is another process using it' "$output_file" \
+       && (( attempt < attempts )); then
+      if (( attempt == 1 || attempt % 10 == 0 )); then
+        echo "APT is busy; waiting for the Raspberry Pi package manager to release its lock..."
+      fi
+      attempt=$((attempt + 1))
+      sleep "$delay"
+      continue
+    fi
+
+    cat "$output_file" >&2
+    rm -f "$output_file"
+    return "$rc"
+  done
+}
+
+systemctl stop packagekit.service 2>/dev/null || true
+systemctl stop packagekit-offline-update.service 2>/dev/null || true
+
 echo "[MHS35 1/8] Preparing RF Eye main firmware..."
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 libinput-tools evtest device-tree-compiler
+apt_retry apt-get -o DPkg::Lock::Timeout=300 update
+apt_retry env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y git python3 libinput-tools evtest device-tree-compiler
 
 TMP_ROOT="$(mktemp -d /tmp/rfeye-mhs35.XXXXXX)"
 cleanup() { rm -rf "$TMP_ROOT"; }
