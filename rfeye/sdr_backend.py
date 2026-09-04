@@ -102,6 +102,9 @@ class SDRBackend:
         self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}; self._artifact_tainted=set()
         self._artifact_baseline_loaded=False
         self._load_artifact_baseline()
+        self._mobile_temporal={}
+        self.last_raw_mobile_candidates=0; self.last_post_artifact_candidates=0; self.last_broadband_kept=0
+        self.debug_mobile_candidates=[]
         self.last_broadband_rejected=False; self.last_comb_rejected=False
     def set_demo(self,v):
         v=bool(v)
@@ -114,6 +117,9 @@ class SDRBackend:
                 self._carrier_state={}; self._last_detection_time=0.
                 self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}; self._artifact_tainted=set()
                 self._artifact_baseline_loaded=False; self._load_artifact_baseline()
+                self._mobile_temporal={}
+                self.last_raw_mobile_candidates=0; self.last_post_artifact_candidates=0; self.last_broadband_kept=0
+                self.debug_mobile_candidates=[]
                 self.last_broadband_rejected=False; self.last_comb_rejected=False
                 self.status='SCANNING'; self.error=''; self.last_update=time.time()
     def start(self):
@@ -141,6 +147,10 @@ class SDRBackend:
             'artifact_sweep':int(self._artifact_sweep),'artifact_baseline_count':len(self._artifact_baseline),
             'artifact_baseline_loaded':bool(self._artifact_baseline_loaded),
             'artifact_tainted_count':len(self._artifact_tainted),
+            'raw_mobile_candidate_count':int(self.last_raw_mobile_candidates),
+            'post_artifact_candidate_count':int(self.last_post_artifact_candidates),
+            'broadband_kept_count':int(self.last_broadband_kept),
+            'debug_mobile_candidates':[dict(p) for p in self.debug_mobile_candidates],
             'sdr_path':str(getattr(self,'sdr_path','?'))}
     def _run(self):
         while self.running:
@@ -238,6 +248,80 @@ class SDRBackend:
         if pref_lo<=d<=pref_hi:return 1.
         if d<pref_lo:return clamp((d-lo)/max(1e-6,pref_lo-lo))
         return clamp((hi-d)/max(1e-6,hi-pref_hi))
+
+    def _annotate_mobile_temporal(self,vals,ch_floor):
+        # Keep a slow per-channel reference for every raster observation, not
+        # only channels that already qualify as peaks. A newly appearing local
+        # burst can therefore be compared with what that same channel looked
+        # like before it became a candidate.
+        now=time.time()
+        alpha=clamp(float(self.cfg.get('temporal_baseline_alpha',.08)),.01,.35)
+        max_age=max(3.,float(self.cfg.get('temporal_state_max_age_s',30.0)))
+        rscale=max(.5,float(self.cfg.get('temporal_rf_snr_scale_db',4.0)))
+        dscale=max(.01,float(self.cfg.get('temporal_duty_scale',.10)))
+        sscale=max(.5,float(self.cfg.get('temporal_span_scale_db',3.0)))
+        rows=[];rf_deltas=[];span_deltas=[]
+        for q0 in vals:
+            q=dict(q0);f=int(round(float(q['freq_hz'])))
+            rf=float(q['power_db'])-float(ch_floor);span=float(q.get('burst_span_db',0));duty=float(q.get('duty',0))
+            q['rf_snr_db']=rf
+            st=self._mobile_temporal.get(f)
+            if st is not None and now-float(st.get('last',0))<=max_age:
+                prev=(float(st['rf_snr']),float(st['duty']),float(st['span']))
+                q['_temporal_prev']=prev
+                rf_deltas.append(rf-prev[0]);span_deltas.append(span-prev[2])
+            else:
+                q['_temporal_prev']=None
+            rows.append(q)
+        # RTL-SDR AGC can move much of the band together. Remove the median
+        # common-mode RF/span movement before calling one carrier transient.
+        common_rf=float(np.median(rf_deltas)) if rf_deltas else 0.
+        common_span=float(np.median(span_deltas)) if span_deltas else 0.
+        seen=set()
+        for q in rows:
+            f=int(round(float(q['freq_hz'])));seen.add(f)
+            rf=float(q['rf_snr_db']);duty=float(q.get('duty',0));span=float(q.get('burst_span_db',0))
+            prev=q.pop('_temporal_prev',None)
+            if prev is None:
+                dr=dd=ds=departure=0.
+                self._mobile_temporal[f]={'rf_snr':rf,'duty':duty,'span':span,'last':now}
+            else:
+                dr=abs((rf-prev[0])-common_rf)
+                dd=abs(duty-prev[1])
+                ds=abs((span-prev[2])-common_span)
+                departure=max(dr/rscale,dd/dscale,ds/sscale)
+                st=self._mobile_temporal[f]
+                st['rf_snr']=float(st['rf_snr']*(1.-alpha)+rf*alpha)
+                st['duty']=float(st['duty']*(1.-alpha)+duty*alpha)
+                st['span']=float(st['span']*(1.-alpha)+span*alpha)
+                st['last']=now
+            q.update(temporal_departure=float(departure),
+                     temporal_rf_delta_db=float(dr),temporal_duty_delta=float(dd),
+                     temporal_span_delta_db=float(ds))
+        self._mobile_temporal={f:s for f,s in self._mobile_temporal.items()
+                               if now-float(s.get('last',0))<=max_age}
+        return rows
+
+    def _apply_broadband_guard(self,peaks,limit):
+        self.last_broadband_rejected=False
+        self.last_broadband_kept=len(peaks)
+        if not limit or len(peaks)<=limit:
+            return peaks
+        self.last_broadband_rejected=True
+        mindep=max(.5,float(self.cfg.get('broadband_temporal_min_departure',1.25)))
+        keep=max(1,int(self.cfg.get('broadband_dynamic_keep_max',6)))
+        # Crucial difference from 0.7.31: a busy sweep is no longer erased.
+        # Preserve only locally changing carriers; stable broad clutter is
+        # suppressed while a narrow transient can continue to pairing.
+        out=[q for q in peaks if float(q.get('temporal_departure',0))>=mindep or q.get('warmup_transient')]
+        out.sort(key=lambda q:(float(q.get('temporal_departure',0)),
+                               float(q.get('baseline_departure',0)),
+                               float(q.get('burst_quality',0)),
+                               float(q.get('rf_quality',0))),reverse=True)
+        out=out[:keep]
+        self.last_broadband_kept=len(out)
+        return out
+
     def _scan_band(self,a,b,label):
         sr=int(self.cfg.get('sample_rate',2048000)); n=int(self.cfg.get('fft_size',1024)); base=int(self.cfg.get('fft_blocks',8))
         ms=float(self.cfg.get('mobile_capture_ms' if label=='MOBILE' else 'site_capture_ms',64.)); blocks=max(base,math.ceil(sr*ms/1000/n))
@@ -280,17 +364,20 @@ class SDRBackend:
             # Detection sensitivity is intentionally soft and automatic. There
             # is no user dB threshold: burst span and RF SNR continuously change
             # quality/confidence instead of crossing an adjustable hard cutoff.
+            # Temporal annotation runs on every observed raster channel before
+            # candidate gating, so a burst can be compared with its quiet past.
+            vals=self._annotate_mobile_temporal(vals,ch_floor)
             gate=float(self.cfg.get('burst_gate_db',6.0))
             dlo=float(self.cfg.get('min_burst_duty',.035)); dhi=float(self.cfg.get('max_burst_duty',.65))
             plo=float(self.cfg.get('preferred_burst_duty_min',.06)); phi=float(self.cfg.get('preferred_burst_duty_max',.45))
             minsnr=float(self.cfg.get('mobile_min_rf_snr_db',5.0))
             for q0 in vals:
                 if not dlo<=q0['duty']<=dhi:continue
-                q=dict(q0); snr=q['power_db']-ch_floor; span=float(q['burst_span_db'])
+                q=dict(q0); snr=float(q['rf_snr_db']); span=float(q['burst_span_db'])
                 burst_q=clamp((span-gate+2.0)/14.0)
                 rf_q=clamp((snr-minsnr+4.0)/16.0)
                 if burst_q<=0.0 or rf_q<=0.0:continue
-                q.update(rf_snr_db=float(snr),burst_quality=burst_q,
+                q.update(burst_quality=burst_q,
                          duty_quality=self._duty_q(q['duty'],dlo,dhi,plo,phi),
                          rf_quality=rf_q,signal_strength=clamp((snr-minsnr+2.0)/24.0),raster_ok=True)
                 q['level']=q['signal_strength'];peaks.append(q)
@@ -502,15 +589,16 @@ class SDRBackend:
             limit=max(0,int(self.cfg.get('max_mobile_candidates_per_sweep',12)))
             self.last_broadband_rejected=False
             self.last_comb_rejected=False
-            # Baseline suppression must run before the broadband guard. With
-            # fully soft scoring the raw candidate set intentionally contains
-            # weak carriers too; persistent stationary ones are removed here.
+            self.last_raw_mobile_candidates=len(m)
+            # Baseline suppression runs first. Keep diagnostic visibility of
+            # what survived it even if the busy-band guard later narrows the set.
             m=self._reject_static_artifacts(m)
-            if limit and len(m)>limit:
-                self.last_broadband_rejected=True
-                # A large set of *new* simultaneous carriers is more consistent
-                # with display/USB broadband interference than a nearby mobile.
-                m=[]
+            self.last_post_artifact_candidates=len(m)
+            dbg=sorted(m,key=lambda q:(float(q.get('temporal_departure',0)),
+                                       float(q.get('baseline_departure',0)),
+                                       float(q.get('burst_quality',0))),reverse=True)
+            self.debug_mobile_candidates=[dict(q) for q in dbg[:12]]
+            m=self._apply_broadband_guard(m,limit)
             # Mobile/uplink scanning stays on the fast path. Downlink context is
             # refreshed periodically and kept in memory; forcing a second 5 MHz
             # sweep for every candidate was adding several seconds of latency.

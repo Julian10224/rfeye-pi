@@ -35,7 +35,9 @@ def _record_payload_snapshot(app):
             "mobile_level","site_level","peaks","mobile_peaks","site_peaks",
             "broadband_rejected","static_rejected","artifact_calibrating",
             "artifact_sweep","artifact_baseline_count","artifact_baseline_loaded",
-            "artifact_tainted_count","confirm_streak","clear_streak",
+            "artifact_tainted_count","raw_mobile_candidate_count",
+            "post_artifact_candidate_count","broadband_kept_count",
+            "debug_mobile_candidates","confirm_streak","clear_streak",
             "cycle_ms","mobile_scan_ms","site_scan_ms","capture_ms","scan_windows","sdr_path")},
         "spectrum":{
             "freq_hz":_plain(snap.get("freqs",[])),
@@ -60,7 +62,7 @@ def _record_rf_worker(app, duration):
             samples.append(item)
         ended=datetime.now().astimezone(); cfg=app.cfg
         data={
-            "schema":"rfeye-rf-series-v4",
+            "schema":"rfeye-rf-series-v5",
             "recorded_from":started.isoformat(timespec="milliseconds"),
             "recorded_to":ended.isoformat(timespec="milliseconds"),
             "requested_duration_s":float(duration),
@@ -72,6 +74,9 @@ def _record_rf_worker(app, duration):
                 "artifact_rf_snr_delta_db","artifact_duty_delta","artifact_span_delta_db",
                 "artifact_max_rf_snr_std_db","artifact_max_duty_std","artifact_max_span_std_db",
                 "artifact_baseline_persist","artifact_baseline_max_age_days",
+                "temporal_baseline_alpha","temporal_state_max_age_s",
+                "temporal_rf_snr_scale_db","temporal_duty_scale","temporal_span_scale_db",
+                "broadband_temporal_min_departure","broadband_dynamic_keep_max",
                 "site_pair_memory_s","require_duplex_pair","require_current_duplex_pair",
                 "candidate_min_confidence","strong_hit_confidence","confirm_hits","clear_hits")},
             "samples":samples,

@@ -58,7 +58,7 @@ except Exception:
     pass
 
 DEFAULTS = {
-    "detector_profile_version": 4,
+    "detector_profile_version": 5,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -87,6 +87,13 @@ DEFAULTS = {
     "artifact_max_span_std_db": 2.5,
     "artifact_baseline_persist": True,
     "artifact_baseline_max_age_days": 30.0,
+    "temporal_baseline_alpha": 0.08,
+    "temporal_state_max_age_s": 30.0,
+    "temporal_rf_snr_scale_db": 4.0,
+    "temporal_duty_scale": 0.10,
+    "temporal_span_scale_db": 3.0,
+    "broadband_temporal_min_departure": 1.25,
+    "broadband_dynamic_keep_max": 6,
     "mobile_percentile": 95.0,
     "tetra_channel_half_width_hz": 9000.0,
     "burst_gate_db": 6.0,
@@ -140,7 +147,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.31",
+    "app_version": "0.7.32",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -174,10 +181,10 @@ def load_config():
     cfg["audio_mode"] = "adaptive"
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
-    # Detector profile v4 keeps the fast detector but makes startup clutter
-    # learning conservative and persistent. Older installations get the new
-    # stability limits and local baseline persistence automatically.
-    if int(saved.get("detector_profile_version", 0) or 0) < 4:
+    # Detector profile v5 adds per-channel temporal novelty so a busy RF
+    # sweep narrows to changing carriers instead of deleting every candidate.
+    # Older installations also retain the conservative persistent clutter map.
+    if int(saved.get("detector_profile_version", 0) or 0) < 5:
         for key in (
             "mobile_capture_ms", "site_capture_ms", "site_scan_interval",
             "carrier_memory_s", "confirm_window_s", "alert_hold_s",
@@ -187,10 +194,14 @@ def load_config():
             "artifact_max_rf_snr_std_db", "artifact_max_duty_std",
             "artifact_max_span_std_db", "artifact_baseline_persist",
             "artifact_baseline_max_age_days",
+            "temporal_baseline_alpha", "temporal_state_max_age_s",
+            "temporal_rf_snr_scale_db", "temporal_duty_scale",
+            "temporal_span_scale_db", "broadband_temporal_min_departure",
+            "broadband_dynamic_keep_max",
             "site_pair_memory_s", "require_current_duplex_pair",
         ):
             cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 4
+    cfg["detector_profile_version"] = 5
     for obsolete in (
         "threshold_db", "threshold_min_db", "threshold_max_db",
         "threshold_step_db", "threshold_soft_margin_db", "min_burst_span_db",
