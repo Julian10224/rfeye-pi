@@ -1,9 +1,9 @@
 """Offline replay helpers for RF Eye recordings.
 
-Schema v5 recordings contain the post-artifact/pre-pair candidates required for
-an almost exact replay of the current downstream detector. Older recordings do
-not; they use a clearly labelled legacy approximation based on the stored
-spectrum plus recorded downlink/site context.
+Schema v5/v6 recordings contain the post-artifact/pre-pair candidates required
+for an exact downstream replay with the selected detector profile. Older
+recordings do not; they use a clearly labelled legacy approximation based on
+the stored spectrum plus recorded downlink/site context.
 """
 from __future__ import annotations
 
@@ -44,7 +44,11 @@ def recording_label(data):
 def schema_mode(data):
     schema=str(data.get("schema",""))
     samples=data.get("samples") or []
-    if "v5" in schema and any((s.get("detector") or {}).get("debug_mobile_candidates") is not None for s in samples):
+    has_debug=any((s.get("detector") or {}).get("debug_mobile_candidates") is not None
+                  for s in samples)
+    if "v6" in schema and has_debug:
+        return "EXACT v6"
+    if "v5" in schema and has_debug:
         return "EXACT v5"
     return "LEGACY APPROX"
 
@@ -133,28 +137,35 @@ class ReplayEngine:
         t=_ts(sample.get("captured_at"),float(index))
         site=[dict(q) for q in (d.get("site_peaks") or [])]
         self.det._remember_sites(site,t)
-        candidates=self._v5_candidates(d) if self.mode=="EXACT v5" else self._legacy_candidates(sample)
+        candidates=self._v5_candidates(d) if self.mode.startswith("EXACT") else self._legacy_candidates(sample)
 
         require=bool(self.cfg.get("require_duplex_pair",True))
         require_now=bool(self.cfg.get("require_current_duplex_pair",False))
-        minpair=float(self.cfg.get("duplex_pair_min_quality",.28))
-        minconf=float(self.cfg.get("candidate_min_confidence",.48))
+        minpair=float(self.cfg.get("duplex_pair_min_quality",.40))
+        minconf=float(self.cfg.get("candidate_min_confidence",.52))
+        min_novel=float(self.cfg.get("novelty_min_departure",1.25))
         accepted=[]
         for x in candidates:
-            pq,pnow=self.det._pair_q(round(float(x["freq_hz"])+10000000),site,t)
+            dep=float(x.get("temporal_departure",0))
+            if dep<min_novel:
+                continue
+            pq,pnow,page,phits=self.det._pair_info(
+                round(float(x["freq_hz"])+10000000),site,t)
             if require and (pq<minpair or (require_now and not pnow)):
                 continue
             q=dict(x)
-            if self.mode=="EXACT v5":
+            q.update(paired=pq>=minpair,paired_now=pnow,pair_quality=pq,
+                     pair_age_s=page,pair_hits=phits)
+            if self.mode.startswith("EXACT"):
                 conf=self.det._confidence(q,pq)
             else:
                 # v3/v4 did not store block-level duty/burst metrics after the
-                # old broadband kill-switch. This conservative legacy score is
-                # explicitly approximate: strong local temporal novelty must be
-                # accompanied by recorded duplex context.
-                novelty=clamp((float(q.get("temporal_departure",0))-1.25)/1.25)
+                # old broadband kill-switch. This remains explicitly
+                # approximate, but it uses the same v6 novelty + duplex gate.
+                novelty=clamp((dep-min_novel)/max(.5,
+                    float(self.cfg.get("novelty_strong_departure",2.0))-min_novel))
                 conf=clamp(.55*novelty+.45*pq)
-            q.update(paired=pq>=minpair,paired_now=pnow,pair_quality=pq,confidence=conf)
+            q["confidence"]=conf
             if conf>=minconf:
                 accepted.append(q)
         accepted.sort(key=lambda q:(float(q.get("confidence",0)),
@@ -183,7 +194,7 @@ class ReplayEngine:
             "freqs":freqs,
             "spectrum":power,
             "source_captured_at":sample.get("captured_at"),
-            "legacy_approx":self.mode!="EXACT v5",
+            "legacy_approx":not self.mode.startswith("EXACT"),
         }
 
 

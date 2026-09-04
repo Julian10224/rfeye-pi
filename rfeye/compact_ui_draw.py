@@ -137,7 +137,7 @@ def draw_recordings(app):
             app._text(date,18,y+7,app.font_s,WHITE)
             app._text(tm,18,y+25,app.font_s,(150,201,226))
             mode=str(e.get("mode",""))
-            col=GREEN if mode=="EXACT v5" else YELLOW
+            col=GREEN if mode.startswith("EXACT") else YELLOW
             surf=app.font_s.render(mode,True,col); app.ui.blit(surf,(302-surf.get_width(),y+7))
             info=f'{int(e.get("samples",0))} samples'
             surf=app.font_s.render(info,True,DIM); app.ui.blit(surf,(302-surf.get_width(),y+25))
@@ -161,7 +161,7 @@ def draw_recording_detail(app):
     app._text(f'{int(e.get("samples",0))} samples',160,126,app.font_s,WHITE,center=True)
     dur=float(e.get("duration",0.0) or 0.0)
     app._text(f'{dur:.0f} s recorded',160,149,app.font_s,DIM,center=True)
-    if mode!="EXACT v5":
+    if not mode.startswith("EXACT"):
         app._text("Old recording: replay is approximate",160,172,app.font_s,YELLOW,center=True)
     pygame.draw.rect(app.ui,(12,91,132),(12,188,296,98),border_radius=16)
     app._text("PLAY",160,224,app.font_l,WHITE,center=True)

@@ -58,7 +58,7 @@ except Exception:
     pass
 
 DEFAULTS = {
-    "detector_profile_version": 5,
+    "detector_profile_version": 6,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -72,12 +72,12 @@ DEFAULTS = {
     "fft_blocks": 8,
     "mobile_capture_ms": 64.0,
     "site_capture_ms": 36.0,
-    "site_scan_interval": 6,
+    "site_scan_interval": 3,
     "sdr_stop_join_s": 8.0,
     "carrier_memory_s": 2.5,
     "confirm_window_s": 2.2,
     "alert_hold_s": 3.0,
-    "strong_hit_confidence": 0.72,
+    "strong_hit_confidence": 0.78,
     "artifact_calibration_sweeps": 5,
     "artifact_min_baseline_hits": 4,
     "artifact_rf_snr_delta_db": 5.0,
@@ -96,6 +96,8 @@ DEFAULTS = {
     "broadband_temporal_min_departure": 1.25,
     "broadband_dynamic_keep_max": 6,
     "mobile_percentile": 95.0,
+    "tetra_channel_spacing_hz": 25_000.0,
+    "tetra_raster_offset_hz": 12_500.0,
     "tetra_channel_half_width_hz": 9000.0,
     "burst_gate_db": 6.0,
     "min_burst_duty": 0.035,
@@ -105,14 +107,19 @@ DEFAULTS = {
     "mobile_min_rf_snr_db": 5.0,
     "site_min_snr_db": 5.0,
     "site_burst_snr_db": 8.0,
-    "site_pair_memory_s": 15.0,
-    "site_pair_min_hits": 1,
+    "site_pair_memory_s": 5.0,
+    "site_pair_min_hits": 2,
+    "site_max_candidates": 64,
     "duplex_pair_tolerance_hz": 1000.0,
-    "duplex_pair_min_quality": 0.28,
+    "duplex_pair_min_quality": 0.40,
+    "novelty_min_departure": 1.25,
+    "novelty_strong_departure": 2.0,
+    "strong_pair_max_age_s": 2.5,
+    "strong_pair_min_quality": 0.75,
     "require_duplex_pair": True,
     "require_current_duplex_pair": False,
     "max_mobile_candidates_per_sweep": 12,
-    "candidate_min_confidence": 0.48,
+    "candidate_min_confidence": 0.52,
     "confidence_attack": 0.58,
     "confidence_release": 0.20,
     "confidence_confirm": 0.62,
@@ -148,7 +155,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.34",
+    "app_version": "0.7.35",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -182,10 +189,11 @@ def load_config():
     cfg["audio_mode"] = "adaptive"
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
-    # Detector profile v5 adds per-channel temporal novelty so a busy RF
-    # sweep narrows to changing carriers instead of deleting every candidate.
-    # Older installations also retain the conservative persistent clutter map.
-    if int(saved.get("detector_profile_version", 0) or 0) < 5:
+    # Detector profile v6 fixes the TETRA +12.5 kHz carrier-key bug and
+    # requires material temporal novelty plus fresh/verified duplex context
+    # before a mobile candidate can confirm. This intentionally invalidates
+    # the old artifact baseline because v5 could merge adjacent carriers.
+    if int(saved.get("detector_profile_version", 0) or 0) < 6:
         for key in (
             "mobile_capture_ms", "site_capture_ms", "site_scan_interval",
             "carrier_memory_s", "confirm_window_s", "alert_hold_s",
@@ -199,10 +207,15 @@ def load_config():
             "temporal_rf_snr_scale_db", "temporal_duty_scale",
             "temporal_span_scale_db", "broadband_temporal_min_departure",
             "broadband_dynamic_keep_max",
-            "site_pair_memory_s", "require_current_duplex_pair",
+            "tetra_channel_spacing_hz", "tetra_raster_offset_hz",
+            "site_pair_memory_s", "site_pair_min_hits", "site_max_candidates",
+            "duplex_pair_min_quality", "novelty_min_departure",
+            "novelty_strong_departure", "strong_pair_max_age_s",
+            "strong_pair_min_quality", "candidate_min_confidence",
+            "require_current_duplex_pair",
         ):
             cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 5
+    cfg["detector_profile_version"] = 6
     for obsolete in (
         "threshold_db", "threshold_min_db", "threshold_max_db",
         "threshold_step_db", "threshold_soft_margin_db", "min_burst_span_db",

@@ -1,4 +1,4 @@
-name: RF Eye 0.7.34 appliance checks
+name: RF Eye 0.7.35 appliance checks
 
 on:
   push:
@@ -10,19 +10,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Device Tree compiler
-        run: sudo apt-get update && sudo apt-get install -y device-tree-compiler
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y device-tree-compiler python3-numpy
       - name: Check shell and Python syntax
         run: |
           bash -n install.sh install-cuqi35.sh scripts/start-rfeye.sh \
             scripts/apply-cuqi35-system-fixes.sh scripts/optimize-rpi-appliance.sh \
             scripts/install-networkmanager-policy.sh scripts/build-release.sh
           python3 -m py_compile rfeye/*.py scripts/generate-plymouth-assets.py \
-            scripts/generate-plymouth-assets-cuqi35.py
+            scripts/generate-plymouth-assets-cuqi35.py scripts/detector-selftest.py
+      - name: Run detector profile regression tests
+        run: PYTHONPATH=rfeye python3 scripts/detector-selftest.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.7.34"
-          grep -q '"app_version": "0.7.34"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.7.35"
+          grep -q '"app_version": "0.7.35"' rfeye/config.py
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
           grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
@@ -41,7 +43,11 @@ jobs:
           grep -q 'def _annotate_mobile_temporal' rfeye/sdr_backend.py
           grep -q 'm=self._apply_broadband_guard(m,limit)' rfeye/sdr_backend.py
           grep -q 'debug_mobile_candidates' rfeye/compact_ui_controls.py
-          grep -q 'rfeye-rf-series-v5' rfeye/compact_ui_controls.py
+          grep -q 'rfeye-rf-series-v6' rfeye/compact_ui_controls.py
+          grep -q 'def _carrier_key' rfeye/sdr_backend.py
+          grep -q 'novelty_rejected_count' rfeye/sdr_backend.py
+          grep -q 'pair_rejected_count' rfeye/sdr_backend.py
+          grep -q 'confidence_rejected_count' rfeye/sdr_backend.py
           grep -q 'strftime("%Y-%m-%d_%H-%M-%S")' rfeye/compact_ui_controls.py
           grep -q 'app.page="recordings"' rfeye/compact_ui_controls.py
           grep -q 'def draw_recording_replay' rfeye/compact_ui_draw.py
@@ -75,11 +81,11 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.7.34'
+          assert c['app_version']=='0.7.35'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['detector_profile_version']==5
+          assert c['detector_profile_version']==6
           assert c['artifact_baseline_persist'] is True
           assert c['artifact_max_rf_snr_std_db']==2.0
           assert c['artifact_max_duty_std']==0.08
@@ -91,6 +97,19 @@ jobs:
           assert c['broadband_temporal_min_departure']==1.25
           assert c['broadband_dynamic_keep_max']==6
           assert c['sdr_stop_join_s']==8.0
+          assert c['tetra_channel_spacing_hz']==25000.0
+          assert c['tetra_raster_offset_hz']==12500.0
+          assert c['site_scan_interval']==3
+          assert c['site_pair_memory_s']==5.0
+          assert c['site_pair_min_hits']==2
+          assert c['site_max_candidates']==64
+          assert c['duplex_pair_min_quality']==0.40
+          assert c['novelty_min_departure']==1.25
+          assert c['novelty_strong_departure']==2.0
+          assert c['strong_pair_max_age_s']==2.5
+          assert c['strong_pair_min_quality']==0.75
+          assert c['candidate_min_confidence']==0.52
+          assert c['strong_hit_confidence']==0.78
           assert 'threshold_db' not in c
           assert c['mobile_capture_ms']==64.0
           assert c['site_capture_ms']==36.0
@@ -107,5 +126,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.34"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.35"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"

@@ -37,6 +37,7 @@ def _record_payload_snapshot(app):
             "artifact_sweep","artifact_baseline_count","artifact_baseline_loaded",
             "artifact_tainted_count","raw_mobile_candidate_count",
             "post_artifact_candidate_count","broadband_kept_count",
+            "novelty_rejected_count","pair_rejected_count","confidence_rejected_count",
             "debug_mobile_candidates","confirm_streak","clear_streak",
             "cycle_ms","mobile_scan_ms","site_scan_ms","capture_ms","scan_windows","sdr_path")},
         "spectrum":{
@@ -209,7 +210,7 @@ def _record_rf_worker(app, duration):
             samples.append(item)
         ended=datetime.now().astimezone(); cfg=app.cfg
         data={
-            "schema":"rfeye-rf-series-v5",
+            "schema":"rfeye-rf-series-v6",
             "recorded_from":started.isoformat(timespec="milliseconds"),
             "recorded_to":ended.isoformat(timespec="milliseconds"),
             "requested_duration_s":float(duration),
@@ -224,7 +225,11 @@ def _record_rf_worker(app, duration):
                 "temporal_baseline_alpha","temporal_state_max_age_s",
                 "temporal_rf_snr_scale_db","temporal_duty_scale","temporal_span_scale_db",
                 "broadband_temporal_min_departure","broadband_dynamic_keep_max",
-                "site_pair_memory_s","require_duplex_pair","require_current_duplex_pair",
+                "tetra_channel_spacing_hz","tetra_raster_offset_hz",
+                "site_pair_memory_s","site_pair_min_hits","site_max_candidates",
+                "duplex_pair_min_quality","require_duplex_pair","require_current_duplex_pair",
+                "novelty_min_departure","novelty_strong_departure",
+                "strong_pair_max_age_s","strong_pair_min_quality",
                 "candidate_min_confidence","strong_hit_confidence","confirm_hits","clear_hits")},
             "samples":samples,
         }

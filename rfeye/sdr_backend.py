@@ -104,6 +104,7 @@ class SDRBackend:
         self._load_artifact_baseline()
         self._mobile_temporal={}
         self.last_raw_mobile_candidates=0; self.last_post_artifact_candidates=0; self.last_broadband_kept=0
+        self.last_novelty_rejected=0; self.last_pair_rejected=0; self.last_confidence_rejected=0
         self.debug_mobile_candidates=[]
         self.last_broadband_rejected=False; self.last_comb_rejected=False
     def set_demo(self,v):
@@ -119,6 +120,7 @@ class SDRBackend:
                 self._artifact_baseline_loaded=False; self._load_artifact_baseline()
                 self._mobile_temporal={}
                 self.last_raw_mobile_candidates=0; self.last_post_artifact_candidates=0; self.last_broadband_kept=0
+                self.last_novelty_rejected=0; self.last_pair_rejected=0; self.last_confidence_rejected=0
                 self.debug_mobile_candidates=[]
                 self.last_broadband_rejected=False; self.last_comb_rejected=False
                 self.status='SCANNING'; self.error=''; self.last_update=time.time()
@@ -159,6 +161,9 @@ class SDRBackend:
             'raw_mobile_candidate_count':int(self.last_raw_mobile_candidates),
             'post_artifact_candidate_count':int(self.last_post_artifact_candidates),
             'broadband_kept_count':int(self.last_broadband_kept),
+            'novelty_rejected_count':int(self.last_novelty_rejected),
+            'pair_rejected_count':int(self.last_pair_rejected),
+            'confidence_rejected_count':int(self.last_confidence_rejected),
             'debug_mobile_candidates':[dict(p) for p in self.debug_mobile_candidates],
             'sdr_path':str(getattr(self,'sdr_path','?'))}
     def _run(self):
@@ -173,6 +178,15 @@ class SDRBackend:
             # Close from the same worker that performs synchronous USB reads.
             # This avoids cross-thread librtlsdr close/read races.
             self._close_direct_sdr()
+    def _carrier_key(self,freq_hz):
+        # C2000/TETRA carriers in this profile are on the ETSI +12.5 kHz
+        # offset raster: 380.0125 MHz + N*25 kHz. Never round absolute
+        # frequency to 25 kHz multiples; that can merge adjacent carriers.
+        base=float(self.cfg.get('mobile_band_start_hz',380e6))+float(self.cfg.get('tetra_raster_offset_hz',12500.0))
+        step=float(self.cfg.get('tetra_channel_spacing_hz',25000.0))
+        n=int(math.floor((float(freq_hz)-base)/step+0.5))
+        return int(round(base+n*step))
+
     def _centers_for(self,a,b,sr):
         usable=sr*.68; half=usable/2; step=usable*.9; out=[]; c=a+half
         while True:
@@ -403,7 +417,10 @@ class SDRBackend:
                 if steady<smin and burst<bmin:continue
                 q=dict(q0); snr=max(steady,burst-2); q.update(snr_db=float(snr),site_quality=clamp((snr-smin+3)/14),signal_strength=clamp((snr-smin)/24));q['level']=q['signal_strength'];peaks.append(q)
             peaks.sort(key=lambda q:(q['site_quality'],q['snr_db']),reverse=True)
-        return peaks[:max(32,int(self.cfg.get('max_signals',3))*10)],f,p,floor
+        limit=max(32,int(self.cfg.get('max_signals',3))*10)
+        if label=='SITE':
+            limit=max(limit,int(self.cfg.get('site_max_candidates',64)))
+        return peaks[:limit],f,p,floor
 
     def _artifact_state_path(self):
         override=os.getenv('RFEYE_ARTIFACT_BASELINE')
@@ -472,7 +489,7 @@ class SDRBackend:
 
         by_freq={}
         for q in peaks:
-            f=int(round(float(q.get('freq_hz',0))/25000.)*25000)
+            f=self._carrier_key(q.get('freq_hz',0))
             old=by_freq.get(f)
             if old is None or float(q.get('power_db',-999))>float(old.get('power_db',-999)):
                 by_freq[f]=q
@@ -505,7 +522,7 @@ class SDRBackend:
 
             out=[]
             for q in peaks:
-                f=int(round(float(q.get('freq_hz',0))/25000.)*25000)
+                f=self._carrier_key(q.get('freq_hz',0))
                 if f in self._artifact_tainted:
                     q=dict(q);q['warmup_transient']=True
                     out.append(q)
@@ -514,7 +531,7 @@ class SDRBackend:
 
         out=[]
         for q in peaks:
-            f=int(round(float(q.get('freq_hz',0))/25000.)*25000)
+            f=self._carrier_key(q.get('freq_hz',0))
             base=self._artifact_baseline.get(f)
             if base is None:
                 out.append(q);continue
@@ -534,61 +551,103 @@ class SDRBackend:
         return out
 
     def _remember_sites(self,site,now):
-        age=float(self.cfg.get('site_pair_memory_s',4))
+        age=float(self.cfg.get('site_pair_memory_s',5.0))
         for q in site:
             f=round(q['freq_hz']); old=self.site_recent.get(f,{}); hits=int(old.get('hits',0))+1 if now-float(old.get('time',0))<=age*1.5 else 1
             self.site_recent[f]={'time':now,'hits':min(hits,8),'quality':float(q.get('site_quality',q.get('level',0)))}
         self.site_recent={f:v for f,v in self.site_recent.items() if now-float(v.get('time',0))<=age}
-    def _pair_q(self,target,site,now):
-        tol=float(self.cfg.get('duplex_pair_tolerance_hz',1000)); age=max(.1,float(self.cfg.get('site_pair_memory_s',4))); hits=int(self.cfg.get('site_pair_min_hits',1)); best=0.; current=False
+    def _pair_info(self,target,site,now):
+        tol=float(self.cfg.get('duplex_pair_tolerance_hz',1000))
+        age=max(.1,float(self.cfg.get('site_pair_memory_s',5.0)))
+        min_hits=max(1,int(self.cfg.get('site_pair_min_hits',2)))
+        best=0.; current=False; best_age=1e9; best_hits=0
+        # A site carrier seen in the current refresh is valid immediately.
+        # Memory-only pairing is stricter: it must have been observed on at
+        # least min_hits separate site refreshes and decays quickly with age.
         for s in site:
-            if abs(s['freq_hz']-target)<=tol:best=max(best,float(s.get('site_quality',s.get('level',0))));current=True
+            if abs(float(s['freq_hz'])-float(target))<=tol:
+                q=float(s.get('site_quality',s.get('level',0)))
+                if q>=best:
+                    f=round(float(s['freq_hz'])); meta=self.site_recent.get(f,{})
+                    best=q; current=True; best_age=0.; best_hits=max(1,int(meta.get('hits',1)))
         for f,m in self.site_recent.items():
-            if abs(f-target)<=tol and int(m.get('hits',0))>=hits:
-                best=max(best,float(m.get('quality',0))*clamp(1-(now-float(m.get('time',0)))/age))
-        return clamp(best),current
-    def _confidence(self,m,pair):return clamp(.42*m.get('burst_quality',0)+.16*m.get('duty_quality',0)+.14*m.get('rf_quality',0)+.28*pair)
+            if abs(float(f)-float(target))<=tol and int(m.get('hits',0))>=min_hits:
+                a=max(0.,now-float(m.get('time',0)))
+                q=float(m.get('quality',0))*clamp(1-a/age)
+                if q>best:
+                    best=q; current=False; best_age=a; best_hits=int(m.get('hits',0))
+        return clamp(best),current,float(best_age),int(best_hits)
+
+    def _pair_q(self,target,site,now):
+        q,current,_age,_hits=self._pair_info(target,site,now)
+        return q,current
+
+    def _confidence(self,m,pair):
+        dep=float(m.get('temporal_departure',0))
+        lo=float(self.cfg.get('novelty_min_departure',1.25))
+        hi=max(lo+.1,float(self.cfg.get('novelty_strong_departure',2.0)))
+        novelty=clamp((dep-lo)/(hi-lo))
+        return clamp(.30*m.get('burst_quality',0)+.12*m.get('duty_quality',0)+
+                     .12*m.get('rf_quality',0)+.26*pair+.20*novelty)
     def _hysteresis(self,candidates,now):
-        # Track evidence per 25 kHz carrier instead of tying the whole alert to
-        # whichever carrier happens to rank first in one sweep. This prevents
-        # ranking jitter between several active carriers from resetting a valid
-        # detection every cycle.
+        # Evidence is tracked per real +12.5 kHz TETRA raster carrier. Only
+        # candidates that already passed the novelty + duplex gates reach this
+        # method, so stationary paired spurs cannot preload confirmation hits.
         memory=max(.5,float(self.cfg.get('carrier_memory_s',2.5)))
         window=max(.5,float(self.cfg.get('confirm_window_s',2.2)))
         hold=max(0.,float(self.cfg.get('alert_hold_s',3.0)))
-        strong=float(self.cfg.get('strong_hit_confidence',.72))
-        minconf=float(self.cfg.get('candidate_min_confidence',.48))
-        need=max(1,int(self.cfg.get('confirm_hits',2)))
+        strong=float(self.cfg.get('strong_hit_confidence',.78))
+        minconf=float(self.cfg.get('candidate_min_confidence',.52))
+        need=max(2,int(self.cfg.get('confirm_hits',2)))
+        strong_dep=float(self.cfg.get('novelty_strong_departure',2.0))
+        fresh_age=max(.1,float(self.cfg.get('strong_pair_max_age_s',2.5)))
+        fresh_pair=float(self.cfg.get('strong_pair_min_quality',.75))
+        memory_hits=max(1,int(self.cfg.get('site_pair_min_hits',2)))
 
         for q in candidates:
-            f=int(round(float(q['freq_hz'])/25000.)*25000)
+            f=self._carrier_key(q['freq_hz'])
             conf=float(q.get('confidence',0))
             st=self._carrier_state.get(f)
             if st is None or now-float(st.get('last',0))>window:
                 st={'hits':0,'last':0.,'score':0.}
-            st['hits']=int(st.get('hits',0))+1; st['last']=now
+            st['hits']=int(st.get('hits',0))+1
+            st['last']=now
             st['score']=max(conf,float(st.get('score',0))*.55+conf*.45)
             self._carrier_state[f]=st
 
-        self._carrier_state={f:s for f,s in self._carrier_state.items() if now-float(s.get('last',0))<=memory}
+        self._carrier_state={f:s for f,s in self._carrier_state.items()
+                             if now-float(s.get('last',0))<=memory}
         raw=max([float(q.get('confidence',0)) for q in candidates],default=0.)
         old=float(self.activity_confidence)
-        a=float(self.cfg.get('confidence_attack',.58) if raw>=old else self.cfg.get('confidence_release',.20))
+        a=float(self.cfg.get('confidence_attack',.58) if raw>=old
+                else self.cfg.get('confidence_release',.20))
         new=clamp(old+clamp(a)*(raw-old))
 
         qualified=[]
         for q in candidates:
-            f=int(round(float(q['freq_hz'])/25000.)*25000); st=self._carrier_state.get(f,{})
+            f=self._carrier_key(q['freq_hz']); st=self._carrier_state.get(f,{})
             conf=float(q.get('confidence',0)); hits=int(st.get('hits',0))
-            if conf>=strong or (hits>=need and conf>=minconf):
-                qualified.append((conf,hits,f))
+            dep=float(q.get('temporal_departure',0))
+            pair=float(q.get('pair_quality',0))
+            pair_age=float(q.get('pair_age_s',1e9))
+            pair_hits=int(q.get('pair_hits',0))
+            fresh=pair>=fresh_pair and (
+                bool(q.get('paired_now')) or
+                (pair_age<=fresh_age and pair_hits>=memory_hits)
+            )
+            immediate=dep>=strong_dep and conf>=strong and fresh
+            repeated=hits>=need and conf>=minconf
+            if immediate or repeated:
+                q['confirm_reason']='STRONG_FRESH' if immediate else 'REPEATED'
+                qualified.append((conf,hits,dep,f))
         if qualified:
-            _,hits,f=max(qualified)
+            _,hits,_dep,f=max(qualified)
             self.mobile_confirmed=True; self._last_detection_time=now
             self._candidate_freq=f; self._confirm_streak=hits; self._clear_streak=0
         else:
             self._clear_streak+=1
-            self._confirm_streak=max([int(s.get('hits',0)) for s in self._carrier_state.values()],default=0)
+            self._confirm_streak=max([int(s.get('hits',0))
+                                      for s in self._carrier_state.values()],default=0)
             if not self.mobile_confirmed or now-self._last_detection_time>hold:
                 self.mobile_confirmed=False
                 if not self._carrier_state:self._candidate_freq=None
@@ -616,7 +675,7 @@ class SDRBackend:
             # Mobile/uplink scanning stays on the fast path. Downlink context is
             # refreshed periodically and kept in memory; forcing a second 5 MHz
             # sweep for every candidate was adding several seconds of latency.
-            interval=max(1,int(self.cfg.get('site_scan_interval',6)))
+            interval=max(1,int(self.cfg.get('site_scan_interval',3)))
             refresh_site=(not self.site_recent) or self._idle_site_cycle==0
             self._idle_site_cycle=(self._idle_site_cycle+1)%interval
             if refresh_site:
@@ -626,12 +685,42 @@ class SDRBackend:
             else:
                 site=[]
             now=time.time(); self._remember_sites(site,now)
-            require=bool(self.cfg.get('require_duplex_pair',True)); require_now=bool(self.cfg.get('require_current_duplex_pair',False)); minpair=float(self.cfg.get('duplex_pair_min_quality',.28)); minconf=float(self.cfg.get('candidate_min_confidence',.48)); accepted=[]
+            require=bool(self.cfg.get('require_duplex_pair',True))
+            require_now=bool(self.cfg.get('require_current_duplex_pair',False))
+            minpair=float(self.cfg.get('duplex_pair_min_quality',.40))
+            minconf=float(self.cfg.get('candidate_min_confidence',.52))
+            min_novel=float(self.cfg.get('novelty_min_departure',1.25))
+            self.last_novelty_rejected=0
+            self.last_pair_rejected=0
+            self.last_confidence_rejected=0
+            accepted=[]
             for x in m:
-                pq,pnow=self._pair_q(round(x['freq_hz']+10000000),site,now)
-                if require and (pq<minpair or (require_now and not pnow)):continue
-                q=dict(x);q.update(paired=pq>=minpair,paired_now=pnow,pair_quality=pq,confidence=self._confidence(x,pq))
-                if q['confidence']>=minconf:accepted.append(q)
+                dep=float(x.get('temporal_departure',0))
+                # This is the central false-positive guard in detector profile
+                # v6. A stationary/slowly drifting carrier may have excellent
+                # burst and duplex scores, but it cannot alert unless it is a
+                # material local change relative to its own recent history.
+                if dep<min_novel:
+                    self.last_novelty_rejected+=1
+                    continue
+                pq,pnow,page,phits=self._pair_info(
+                    round(x['freq_hz']+10000000),site,now)
+                if require and (pq<minpair or (require_now and not pnow)):
+                    self.last_pair_rejected+=1
+                    continue
+                q=dict(x)
+                q.update(
+                    carrier_key_hz=self._carrier_key(x['freq_hz']),
+                    paired=pq>=minpair,paired_now=pnow,pair_quality=pq,
+                    pair_age_s=page,pair_hits=phits,
+                    novelty_quality=clamp((dep-min_novel)/max(
+                        .1,float(self.cfg.get('novelty_strong_departure',2.0))-min_novel)),
+                )
+                q['confidence']=self._confidence(q,pq)
+                if q['confidence']>=minconf:
+                    accepted.append(q)
+                else:
+                    self.last_confidence_rejected+=1
             accepted.sort(key=lambda q:(q['confidence'],q.get('burst_quality',0),q.get('rf_snr_db',0)),reverse=True); shown=accepted[:int(self.cfg.get('max_signals',3))]
             _,confirmed=self._hysteresis(shown,now)
             rf=max([p.get('signal_strength',0) for p in shown],default=0)
