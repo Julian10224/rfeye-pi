@@ -97,7 +97,9 @@ class SDRBackend:
         self.sdr=None; self.sdr_sample_rate=None; self.sdr_gain=None; self._fft_window_cache={}; self.sdr_path="UNOPENED"
         self._idle_site_cycle=0
         self._confirm_streak=0; self._clear_streak=0; self._candidate_freq=None
-        self.last_broadband_rejected=False
+        self._carrier_state={}; self._last_detection_time=0.
+        self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}
+        self.last_broadband_rejected=False; self.last_comb_rejected=False
     def set_demo(self,v):
         v=bool(v)
         with self.lock:
@@ -105,7 +107,10 @@ class SDRBackend:
             if not v:
                 self.demo_active=False; self.peaks=[]; self.mobile_peaks=[]; self.site_peaks=[]
                 self.mobile_level=0.; self.site_level=0.; self.activity_confidence=0.; self.mobile_confirmed=False
-                self._confirm_streak=0; self._clear_streak=0; self._candidate_freq=None; self.last_broadband_rejected=False
+                self._confirm_streak=0; self._clear_streak=0; self._candidate_freq=None
+                self._carrier_state={}; self._last_detection_time=0.
+                self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}
+                self.last_broadband_rejected=False; self.last_comb_rejected=False
                 self.status='SCANNING'; self.error=''; self.last_update=time.time()
     def start(self):
         if self.running:return
@@ -126,7 +131,10 @@ class SDRBackend:
             'site_scan_ms':float(self.last_site_scan_ms),'capture_ms':float(self.last_capture_ms),
             'scan_windows':int(self.last_scan_windows),
             'confirm_streak':int(self._confirm_streak),'clear_streak':int(self._clear_streak),
-            'broadband_rejected':bool(self.last_broadband_rejected),
+            'broadband_rejected':bool(self.last_broadband_rejected),'comb_rejected':bool(self.last_comb_rejected),
+            'static_rejected':bool(self.last_comb_rejected),
+            'artifact_calibrating':bool(self._artifact_sweep<int(self.cfg.get('artifact_calibration_sweeps',5))),
+            'artifact_sweep':int(self._artifact_sweep),'artifact_baseline_count':len(self._artifact_baseline),
             'sdr_path':str(getattr(self,'sdr_path','?'))}
     def _run(self):
         while self.running:
@@ -226,23 +234,36 @@ class SDRBackend:
         return clamp((hi-d)/max(1e-6,hi-pref_hi))
     def _scan_band(self,a,b,label):
         sr=int(self.cfg.get('sample_rate',2048000)); n=int(self.cfg.get('fft_size',1024)); base=int(self.cfg.get('fft_blocks',8))
-        ms=float(self.cfg.get('mobile_capture_ms' if label=='MOBILE' else 'site_capture_ms',72.)); blocks=max(base,math.ceil(sr*ms/1000/n))
+        ms=float(self.cfg.get('mobile_capture_ms' if label=='MOBILE' else 'site_capture_ms',64.)); blocks=max(base,math.ceil(sr*ms/1000/n))
         usable=sr*.68/2; half=float(self.cfg.get('tetra_channel_half_width_hz',9000)); gate=float(self.cfg.get('burst_gate_db',6))
-        channels=np.arange(a+12500.,b,25000.); obs={}; fs=[]; ps=[]
+        channels=np.arange(a+12500.,b,25000.,dtype=np.float64); obs={}; fs=[]; ps=[]
+        bin_hz=float(sr)/float(n); half_bins=max(1,int(math.ceil(half/bin_hz)))
+        offsets=np.arange(-half_bins,half_bins+1,dtype=np.int32); db_to_ln=math.log(10.0)/10.0
         for center in self._centers_for(a,b,sr):
             _cap_t=time.perf_counter()
             f,p,stack=self._capture(center,sr,n,blocks,label=='MOBILE')
             self.last_capture_ms=(time.perf_counter()-_cap_t)*1000.; self.last_scan_windows+=1
             mask=(f>=a)&(f<=b)&(np.abs(f-center)<=usable)
             if np.any(mask):fs.append(f[mask]);ps.append(p[mask])
-            for ch in channels:
-                margin=usable-abs(ch-center)
-                if margin<15000:continue
-                bins=np.where(np.abs(f-ch)<=half)[0]
-                if len(bins)<2:continue
-                series=10*np.log10(np.sum(10**(stack[:,bins]/10),axis=1)+1e-20); low=float(np.percentile(series,20)); high=float(np.percentile(series,95))
-                q={'freq_hz':float(ch),'low_db':low,'median_db':float(np.percentile(series,50)),'power_db':high,'snr_db':high-low,
-                   'burst_span_db':high-low,'duty':float(np.mean(series>low+gate)),'band':label,'last_seen':time.time(),'edge_margin':float(margin)}
+            local=channels[(np.abs(channels-center)<=usable-15000.)]
+            if not len(local):continue
+            mids=np.rint((local-center)/bin_hz+n/2.).astype(np.int32)
+            idx=mids[:,None]+offsets[None,:]
+            valid=(idx[:,0]>=0)&(idx[:,-1]<stack.shape[1])
+            local=local[valid];idx=idx[valid]
+            if not len(local):continue
+            # Vectorize all raster channels in this tuning window. The old
+            # version repeated percentile and power conversion work per carrier,
+            # which dominated CPU time on the Pi.
+            energy=np.exp(stack[:,idx]*db_to_ln).sum(axis=2)
+            series=(10.0/math.log(10.0))*np.log(energy+1e-20)
+            q20,q50,q95=np.percentile(series,(20,50,95),axis=0)
+            duties=np.mean(series>(q20[None,:]+gate),axis=0)
+            margins=usable-np.abs(local-center); seen_at=time.time()
+            for j,ch in enumerate(local):
+                q={'freq_hz':float(ch),'low_db':float(q20[j]),'median_db':float(q50[j]),'power_db':float(q95[j]),
+                   'snr_db':float(q95[j]-q20[j]),'burst_span_db':float(q95[j]-q20[j]),'duty':float(duties[j]),
+                   'band':label,'last_seen':seen_at,'edge_margin':float(margins[j])}
                 old=obs.get(float(ch))
                 if old is None or q['edge_margin']>old['edge_margin']:obs[float(ch)]=q
         if not ps:return [],np.array([]),np.array([]),-120.
@@ -250,14 +271,22 @@ class SDRBackend:
         if not vals:return [],f,p,floor
         ch_floor=float(np.percentile([q['low_db'] for q in vals],40)); peaks=[]
         if label=='MOBILE':
-            req=max(float(self.cfg.get('min_burst_span_db',9)),float(self.cfg.get('threshold_db',12))); dlo=float(self.cfg.get('min_burst_duty',.035)); dhi=float(self.cfg.get('max_burst_duty',.65))
-            plo=float(self.cfg.get('preferred_burst_duty_min',.06)); phi=float(self.cfg.get('preferred_burst_duty_max',.45)); minsnr=float(self.cfg.get('mobile_min_rf_snr_db',5))
+            # Detection sensitivity is intentionally soft and automatic. There
+            # is no user dB threshold: burst span and RF SNR continuously change
+            # quality/confidence instead of crossing an adjustable hard cutoff.
+            gate=float(self.cfg.get('burst_gate_db',6.0))
+            dlo=float(self.cfg.get('min_burst_duty',.035)); dhi=float(self.cfg.get('max_burst_duty',.65))
+            plo=float(self.cfg.get('preferred_burst_duty_min',.06)); phi=float(self.cfg.get('preferred_burst_duty_max',.45))
+            minsnr=float(self.cfg.get('mobile_min_rf_snr_db',5.0))
             for q0 in vals:
-                if q0['burst_span_db']<req or not dlo<=q0['duty']<=dhi:continue
-                q=dict(q0); snr=q['power_db']-ch_floor
-                if snr<minsnr:continue
-                q.update(rf_snr_db=float(snr),burst_quality=clamp((q['burst_span_db']-req+4)/14),duty_quality=self._duty_q(q['duty'],dlo,dhi,plo,phi),
-                         rf_quality=clamp((snr-minsnr+3)/15),signal_strength=clamp((snr-minsnr)/24),raster_ok=True)
+                if not dlo<=q0['duty']<=dhi:continue
+                q=dict(q0); snr=q['power_db']-ch_floor; span=float(q['burst_span_db'])
+                burst_q=clamp((span-gate+2.0)/14.0)
+                rf_q=clamp((snr-minsnr+4.0)/16.0)
+                if burst_q<=0.0 or rf_q<=0.0:continue
+                q.update(rf_snr_db=float(snr),burst_quality=burst_q,
+                         duty_quality=self._duty_q(q['duty'],dlo,dhi,plo,phi),
+                         rf_quality=rf_q,signal_strength=clamp((snr-minsnr+2.0)/24.0),raster_ok=True)
                 q['level']=q['signal_strength'];peaks.append(q)
             peaks.sort(key=lambda q:(q['burst_quality'],q['rf_quality'],q['power_db']),reverse=True)
         else:
@@ -268,6 +297,69 @@ class SDRBackend:
                 q=dict(q0); snr=max(steady,burst-2); q.update(snr_db=float(snr),site_quality=clamp((snr-smin+3)/14),signal_strength=clamp((snr-smin)/24));q['level']=q['signal_strength'];peaks.append(q)
             peaks.sort(key=lambda q:(q['site_quality'],q['snr_db']),reverse=True)
         return peaks[:max(32,int(self.cfg.get('max_signals',3))*10)],f,p,floor
+
+    def _reject_static_artifacts(self,peaks):
+        # Learn the stationary RF environment during the first few fast sweeps.
+        # A fixed receiver/Pi spur is present sweep after sweep with almost the
+        # same level, duty and burst span. A new mobile burst is either on a new
+        # carrier or changes those metrics enough to escape the baseline.
+        self._artifact_sweep+=1
+        warm=max(3,int(self.cfg.get('artifact_calibration_sweeps',5)))
+        minhits=max(2,int(self.cfg.get('artifact_min_baseline_hits',4)))
+        rdelta=max(.5,float(self.cfg.get('artifact_rf_snr_delta_db',5.0)))
+        ddelta=max(.02,float(self.cfg.get('artifact_duty_delta',.12)))
+        sdelta=max(.5,float(self.cfg.get('artifact_span_delta_db',3.5)))
+        self.last_comb_rejected=False
+
+        by_freq={}
+        for q in peaks:
+            f=int(round(float(q.get('freq_hz',0))/25000.)*25000)
+            # If adjacent raster bins describe one broad receiver spur, retain
+            # the strongest representative for baseline statistics.
+            old=by_freq.get(f)
+            if old is None or float(q.get('power_db',-999))>float(old.get('power_db',-999)):
+                by_freq[f]=q
+
+        if self._artifact_sweep<=warm:
+            for f,q in by_freq.items():
+                hist=self._artifact_samples.setdefault(f,[])
+                hist.append((float(q.get('power_db',0)),float(q.get('duty',0)),float(q.get('burst_span_db',0)),float(q.get('rf_snr_db',q.get('snr_db',0)))))
+                if len(hist)>warm:del hist[:-warm]
+            if self._artifact_sweep==warm:
+                for f,hist in self._artifact_samples.items():
+                    if len(hist)<minhits:continue
+                    a=np.asarray(hist,dtype=np.float32)
+                    self._artifact_baseline[f]={'power':float(np.median(a[:,0])),
+                        'duty':float(np.median(a[:,1])),'span':float(np.median(a[:,2])),
+                        'rf_snr':float(np.median(a[:,3])),'hits':len(hist)}
+            # Suppress alerts only during the short startup calibration. Normal
+            # scan cadence still runs so the baseline costs no extra SDR passes.
+            self.last_comb_rejected=bool(peaks)
+            return []
+
+        out=[]
+        for q in peaks:
+            f=int(round(float(q.get('freq_hz',0))/25000.)*25000)
+            base=self._artifact_baseline.get(f)
+            if base is None:
+                out.append(q);continue
+            dr=abs(float(q.get('rf_snr_db',q.get('snr_db',0)))-float(base['rf_snr']))
+            dd=abs(float(q.get('duty',0))-float(base['duty']))
+            ds=abs(float(q.get('burst_span_db',0))-float(base['span']))
+            if dr>rdelta or dd>ddelta or ds>sdelta:
+                # Significant shape/SNR departure from the stationary baseline:
+                # preserve it even if AGC changed the absolute power everywhere.
+                q=dict(q);q['baseline_departure']=max(dr/rdelta,dd/ddelta,ds/sdelta)
+                out.append(q);continue
+            self.last_comb_rejected=True
+            # Slowly follow harmless thermal/AGC drift without learning a new
+            # transmitter into the baseline.
+            base['power']=float(base['power']*.98+float(q.get('power_db',0))*.02)
+            base['duty']=float(base['duty']*.98+float(q.get('duty',0))*.02)
+            base['span']=float(base['span']*.98+float(q.get('burst_span_db',0))*.02)
+            base['rf_snr']=float(base['rf_snr']*.98+float(q.get('rf_snr_db',q.get('snr_db',0)))*.02)
+        return out
+
     def _remember_sites(self,site,now):
         age=float(self.cfg.get('site_pair_memory_s',4))
         for q in site:
@@ -283,36 +375,52 @@ class SDRBackend:
                 best=max(best,float(m.get('quality',0))*clamp(1-(now-float(m.get('time',0)))/age))
         return clamp(best),current
     def _confidence(self,m,pair):return clamp(.42*m.get('burst_quality',0)+.16*m.get('duty_quality',0)+.14*m.get('rf_quality',0)+.28*pair)
-    def _hysteresis(self,cycle,candidate_freq=None):
-        # Confirmation requires consecutive hits on the same 25 kHz carrier.
-        # This keeps unrelated impulsive interference from accumulating into a
-        # long-lived alert through the confidence filter.
-        tol=max(1000.,float(self.cfg.get('duplex_pair_tolerance_hz',1000)))
-        changed=False
-        if candidate_freq is not None:
-            f=round(float(candidate_freq))
-            same=self._candidate_freq is not None and abs(f-float(self._candidate_freq))<=tol
-            changed=self._candidate_freq is not None and not same
-            self._confirm_streak=self._confirm_streak+1 if same else 1
-            self._clear_streak=0; self._candidate_freq=f
-        else:
-            self._confirm_streak=0; self._clear_streak+=1
+    def _hysteresis(self,candidates,now):
+        # Track evidence per 25 kHz carrier instead of tying the whole alert to
+        # whichever carrier happens to rank first in one sweep. This prevents
+        # ranking jitter between several active carriers from resetting a valid
+        # detection every cycle.
+        memory=max(.5,float(self.cfg.get('carrier_memory_s',2.5)))
+        window=max(.5,float(self.cfg.get('confirm_window_s',2.2)))
+        hold=max(0.,float(self.cfg.get('alert_hold_s',3.0)))
+        strong=float(self.cfg.get('strong_hit_confidence',.72))
+        minconf=float(self.cfg.get('candidate_min_confidence',.48))
+        need=max(1,int(self.cfg.get('confirm_hits',2)))
 
-        old=self.activity_confidence
-        if changed and not self.mobile_confirmed:
-            old=0.0
-        a=float(self.cfg.get('confidence_attack',.58) if cycle>=old else self.cfg.get('confidence_release',.20))
-        new=clamp(old+clamp(a)*(cycle-old))
-        need=max(1,int(self.cfg.get('confirm_hits',2))); clear_need=max(1,int(self.cfg.get('clear_hits',2)))
-        if not self.mobile_confirmed:
-            if candidate_freq is not None and self._confirm_streak>=need and new>=float(self.cfg.get('confidence_confirm',.62)):
-                self.mobile_confirmed=True
-        elif changed:
-            self.mobile_confirmed=False; self.activity_confidence=0.0; new=0.0
-        elif self._clear_streak>=clear_need or new<float(self.cfg.get('confidence_clear',.30)):
-            self.mobile_confirmed=False
-            if self._clear_streak>=clear_need:self._candidate_freq=None
-        self.activity_confidence=new; return new,self.mobile_confirmed
+        for q in candidates:
+            f=int(round(float(q['freq_hz'])/25000.)*25000)
+            conf=float(q.get('confidence',0))
+            st=self._carrier_state.get(f)
+            if st is None or now-float(st.get('last',0))>window:
+                st={'hits':0,'last':0.,'score':0.}
+            st['hits']=int(st.get('hits',0))+1; st['last']=now
+            st['score']=max(conf,float(st.get('score',0))*.55+conf*.45)
+            self._carrier_state[f]=st
+
+        self._carrier_state={f:s for f,s in self._carrier_state.items() if now-float(s.get('last',0))<=memory}
+        raw=max([float(q.get('confidence',0)) for q in candidates],default=0.)
+        old=float(self.activity_confidence)
+        a=float(self.cfg.get('confidence_attack',.58) if raw>=old else self.cfg.get('confidence_release',.20))
+        new=clamp(old+clamp(a)*(raw-old))
+
+        qualified=[]
+        for q in candidates:
+            f=int(round(float(q['freq_hz'])/25000.)*25000); st=self._carrier_state.get(f,{})
+            conf=float(q.get('confidence',0)); hits=int(st.get('hits',0))
+            if conf>=strong or (hits>=need and conf>=minconf):
+                qualified.append((conf,hits,f))
+        if qualified:
+            _,hits,f=max(qualified)
+            self.mobile_confirmed=True; self._last_detection_time=now
+            self._candidate_freq=f; self._confirm_streak=hits; self._clear_streak=0
+        else:
+            self._clear_streak+=1
+            self._confirm_streak=max([int(s.get('hits',0)) for s in self._carrier_state.values()],default=0)
+            if not self.mobile_confirmed or now-self._last_detection_time>hold:
+                self.mobile_confirmed=False
+                if not self._carrier_state:self._candidate_freq=None
+        self.activity_confidence=new
+        return new,self.mobile_confirmed
     def _scan_cycle(self):
         _cycle_t=time.perf_counter(); self.last_scan_windows=0; self.last_site_scan_ms=0.
         try:
@@ -320,31 +428,40 @@ class SDRBackend:
             m,mf,mp,mfloor=self._scan_band(float(self.cfg.get('mobile_band_start_hz',380e6)),float(self.cfg.get('mobile_band_end_hz',385e6)),'MOBILE')
             self.last_mobile_scan_ms=(time.perf_counter()-_mobile_t)*1000.
             limit=max(0,int(self.cfg.get('max_mobile_candidates_per_sweep',12)))
-            self.last_broadband_rejected=bool(limit and len(m)>limit)
-            if self.last_broadband_rejected:
-                # Display/USB switchers can create impulsive energy on many
-                # raster channels at once; a nearby TETRA mobile is narrowband.
+            self.last_broadband_rejected=False
+            self.last_comb_rejected=False
+            # Baseline suppression must run before the broadband guard. With
+            # fully soft scoring the raw candidate set intentionally contains
+            # weak carriers too; persistent stationary ones are removed here.
+            m=self._reject_static_artifacts(m)
+            if limit and len(m)>limit:
+                self.last_broadband_rejected=True
+                # A large set of *new* simultaneous carriers is more consistent
+                # with display/USB broadband interference than a nearby mobile.
                 m=[]
-            # Keep the high-priority mobile band on the fastest revisit cadence.
-            # Preserve site/downlink context by refreshing it periodically even
-            # during idle periods, and always refresh immediately for a candidate.
-            self._idle_site_cycle=(self._idle_site_cycle+1)%3
-            if m or self._idle_site_cycle==0:
+            # Mobile/uplink scanning stays on the fast path. Downlink context is
+            # refreshed periodically and kept in memory; forcing a second 5 MHz
+            # sweep for every candidate was adding several seconds of latency.
+            interval=max(1,int(self.cfg.get('site_scan_interval',6)))
+            refresh_site=(not self.site_recent) or self._idle_site_cycle==0
+            self._idle_site_cycle=(self._idle_site_cycle+1)%interval
+            if refresh_site:
                 _site_t=time.perf_counter()
                 site,_,_,_=self._scan_band(float(self.cfg.get('site_band_start_hz',390e6)),float(self.cfg.get('site_band_end_hz',395e6)),'SITE')
                 self.last_site_scan_ms=(time.perf_counter()-_site_t)*1000.
             else:
                 site=[]
             now=time.time(); self._remember_sites(site,now)
-            require=bool(self.cfg.get('require_duplex_pair',True)); require_now=bool(self.cfg.get('require_current_duplex_pair',True)); minpair=float(self.cfg.get('duplex_pair_min_quality',.28)); minconf=float(self.cfg.get('candidate_min_confidence',.48)); accepted=[]
+            require=bool(self.cfg.get('require_duplex_pair',True)); require_now=bool(self.cfg.get('require_current_duplex_pair',False)); minpair=float(self.cfg.get('duplex_pair_min_quality',.28)); minconf=float(self.cfg.get('candidate_min_confidence',.48)); accepted=[]
             for x in m:
                 pq,pnow=self._pair_q(round(x['freq_hz']+10000000),site,now)
                 if require and (pq<minpair or (require_now and not pnow)):continue
                 q=dict(x);q.update(paired=pq>=minpair,paired_now=pnow,pair_quality=pq,confidence=self._confidence(x,pq))
                 if q['confidence']>=minconf:accepted.append(q)
             accepted.sort(key=lambda q:(q['confidence'],q.get('burst_quality',0),q.get('rf_snr_db',0)),reverse=True); shown=accepted[:int(self.cfg.get('max_signals',3))]
-            top_freq=shown[0]['freq_hz'] if shown else None
-            _,confirmed=self._hysteresis(max([p['confidence'] for p in shown],default=0),top_freq); rf=max([p.get('signal_strength',0) for p in shown],default=0); sl=max([p.get('signal_strength',0) for p in site],default=0)
+            _,confirmed=self._hysteresis(shown,now)
+            rf=max([p.get('signal_strength',0) for p in shown],default=0)
+            sl=max([p.get('signal_strength',0) for p in site],default=max([v.get('quality',0) for v in self.site_recent.values()],default=0))
             idx=np.linspace(0,len(mp)-1,min(240,len(mp))).astype(int) if len(mp) else np.array([],dtype=int)
             with self.lock:
                 self.mobile_peaks=accepted;self.site_peaks=site;self.peaks=shown if confirmed else [];self.mobile_level=rf if confirmed else 0.;self.site_level=sl
@@ -359,7 +476,8 @@ class SDRBackend:
                 self.scan_failures+=1; recent=bool(self.last_good_scan and time.time()-self.last_good_scan<8)
                 if not recent and self.scan_failures>=3:
                     self.status='NO SDR';self.peaks=[];self.mobile_peaks=[];self.site_peaks=[];self.mobile_level=0.;self.site_level=0.;self.activity_confidence=0.;self.mobile_confirmed=False
-                    self._confirm_streak=0;self._clear_streak=0;self._candidate_freq=None;self.last_broadband_rejected=False
+                    self._confirm_streak=0;self._clear_streak=0;self._candidate_freq=None
+                    self._carrier_state={};self._last_detection_time=0.;self.last_broadband_rejected=False
                     self.spectrum_freqs=np.array([],dtype=np.float32);self.spectrum_db=np.array([],dtype=np.float32)
                 self.error=err;self.demo_active=False
             return False

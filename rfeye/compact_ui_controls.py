@@ -33,7 +33,9 @@ def _record_payload_snapshot(app):
         "detector":{k:_plain(snap.get(k)) for k in (
             "status","activity_confidence","mobile_confirmed","noise",
             "mobile_level","site_level","peaks","mobile_peaks","site_peaks",
-            "broadband_rejected","cycle_ms","mobile_scan_ms","site_scan_ms","scan_windows")},
+            "broadband_rejected","static_rejected","artifact_calibrating",
+            "artifact_sweep","artifact_baseline_count","confirm_streak","clear_streak",
+            "cycle_ms","mobile_scan_ms","site_scan_ms","capture_ms","scan_windows","sdr_path")},
         "spectrum":{
             "freq_hz":_plain(snap.get("freqs",[])),
             "power_db":_plain(snap.get("spectrum",[])),
@@ -57,16 +59,18 @@ def _record_rf_worker(app, duration):
             samples.append(item)
         ended=datetime.now().astimezone(); cfg=app.cfg
         data={
-            "schema":"rfeye-rf-series-v2",
+            "schema":"rfeye-rf-series-v3",
             "recorded_from":started.isoformat(timespec="milliseconds"),
             "recorded_to":ended.isoformat(timespec="milliseconds"),
             "requested_duration_s":float(duration),
             "sample_count":len(samples),
-            "threshold_db":float(cfg.get("threshold_db",12.0)),
             "capture_settings":{k:_plain(cfg.get(k)) for k in (
-                "sample_rate","fft_size","mobile_capture_ms","site_capture_ms","gain","ppm",
-                "mobile_band_start_hz","mobile_band_end_hz","site_band_start_hz","site_band_end_hz",
-                "threshold_min_db","threshold_max_db")},
+                "sample_rate","fft_size","mobile_capture_ms","site_capture_ms","site_scan_interval",
+                "gain","ppm","detector_profile_version","mobile_band_start_hz","mobile_band_end_hz",
+                "site_band_start_hz","site_band_end_hz","artifact_calibration_sweeps","artifact_min_baseline_hits",
+                "artifact_rf_snr_delta_db","artifact_duty_delta","artifact_span_delta_db",
+                "site_pair_memory_s","require_duplex_pair","require_current_duplex_pair",
+                "candidate_min_confidence","strong_hit_confidence","confirm_hits","clear_hits")},
             "samples":samples,
         }
         out=Path.home()/".local"/"share"/"rfeye"/"captures"
@@ -159,22 +163,17 @@ def tap(app, x, y):
         return
 
     if app.page == "settings":
-        from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_COUNT, SENS_SLIDER_X0, SENS_SLIDER_X1, BRIGHT_SLIDER_X0, BRIGHT_SLIDER_X1
+        from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_COUNT, BRIGHT_SLIDER_X0, BRIGHT_SLIDER_X1
         if y < 62:
             app.page = "main"
             return
         idx = int((y - SETTINGS_TOP) / SETTINGS_STEP)
-        keys = ["demo_mode", "threshold_db", "brightness", "record_rf", "wifi",
+        keys = ["demo_mode", "brightness", "record_rf", "wifi",
                 "update", "spectrum", "debug"]
         if not 0 <= idx < min(SETTINGS_COUNT, len(keys)): return
         key = keys[idx]
         if key == "demo_mode":
             app._toggle_demo(); app.page = "main"
-        elif key == "threshold_db":
-            if x >= SENS_SLIDER_X0-10:
-                lo=float(app.cfg.get("threshold_min_db",12.0)); hi=float(app.cfg.get("threshold_max_db",30.0)); step=max(0.1,float(app.cfg.get("threshold_step_db",1.0)))
-                n=max(0.0,min(1.0,(float(x)-SENS_SLIDER_X0)/max(1.0,SENS_SLIDER_X1-SENS_SLIDER_X0)))
-                v=round((lo+n*(hi-lo))/step)*step; app.cfg["threshold_db"]=max(lo,min(hi,v)); _save(app)
         elif key == "brightness":
             if x >= BRIGHT_SLIDER_X0-10:
                 lo,hi,step=0.4,1.0,0.05

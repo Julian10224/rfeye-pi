@@ -272,7 +272,6 @@ class App:
             keys = [
                 "muted",
                 "demo_mode",
-                "threshold_db",
                 "audio_mode",
                 "brightness",
                 "show_frequency",
@@ -290,11 +289,6 @@ class App:
             elif key == "demo_mode":
                 self._toggle_demo()
                 self.page = "main"
-            elif key == "threshold_db":
-                lo=float(self.cfg.get("threshold_min_db",12.0)); hi=float(self.cfg.get("threshold_max_db",30.0)); step=max(0.1,float(self.cfg.get("threshold_step_db",1.0)))
-                x0,x1=250.0,430.0
-                n=max(0.0,min(1.0,(float(x)-x0)/(x1-x0))); v=round((lo+n*(hi-lo))/step)*step
-                self.cfg["threshold_db"] = max(lo,min(hi,v)); save_config(self.cfg)
             elif key == "audio_mode":
                 self.cfg["audio_mode"] = "standard" if self.cfg.get("audio_mode") == "adaptive" else "adaptive"
                 save_config(self.cfg)
@@ -840,7 +834,6 @@ class App:
         rows = [
             ("Sound", "MUTED" if self.cfg.get("muted") else "ON", "toggle"),
             ("Demo mode", "ON" if self.cfg.get("demo_mode") else "OFF", "toggle"),
-            ("Sensitivity", f'{self.cfg.get("threshold_db", 12):.0f} dB', "slider"),
             ("Audio mode", self.cfg.get("audio_mode", "adaptive").upper(), "value"),
             ("Brightness", f'{int(self.cfg.get("brightness", 1.0) * 100)}%', "value"),
             ("Frequency labels", "ON" if self.cfg.get("show_frequency") else "OFF", "toggle"),
@@ -858,12 +851,7 @@ class App:
             pygame.draw.line(self.ui, (19, 28, 36), (34, y + 49), (446, y + 49), 1)
             self._text(label, 40, y + 14, self.font_m, WHITE)
 
-            if kind == "slider":
-                lo=float(self.cfg.get("threshold_min_db",12.0)); hi=float(self.cfg.get("threshold_max_db",30.0)); val=max(lo,min(hi,float(self.cfg.get("threshold_db",12.0))))
-                n=0.0 if hi<=lo else (val-lo)/(hi-lo); x0,x1=250,430; sx=x0+int(round(n*(x1-x0)))
-                self._text(value, 410, y + 12, self.font_s, (150, 201, 226), center=True)
-                pygame.draw.line(self.ui,(38,43,49),(x0,y+35),(x1,y+35),5); pygame.draw.line(self.ui,BLUE,(x0,y+35),(sx,y+35),5); pygame.draw.circle(self.ui,WHITE,(sx,y+35),8)
-            elif kind == "toggle":
+            if kind == "toggle":
                 enabled = value == "ON"
                 pill = pygame.Rect(362, y + 10, 72, 30)
                 pygame.draw.rect(self.ui, BLUE if enabled else (38, 43, 49), pill, border_radius=15)
@@ -936,11 +924,6 @@ class App:
                 pts.append((x, y))
             if len(pts) > 1:
                 pygame.draw.lines(self.ui, BLUE_BRIGHT, False, pts, 2)
-            threshold_abs = float(snap["noise"]) + float(self.cfg.get("threshold_db", 10.0))
-            tnorm = clamp((threshold_abs - pmin) / (pmax - pmin))
-            ty = plot.bottom - int(tnorm * (plot.height - 1))
-            pygame.draw.line(self.ui, YELLOW, (plot.left,ty), (plot.right,ty), 2)
-            self._text(f'THRESH {self.cfg.get("threshold_db",10):.0f} dB', plot.left+8, ty-24, self.font_s, YELLOW)
 
         self._text(f'{self.cfg.get("mobile_band_start_hz", self.cfg["scan_start_hz"]) / 1e6:.3f} MHz', 30, 446, self.font_s, DIM)
         self._text(f'{self.cfg.get("mobile_band_end_hz", self.cfg["scan_end_hz"]) / 1e6:.3f} MHz', 304, 446, self.font_s, DIM)
@@ -953,7 +936,7 @@ class App:
                 self._text(f'{peak["freq_hz"] / 1e6:.5f} MHz', 80, y + i * 54, self.font_m, WHITE)
                 self._text(f'{int(peak["level"] * 100):3d}%', 392, y + i * 54, self.font_m, DIM, center=True)
         else:
-            self._text("No peaks above threshold", 240, 610, self.font_m, DIM, center=True)
+            self._text("No transient RF activity", 240, 610, self.font_m, DIM, center=True)
 
         self._text("tap top or bottom to return", 240, 770, self.font_s, DIM, center=True)
 

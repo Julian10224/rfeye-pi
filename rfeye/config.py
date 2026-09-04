@@ -58,6 +58,7 @@ except Exception:
     pass
 
 DEFAULTS = {
+    "detector_profile_version": 3,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -69,12 +70,21 @@ DEFAULTS = {
     "sample_rate": 2_048_000,
     "fft_size": 1024,
     "fft_blocks": 8,
-    "mobile_capture_ms": 72.0,
-    "site_capture_ms": 72.0,
+    "mobile_capture_ms": 64.0,
+    "site_capture_ms": 36.0,
+    "site_scan_interval": 6,
+    "carrier_memory_s": 2.5,
+    "confirm_window_s": 2.2,
+    "alert_hold_s": 3.0,
+    "strong_hit_confidence": 0.72,
+    "artifact_calibration_sweeps": 5,
+    "artifact_min_baseline_hits": 4,
+    "artifact_rf_snr_delta_db": 5.0,
+    "artifact_duty_delta": 0.12,
+    "artifact_span_delta_db": 3.5,
     "mobile_percentile": 95.0,
     "tetra_channel_half_width_hz": 9000.0,
     "burst_gate_db": 6.0,
-    "min_burst_span_db": 9.0,
     "min_burst_duty": 0.035,
     "max_burst_duty": 0.65,
     "preferred_burst_duty_min": 0.06,
@@ -82,12 +92,12 @@ DEFAULTS = {
     "mobile_min_rf_snr_db": 5.0,
     "site_min_snr_db": 5.0,
     "site_burst_snr_db": 8.0,
-    "site_pair_memory_s": 4.0,
+    "site_pair_memory_s": 15.0,
     "site_pair_min_hits": 1,
     "duplex_pair_tolerance_hz": 1000.0,
     "duplex_pair_min_quality": 0.28,
     "require_duplex_pair": True,
-    "require_current_duplex_pair": True,
+    "require_current_duplex_pair": False,
     "max_mobile_candidates_per_sweep": 12,
     "candidate_min_confidence": 0.48,
     "confidence_attack": 0.58,
@@ -97,10 +107,6 @@ DEFAULTS = {
     "ui_fps": 20,
     "gain": "auto",
     "ppm": 0,
-    "threshold_db": 12.0,
-    "threshold_min_db": 12.0,
-    "threshold_max_db": 30.0,
-    "threshold_step_db": 1.0,
     "rf_record_duration_s": 15.0,
     "confirm_hits": 2,
     "clear_hits": 2,
@@ -129,7 +135,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.28",
+    "app_version": "0.7.29",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -147,11 +153,13 @@ def _config_path():
 def load_config():
     cfg = dict(DEFAULTS)
     p = _config_path()
+    saved = {}
     try:
         if p.exists():
-            cfg.update(json.loads(p.read_text()))
+            saved = json.loads(p.read_text())
+            cfg.update(saved)
     except Exception:
-        pass
+        saved = {}
     # RF Eye hardware profile is fixed for this branch too. Migrate stale
     # persisted GPIO18 settings when an existing unit receives the OTA update.
     cfg["buzzer_gpio"] = 26
@@ -161,14 +169,24 @@ def load_config():
     cfg["audio_mode"] = "adaptive"
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
-    # Sensitivity is a bounded relative burst threshold. Migrate older saved
-    # values (the former UI allowed 6..24 dB) into the new 12..30 dB range.
-    lo = float(cfg.get("threshold_min_db", DEFAULTS["threshold_min_db"]))
-    hi = float(cfg.get("threshold_max_db", DEFAULTS["threshold_max_db"]))
-    try:
-        cfg["threshold_db"] = max(lo, min(hi, float(cfg.get("threshold_db", DEFAULTS["threshold_db"]))))
-    except (TypeError, ValueError):
-        cfg["threshold_db"] = float(DEFAULTS["threshold_db"])
+    # Detector profile v3 migrates older installations to the fast,
+    # baseline-aware detector and removes the obsolete user sensitivity dB.
+    if int(saved.get("detector_profile_version", 0) or 0) < 3:
+        for key in (
+            "mobile_capture_ms", "site_capture_ms", "site_scan_interval",
+            "carrier_memory_s", "confirm_window_s", "alert_hold_s",
+            "strong_hit_confidence", "artifact_calibration_sweeps",
+            "artifact_min_baseline_hits", "artifact_rf_snr_delta_db",
+            "artifact_duty_delta", "artifact_span_delta_db",
+            "site_pair_memory_s", "require_current_duplex_pair",
+        ):
+            cfg[key] = DEFAULTS[key]
+    cfg["detector_profile_version"] = 3
+    for obsolete in (
+        "threshold_db", "threshold_min_db", "threshold_max_db",
+        "threshold_step_db", "threshold_soft_margin_db", "min_burst_span_db",
+    ):
+        cfg.pop(obsolete, None)
     return cfg
 
 

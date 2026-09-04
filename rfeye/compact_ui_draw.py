@@ -6,9 +6,7 @@ YELLOW=(243,192,56); RED=(230,54,54)
 SETTINGS_TOP=66
 SETTINGS_STEP=48
 SETTINGS_HEIGHT=44
-SETTINGS_COUNT=8
-SENS_SLIDER_X0=118
-SENS_SLIDER_X1=298
+SETTINGS_COUNT=7
 BRIGHT_SLIDER_X0=118
 BRIGHT_SLIDER_X1=298
 
@@ -71,7 +69,6 @@ def draw_settings(app):
     app._text(f'RF EYE v{app.cfg.get("app_version","")}',50,39,app.font_s,DIM)
     rows=[
         ("Demo","ON" if app.cfg.get("demo_mode") else "OFF","toggle"),
-        ("Sensitivity",f'{app.cfg.get("threshold_db",12):.0f} dB',"slider"),
         ("Brightness",f'{int(round(float(app.cfg.get("brightness",1.0))*100))}%',"brightness_slider"),
         ("Record RF",(f'REC {max(0,int(round(float(getattr(app,"rf_record_end",0.0))-time.monotonic())))}s' if bool(getattr(app,"rf_recording",False)) else (getattr(app,"rf_record_message","SAVE") if time.monotonic()<float(getattr(app,"rf_record_message_until",0.0)) else "SAVE")),"action"),
         ("Wi-Fi",app._wifi_text(),"status"),
@@ -82,13 +79,10 @@ def draw_settings(app):
     for i,(label,value,kind) in enumerate(rows):
         y=SETTINGS_TOP+i*SETTINGS_STEP
         pygame.draw.rect(app.ui,(9,13,18),(8,y,304,SETTINGS_HEIGHT),border_radius=8)
-        if kind in ("slider","brightness_slider"):
+        if kind=="brightness_slider":
             app._text(label,18,y+4,app.font_s,WHITE)
             surf=app.font_s.render(str(value),True,(150,201,226)); app.ui.blit(surf,(302-surf.get_width(),y+4))
-            if kind=="slider":
-                lo=float(app.cfg.get("threshold_min_db",12.0)); hi=float(app.cfg.get("threshold_max_db",30.0)); val=max(lo,min(hi,float(app.cfg.get("threshold_db",12.0)))); x0,x1=SENS_SLIDER_X0,SENS_SLIDER_X1
-            else:
-                lo,hi=0.4,1.0; val=max(lo,min(hi,float(app.cfg.get("brightness",1.0)))); x0,x1=BRIGHT_SLIDER_X0,BRIGHT_SLIDER_X1
+            lo,hi=0.4,1.0; val=max(lo,min(hi,float(app.cfg.get("brightness",1.0)))); x0,x1=BRIGHT_SLIDER_X0,BRIGHT_SLIDER_X1
             n=0.0 if hi<=lo else (val-lo)/(hi-lo); sy=y+29; sx=x0+int(round(n*(x1-x0)))
             pygame.draw.line(app.ui,(38,43,49),(x0,sy),(x1,sy),5); pygame.draw.line(app.ui,BLUE,(x0,sy),(sx,sy),5); pygame.draw.circle(app.ui,WHITE,(sx,sy),7)
             continue
@@ -161,13 +155,11 @@ def draw_spectrum(app,snap):
         for i,v in enumerate(spectrum):
             x=plot.left+int(i*(plot.width-1)/(len(spectrum)-1)); n=_clamp((float(v)-pmin)/(pmax-pmin)); y=plot.bottom-int(n*(plot.height-1)); pts.append((x,y))
         if len(pts)>1: pygame.draw.lines(app.ui,BLUE_BRIGHT,False,pts,1)
-        threshold=float(snap["noise"])+float(app.cfg.get("threshold_db",10)); n=_clamp((threshold-pmin)/(pmax-pmin)); ty=plot.bottom-int(n*(plot.height-1))
-        pygame.draw.line(app.ui,YELLOW,(plot.left,ty),(plot.right,ty),1); app._text(f'TH {app.cfg.get("threshold_db",10):.0f} dB',17,max(75,ty-17),app.font_s,YELLOW)
     lf=app.cfg.get("mobile_band_start_hz",app.cfg["scan_start_hz"])/1e6; rf=app.cfg.get("mobile_band_end_hz",app.cfg["scan_end_hz"])/1e6
     app._text(f"{lf:.3f}",12,268,app.font_s,DIM); label=f"{rf:.3f} MHz"; surf=app.font_s.render(label,True,DIM); app.ui.blit(surf,(308-surf.get_width(),268))
     app._text(f'Noise floor {snap["noise"]:.1f} dB',160,300,app.font_m,WHITE,center=True)
     peaks=list(snap["peaks"][:3]); y=332
-    if not peaks: app._text("No peaks above threshold",160,360,app.font_s,DIM,center=True)
+    if not peaks: app._text("No transient RF activity",160,360,app.font_s,DIM,center=True)
     for i,p in enumerate(peaks):
         pygame.draw.rect(app.ui,(9,13,18),(12,y,296,34),border_radius=6); app._text(f'{i+1}. {p["freq_hz"]/1e6:.5f} MHz',20,y+9,app.font_s,WHITE)
         app._text(f'{int(p["level"]*100)}%',286,y+17,app.font_s,BLUE_BRIGHT,center=True); y+=42

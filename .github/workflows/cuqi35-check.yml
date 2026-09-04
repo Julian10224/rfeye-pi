@@ -1,4 +1,4 @@
-name: RF Eye 0.7.28 appliance checks
+name: RF Eye 0.7.29 appliance checks
 
 on:
   push:
@@ -21,10 +21,12 @@ jobs:
             scripts/generate-plymouth-assets-cuqi35.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.7.28"
-          grep -q '"app_version": "0.7.28"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.7.29"
+          grep -q '"app_version": "0.7.29"' rfeye/config.py
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
-          grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
+          grep -q 'SETTINGS_COUNT=7' rfeye/compact_ui_draw.py
+          ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
+          ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py
           grep -q 'if app.page == "record_confirm"' rfeye/compact_ui_controls.py
           grep -q 'if 350 <= y <= 455' rfeye/compact_ui_controls.py
           grep -q 'TOUCH CALIBRATION' rfeye/compact_ui_draw.py
@@ -55,11 +57,15 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.7.28'
+          assert c['app_version']=='0.7.29'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['threshold_db']==22.0
+          assert c['detector_profile_version']==3
+          assert 'threshold_db' not in c
+          assert c['mobile_capture_ms']==64.0
+          assert c['site_capture_ms']==36.0
+          assert c['require_current_duplex_pair'] is False
           assert c['audio_mode']=='adaptive'
           assert len(c['touch_calibration_affine'])==6
           assert 'password' not in ''.join(c).lower()
@@ -72,5 +78,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.28"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.29"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"

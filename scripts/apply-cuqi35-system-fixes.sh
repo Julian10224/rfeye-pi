@@ -108,4 +108,4 @@ grep -q '^ExecStart=/opt/rfeye/start-rfeye.sh$' "$TARGET_HOME/.config/systemd/us
   echo 'ERROR: RF Eye direct startup service was not installed.' >&2; exit 1;
 }
 
-echo 'RF Eye 0.7.28 reference system fixes installed. Reboot to activate them.'
+echo 'RF Eye reference system fixes installed. Reboot to activate them.'
