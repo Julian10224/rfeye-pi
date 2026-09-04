@@ -1,6 +1,6 @@
 {
   "alert_hold_s": 3.0,
-  "app_version": "0.7.33",
+  "app_version": "0.7.34",
   "artifact_baseline_max_age_days": 30.0,
   "artifact_baseline_persist": true,
   "artifact_calibration_sweeps": 5,
@@ -70,6 +70,7 @@
   "sample_rate": 2048000,
   "scan_end_hz": 395000000,
   "scan_start_hz": 380000000,
+  "sdr_stop_join_s": 8.0,
   "show_brand_text": true,
   "show_frequency": true,
   "site_band_end_hz": 395000000,

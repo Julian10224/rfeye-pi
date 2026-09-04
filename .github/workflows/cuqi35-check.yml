@@ -1,4 +1,4 @@
-name: RF Eye 0.7.33 appliance checks
+name: RF Eye 0.7.34 appliance checks
 
 on:
   push:
@@ -21,8 +21,8 @@ jobs:
             scripts/generate-plymouth-assets-cuqi35.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.7.33"
-          grep -q '"app_version": "0.7.33"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.7.34"
+          grep -q '"app_version": "0.7.34"' rfeye/config.py
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
           grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
@@ -46,6 +46,9 @@ jobs:
           grep -q 'app.page="recordings"' rfeye/compact_ui_controls.py
           grep -q 'def draw_recording_replay' rfeye/compact_ui_draw.py
           grep -q 'class ReplayEngine' rfeye/recording_replay.py
+          grep -q 't.join(timeout=timeout)' rfeye/sdr_backend.py
+          grep -q 'finally:' rfeye/sdr_backend.py
+          grep -q 'sdr_stop_join_s' rfeye/config.py
           ! grep -q 'm=\[\]' rfeye/sdr_backend.py
           ! grep -q 'python3 scripts/patch-' install.sh install-cuqi35.sh scripts/build-release.sh
       - name: Verify captured reference startup files
@@ -72,7 +75,7 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.7.33'
+          assert c['app_version']=='0.7.34'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
@@ -87,6 +90,7 @@ jobs:
           assert c['temporal_span_scale_db']==3.0
           assert c['broadband_temporal_min_departure']==1.25
           assert c['broadband_dynamic_keep_max']==6
+          assert c['sdr_stop_join_s']==8.0
           assert 'threshold_db' not in c
           assert c['mobile_capture_ms']==64.0
           assert c['site_capture_ms']==36.0
@@ -103,5 +107,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.33"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.34"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"

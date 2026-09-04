@@ -73,6 +73,7 @@ DEFAULTS = {
     "mobile_capture_ms": 64.0,
     "site_capture_ms": 36.0,
     "site_scan_interval": 6,
+    "sdr_stop_join_s": 8.0,
     "carrier_memory_s": 2.5,
     "confirm_window_s": 2.2,
     "alert_hold_s": 3.0,
@@ -147,7 +148,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.33",
+    "app_version": "0.7.34",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

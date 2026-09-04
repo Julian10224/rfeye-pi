@@ -127,8 +127,17 @@ class SDRBackend:
         self.running=True; self.thread=threading.Thread(target=self._run,daemon=True); self.thread.start()
     def stop(self):
         self.running=False
-        if self.thread:self.thread.join(timeout=2.)
-        self._close_direct_sdr()
+        t=self.thread
+        # Never close a librtlsdr handle from the UI/service thread while the
+        # scan thread may still be inside rtlsdr_read_sync(). That race can
+        # wedge the RTL-SDR Blog V4 on the USB bus during restart/shutdown.
+        if t and t is not threading.current_thread():
+            timeout=max(3.0,float(self.cfg.get('sdr_stop_join_s',8.0)))
+            t.join(timeout=timeout)
+        # _run() owns normal handle shutdown in its finally block. Only close
+        # here when there is no live scan thread (e.g. backend never started).
+        if not t or not t.is_alive():
+            self._close_direct_sdr()
     def snapshot(self):
         with self.lock:
             return {'status':self.status,'error':self.error,'peaks':[dict(p) for p in self.peaks],
@@ -153,12 +162,17 @@ class SDRBackend:
             'debug_mobile_candidates':[dict(p) for p in self.debug_mobile_candidates],
             'sdr_path':str(getattr(self,'sdr_path','?'))}
     def _run(self):
-        while self.running:
-            with self.lock: demo=self._demo_forced
-            if demo:self._demo_once();continue
-            if not self._scan_cycle():
-                if self.cfg.get('auto_demo_if_no_sdr',False):self._demo_once()
-                else:time.sleep(.5)
+        try:
+            while self.running:
+                with self.lock: demo=self._demo_forced
+                if demo:self._demo_once();continue
+                if not self._scan_cycle():
+                    if self.cfg.get('auto_demo_if_no_sdr',False):self._demo_once()
+                    else:time.sleep(.5)
+        finally:
+            # Close from the same worker that performs synchronous USB reads.
+            # This avoids cross-thread librtlsdr close/read races.
+            self._close_direct_sdr()
     def _centers_for(self,a,b,sr):
         usable=sr*.68; half=usable/2; step=usable*.9; out=[]; c=a+half
         while True:
