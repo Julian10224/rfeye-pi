@@ -1,4 +1,4 @@
-name: RF Eye 0.7.32 appliance checks
+name: RF Eye 0.7.33 appliance checks
 
 on:
   push:
@@ -21,10 +21,10 @@ jobs:
             scripts/generate-plymouth-assets-cuqi35.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.7.32"
-          grep -q '"app_version": "0.7.32"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.7.33"
+          grep -q '"app_version": "0.7.33"' rfeye/config.py
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
-          grep -q 'SETTINGS_COUNT=7' rfeye/compact_ui_draw.py
+          grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py
           grep -q 'if app.page == "record_confirm"' rfeye/compact_ui_controls.py
@@ -41,6 +41,11 @@ jobs:
           grep -q 'def _annotate_mobile_temporal' rfeye/sdr_backend.py
           grep -q 'm=self._apply_broadband_guard(m,limit)' rfeye/sdr_backend.py
           grep -q 'debug_mobile_candidates' rfeye/compact_ui_controls.py
+          grep -q 'rfeye-rf-series-v5' rfeye/compact_ui_controls.py
+          grep -q 'strftime("%Y-%m-%d_%H-%M-%S")' rfeye/compact_ui_controls.py
+          grep -q 'app.page="recordings"' rfeye/compact_ui_controls.py
+          grep -q 'def draw_recording_replay' rfeye/compact_ui_draw.py
+          grep -q 'class ReplayEngine' rfeye/recording_replay.py
           ! grep -q 'm=\[\]' rfeye/sdr_backend.py
           ! grep -q 'python3 scripts/patch-' install.sh install-cuqi35.sh scripts/build-release.sh
       - name: Verify captured reference startup files
@@ -67,7 +72,7 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.7.32'
+          assert c['app_version']=='0.7.33'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
@@ -98,5 +103,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.32"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.33"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"

@@ -1,6 +1,6 @@
 {
   "alert_hold_s": 3.0,
-  "app_version": "0.7.32",
+  "app_version": "0.7.33",
   "artifact_baseline_max_age_days": 30.0,
   "artifact_baseline_persist": true,
   "artifact_calibration_sweeps": 5,

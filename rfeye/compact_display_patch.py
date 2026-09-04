@@ -5,7 +5,10 @@ import builtins, os
 
 def _patch_app_class(cls):
     from compact_ui_controls import tap
-    from compact_ui_draw import draw_main, draw_settings, draw_spectrum, draw_debug, draw_calibration, draw_record_confirm, draw_gear
+    from compact_ui_draw import (draw_main, draw_settings, draw_spectrum, draw_debug,
+                                 draw_calibration, draw_record_confirm, draw_recordings,
+                                 draw_recording_detail, draw_recording_delete_confirm,
+                                 draw_recording_replay, draw_gear)
     from compact_wifi_ui import draw as draw_wifi, draw_keyboard, key_at, rows
     from compact_touch import install as install_touch, drain as drain_touch
     old_init=cls.__init__; old_events=cls._events
@@ -23,6 +26,11 @@ def _patch_app_class(cls):
         self.font_l=pygame.font.Font(None,28); self.font_xl=pygame.font.Font(None,38)
         self.settings_icon=None
         self.touch_calibration_samples=[]; self.touch_calibration_index=0; self.touch_calibration_complete=False
+        self.recording_entries=None; self.recording_offset=0; self.recording_selected=None
+        self.recording_replay_running=False; self.recording_replay_finished=False
+        self.recording_replay_stop=False; self.recording_replay_generation=0; self.recording_replay_snapshot=None
+        self.recording_replay_index=0; self.recording_replay_total=0; self.recording_replay_alerts=0
+        self.recording_replay_mode=""; self.recording_replay_error=""
         install_touch(self)
     def events(self):
         import pygame
@@ -54,6 +62,8 @@ def _patch_app_class(cls):
         return ux,uy
     cls.__init__=init; cls._events=events; cls._present_rotated=present; cls._physical_to_ui=physical_to_ui; cls._tap=tap; cls._gear=draw_gear
     cls._draw_main=draw_main; cls._draw_settings=draw_settings; cls._draw_spectrum=draw_spectrum; cls._draw_debug=draw_debug; cls._draw_calibration=draw_calibration; cls._draw_record_confirm=draw_record_confirm
+    cls._draw_recordings=draw_recordings; cls._draw_recording_detail=draw_recording_detail
+    cls._draw_recording_delete_confirm=draw_recording_delete_confirm; cls._draw_recording_replay=draw_recording_replay
     cls._compact_wifi_rows=rows; cls._wifi_key_at=key_at; cls._draw_wifi_keyboard=draw_keyboard; cls._draw_wifi=draw_wifi
     return cls
 

@@ -155,7 +155,15 @@ class App:
                 pygame.mouse.set_visible(False)
                 self.last_mouse_motion = 0.0
             snap = self.backend.snapshot()
-            self._sound_logic(snap)
+            sound_snap = snap
+            if self.page == "recording_replay":
+                replay_snap = getattr(self, "recording_replay_snapshot", None)
+                if replay_snap and bool(getattr(self, "recording_replay_running", False)):
+                    sound_snap = replay_snap
+                elif replay_snap:
+                    sound_snap = dict(replay_snap)
+                    sound_snap["peaks"] = []
+            self._sound_logic(sound_snap)
 
             if self.page == "main":
                 self._draw_main(snap)
@@ -169,6 +177,14 @@ class App:
                 self._draw_calibration()
             elif self.page == "record_confirm":
                 self._draw_record_confirm()
+            elif self.page == "recordings":
+                self._draw_recordings()
+            elif self.page == "recording_detail":
+                self._draw_recording_detail()
+            elif self.page == "recording_delete_confirm":
+                self._draw_recording_delete_confirm()
+            elif self.page == "recording_replay":
+                self._draw_recording_replay()
             else:
                 self._draw_spectrum(snap)
 

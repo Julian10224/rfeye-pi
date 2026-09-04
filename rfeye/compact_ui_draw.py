@@ -6,7 +6,7 @@ YELLOW=(243,192,56); RED=(230,54,54)
 SETTINGS_TOP=66
 SETTINGS_STEP=48
 SETTINGS_HEIGHT=44
-SETTINGS_COUNT=7
+SETTINGS_COUNT=8
 BRIGHT_SLIDER_X0=118
 BRIGHT_SLIDER_X1=298
 
@@ -71,6 +71,7 @@ def draw_settings(app):
         ("Demo","ON" if app.cfg.get("demo_mode") else "OFF","toggle"),
         ("Brightness",f'{int(round(float(app.cfg.get("brightness",1.0))*100))}%',"brightness_slider"),
         ("Record RF",(f'REC {max(0,int(round(float(getattr(app,"rf_record_end",0.0))-time.monotonic())))}s' if bool(getattr(app,"rf_recording",False)) else (getattr(app,"rf_record_message","SAVE") if time.monotonic()<float(getattr(app,"rf_record_message_until",0.0)) else "SAVE")),"action"),
+        ("Recordings","OPEN","action"),
         ("Wi-Fi",app._wifi_text(),"status"),
         ("Update",app.update_message,"action"),
         ("Spectrum","OPEN","action"),
@@ -112,6 +113,136 @@ def draw_debug(app,snap):
     app._text("Touch calibration",18,421,app.font_s,WHITE)
     surf=app.font_s.render("CALIBRATE",True,BLUE_BRIGHT); app.ui.blit(surf,(302-surf.get_width(),421))
     app._text("tap top/bottom to return",160,465,app.font_s,DIM,center=True)
+
+def draw_recordings(app):
+    import pygame
+    from compact_ui_controls import _refresh_recordings
+    entries=getattr(app,"recording_entries",None)
+    if entries is None:
+        entries=_refresh_recordings(app)
+    off=int(getattr(app,"recording_offset",0))
+    app.ui.fill(BG); pygame.draw.rect(app.ui,(7,11,16),(0,0,320,60))
+    app._text("‹",18,26,app.font_xl,BLUE_BRIGHT,center=True)
+    app._text("RECORDINGS",48,12,app.font_l,WHITE)
+    app._text(f"{len(entries)} saved",50,39,app.font_s,DIM)
+    if not entries:
+        app._text("No recordings",160,214,app.font_m,DIM,center=True)
+        app._text("Use Record RF in Settings",160,244,app.font_s,DIM,center=True)
+    else:
+        for i,e in enumerate(entries[off:off+6]):
+            y=70+i*54
+            pygame.draw.rect(app.ui,(9,13,18),(8,y,304,48),border_radius=8)
+            label=str(e.get("label",""))
+            date=label[:10]; tm=label[11:19] if len(label)>=19 else ""
+            app._text(date,18,y+7,app.font_s,WHITE)
+            app._text(tm,18,y+25,app.font_s,(150,201,226))
+            mode=str(e.get("mode",""))
+            col=GREEN if mode=="EXACT v5" else YELLOW
+            surf=app.font_s.render(mode,True,col); app.ui.blit(surf,(302-surf.get_width(),y+7))
+            info=f'{int(e.get("samples",0))} samples'
+            surf=app.font_s.render(info,True,DIM); app.ui.blit(surf,(302-surf.get_width(),y+25))
+    pygame.draw.rect(app.ui,(12,18,24),(8,408,148,48),border_radius=9)
+    pygame.draw.rect(app.ui,(12,18,24),(164,408,148,48),border_radius=9)
+    app._text("NEWER",82,432,app.font_s,BLUE_BRIGHT,center=True)
+    app._text("OLDER",238,432,app.font_s,BLUE_BRIGHT,center=True)
+    app._text("tap recording for details",160,468,app.font_s,DIM,center=True)
+
+
+def draw_recording_detail(app):
+    import pygame
+    e=getattr(app,"recording_selected",None) or {}
+    app.ui.fill(BG); pygame.draw.rect(app.ui,(7,11,16),(0,0,320,60))
+    app._text("‹",18,26,app.font_xl,BLUE_BRIGHT,center=True)
+    app._text("RECORDING",48,12,app.font_l,WHITE)
+    app._text(str(e.get("label","Unknown"))[:19],50,39,app.font_s,DIM)
+    mode=str(e.get("mode","LEGACY APPROX"))
+    col=GREEN if mode=="EXACT v5" else YELLOW
+    app._text(mode,160,94,app.font_m,col,center=True)
+    app._text(f'{int(e.get("samples",0))} samples',160,126,app.font_s,WHITE,center=True)
+    dur=float(e.get("duration",0.0) or 0.0)
+    app._text(f'{dur:.0f} s recorded',160,149,app.font_s,DIM,center=True)
+    if mode!="EXACT v5":
+        app._text("Old recording: replay is approximate",160,172,app.font_s,YELLOW,center=True)
+    pygame.draw.rect(app.ui,(12,91,132),(12,188,296,98),border_radius=16)
+    app._text("PLAY",160,224,app.font_l,WHITE,center=True)
+    app._text("Replay detector + sound",160,257,app.font_s,WHITE,center=True)
+    pygame.draw.rect(app.ui,(92,28,34),(12,316,296,98),border_radius=16)
+    app._text("DELETE",160,352,app.font_l,WHITE,center=True)
+    app._text("Remove this recording",160,385,app.font_s,WHITE,center=True)
+    if bool(getattr(app,"recording_delete_error",False)):
+        app._text("Delete failed",160,438,app.font_s,RED,center=True)
+    else:
+        app._text("tap top to return",160,454,app.font_s,DIM,center=True)
+
+
+def draw_recording_delete_confirm(app):
+    import pygame
+    e=getattr(app,"recording_selected",None) or {}
+    app.ui.fill(BG)
+    app._text("DELETE RECORDING",160,48,app.font_l,RED,center=True)
+    app._text(str(e.get("label",""))[:19],160,91,app.font_m,WHITE,center=True)
+    app._text("This cannot be undone.",160,132,app.font_s,DIM,center=True)
+    pygame.draw.rect(app.ui,(34,39,46),(12,205,296,112),border_radius=16)
+    pygame.draw.rect(app.ui,(92,28,34),(12,350,296,105),border_radius=16)
+    app._text("NO",160,248,app.font_l,WHITE,center=True)
+    app._text("Keep recording",160,282,app.font_s,DIM,center=True)
+    app._text("YES",160,388,app.font_l,WHITE,center=True)
+    app._text("Delete permanently",160,421,app.font_s,WHITE,center=True)
+
+
+def draw_recording_replay(app):
+    import pygame
+    e=getattr(app,"recording_selected",None) or {}
+    snap=getattr(app,"recording_replay_snapshot",None)
+    running=bool(getattr(app,"recording_replay_running",False))
+    finished=bool(getattr(app,"recording_replay_finished",False))
+    total=max(1,int(getattr(app,"recording_replay_total",0) or 1))
+    idx=int(getattr(app,"recording_replay_index",0))
+    alerts=int(getattr(app,"recording_replay_alerts",0))
+    mode=str(getattr(app,"recording_replay_mode",e.get("mode","")))
+    app.ui.fill(BG); pygame.draw.rect(app.ui,(7,11,16),(0,0,320,60))
+    app._text("‹",18,26,app.font_xl,BLUE_BRIGHT,center=True)
+    app._text("REPLAY",48,12,app.font_l,WHITE)
+    app._text(str(e.get("label",""))[:19],50,39,app.font_s,DIM)
+    col=GREEN if mode=="EXACT v5" else YELLOW
+    app._text(mode,300,22,app.font_s,col,right=True)
+    plot=pygame.Rect(12,78,296,188)
+    pygame.draw.rect(app.ui,(7,8,10),plot); pygame.draw.rect(app.ui,(45,48,54),plot,1)
+    if snap:
+        spectrum=list(snap.get("spectrum") or [])
+        if len(spectrum)>2:
+            pmin=float(snap.get("noise",-100))-12
+            pmax=max(max(float(v) for v in spectrum),pmin+45)
+            pts=[]
+            for i,v in enumerate(spectrum):
+                x=plot.left+int(i*(plot.width-1)/(len(spectrum)-1))
+                n=_clamp((float(v)-pmin)/(pmax-pmin))
+                y=plot.bottom-int(n*(plot.height-1)); pts.append((x,y))
+            if len(pts)>1: pygame.draw.lines(app.ui,BLUE_BRIGHT,False,pts,1)
+    frac=max(0.0,min(1.0,float(idx)/float(total)))
+    pygame.draw.rect(app.ui,(25,31,38),(12,278,296,10),border_radius=5)
+    pygame.draw.rect(app.ui,BLUE,(12,278,int(296*frac),10),border_radius=5)
+    app._text(f"{idx}/{total}",20,300,app.font_s,DIM)
+    app._text(f"ALERTS {alerts}",300,300,app.font_s,RED if alerts else DIM,right=True)
+    if snap and snap.get("peaks"):
+        q=snap["peaks"][0]
+        app._text("ALERT",160,333,app.font_l,RED,center=True)
+        app._text(f'{float(q.get("freq_hz",0))/1e6:.5f} MHz',160,362,app.font_m,WHITE,center=True)
+        app._text(f'confidence {float(q.get("confidence",0)):.2f}',160,386,app.font_s,YELLOW,center=True)
+    elif finished:
+        app._text("REPLAY DONE",160,342,app.font_l,GREEN,center=True)
+        app._text(f"{alerts} alert sample(s)",160,374,app.font_s,WHITE,center=True)
+    elif running:
+        app._text("PLAYING",160,342,app.font_l,BLUE_BRIGHT,center=True)
+        app._text("no alert in current sample",160,374,app.font_s,DIM,center=True)
+    else:
+        err=str(getattr(app,"recording_replay_error",""))
+        app._text("REPLAY STOPPED",160,342,app.font_l,DIM,center=True)
+        if err: app._text(err[:38],160,374,app.font_s,RED,center=True)
+    pygame.draw.rect(app.ui,(24,29,35),(12,408,296,48),border_radius=10)
+    app._text("STOP / BACK",160,432,app.font_m,WHITE,center=True)
+    app._text("Replay sound follows detector alerts",160,469,app.font_s,DIM,center=True)
+
 
 def draw_record_confirm(app):
     import pygame

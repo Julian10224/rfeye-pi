@@ -46,6 +46,153 @@ def _record_payload_snapshot(app):
     }
 
 
+def _capture_dir():
+    return Path.home()/".local"/"share"/"rfeye"/"captures"
+
+
+def _recording_entries():
+    from recording_replay import load_recording, recording_label, schema_mode
+    out=[]
+    root=_capture_dir(); root.mkdir(parents=True,exist_ok=True)
+    for p in root.glob("*.json"):
+        try:
+            data=load_recording(p)
+            start=data.get("recorded_from") or ""
+            # Migrate old machine-style filenames to a human-readable local
+            # recording date/time. The embedded recorded_from timestamp is the
+            # source of truth, not the file modification time.
+            if p.name.startswith("rf-series-") and start:
+                try:
+                    dt=datetime.fromisoformat(str(start))
+                    stem=dt.strftime("%Y-%m-%d_%H-%M-%S")
+                    target=root/(stem+".json")
+                    suffix=2
+                    while target.exists() and target.resolve()!=p.resolve():
+                        target=root/(f"{stem}_{suffix}.json"); suffix+=1
+                    if target.resolve()!=p.resolve():
+                        p.rename(target); p=target
+                except Exception:
+                    pass
+            out.append({
+                "path":str(p),
+                "label":recording_label(data),
+                "schema":str(data.get("schema","")),
+                "mode":schema_mode(data),
+                "samples":int(data.get("sample_count",len(data.get("samples") or [])) or 0),
+                "duration":float(data.get("requested_duration_s",0.0) or 0.0),
+                "sort":str(start),
+            })
+        except Exception:
+            continue
+    out.sort(key=lambda e:e["sort"],reverse=True)
+    return out
+
+
+def _refresh_recordings(app):
+    app.recording_entries=_recording_entries()
+    app.recording_offset=max(0,min(int(getattr(app,"recording_offset",0)),
+                                  max(0,len(app.recording_entries)-1)))
+    return app.recording_entries
+
+
+def _select_recording(app,entry):
+    app.recording_selected=dict(entry)
+    app.recording_delete_error=False
+    app.page="recording_detail"
+
+
+def _stop_recording_replay(app):
+    app.recording_replay_generation=int(getattr(app,"recording_replay_generation",0))+1
+    app.recording_replay_stop=True
+    app.recording_replay_running=False
+
+
+def _recording_replay_worker(app,path,generation):
+    from recording_replay import ReplayEngine, load_recording
+    try:
+        data=load_recording(path)
+        samples=data.get("samples") or []
+        eng=ReplayEngine(app.cfg,data)
+        app.recording_replay_mode=eng.mode
+        app.recording_replay_total=len(samples)
+        app.recording_replay_alerts=0
+        app.recording_replay_index=0
+        app.recording_replay_snapshot=None
+        app.recording_replay_error=""
+        app.recording_replay_running=True
+        app.recording_replay_finished=False
+        app.recording_replay_stop=False
+        app.last_beep=0.0
+        previous_ts=None
+        for i,sample in enumerate(samples):
+            if (bool(getattr(app,"recording_replay_stop",False)) or
+                    int(getattr(app,"recording_replay_generation",0))!=int(generation)):
+                break
+            snap=eng.process(sample,i)
+            app.recording_replay_snapshot=snap
+            app.recording_replay_index=i+1
+            if snap.get("peaks"):
+                app.recording_replay_alerts+=1
+            try:
+                ts=datetime.fromisoformat(str(sample.get("captured_at"))).timestamp()
+            except Exception:
+                ts=None
+            if previous_ts is None or ts is None:
+                delay=.65
+            else:
+                delay=max(.12,min(1.6,ts-previous_ts))
+            previous_ts=ts
+            until=time.monotonic()+delay
+            while (time.monotonic()<until and
+                   not bool(getattr(app,"recording_replay_stop",False)) and
+                   int(getattr(app,"recording_replay_generation",0))==int(generation)):
+                time.sleep(.04)
+        if int(getattr(app,"recording_replay_generation",0))==int(generation):
+            app.recording_replay_running=False
+            app.recording_replay_finished=not bool(getattr(app,"recording_replay_stop",False))
+    except Exception as e:
+        app.recording_replay_error=str(e)[-80:]
+        app.recording_replay_running=False
+        app.recording_replay_finished=True
+
+
+def _start_recording_replay(app):
+    entry=getattr(app,"recording_selected",None) or {}
+    path=entry.get("path")
+    if not path or not Path(path).exists():
+        return False
+    _stop_recording_replay(app)
+    generation=int(getattr(app,"recording_replay_generation",0))+1
+    app.recording_replay_generation=generation
+    app.recording_replay_stop=False
+    app.recording_replay_snapshot=None
+    app.recording_replay_index=0
+    app.recording_replay_total=0
+    app.recording_replay_alerts=0
+    app.recording_replay_finished=False
+    app.recording_replay_error=""
+    app.page="recording_replay"
+    threading.Thread(target=_recording_replay_worker,args=(app,path,generation),
+                     name="rfeye-recording-replay",daemon=True).start()
+    return True
+
+
+def _delete_selected_recording(app):
+    entry=getattr(app,"recording_selected",None) or {}
+    path=Path(entry.get("path",""))
+    try:
+        if path.is_file() and path.parent.resolve()==_capture_dir().resolve():
+            path.unlink()
+        app.recording_selected=None
+        _refresh_recordings(app)
+        app.page="recordings"
+        return True
+    except Exception:
+        app.recording_delete_error=True
+        app.page="recording_detail"
+        return False
+
+
 def _record_rf_worker(app, duration):
     started=datetime.now().astimezone(); end_mono=time.monotonic()+duration
     samples=[]; last_update=None
@@ -81,10 +228,13 @@ def _record_rf_worker(app, duration):
                 "candidate_min_confidence","strong_hit_confidence","confirm_hits","clear_hits")},
             "samples":samples,
         }
-        out=Path.home()/".local"/"share"/"rfeye"/"captures"
+        out=_capture_dir()
         out.mkdir(parents=True,exist_ok=True)
-        name=started.strftime("rf-series-%Y%m%d-%H%M%S-%f")[:-3]+".json"
-        path=out/name
+        stem=started.strftime("%Y-%m-%d_%H-%M-%S")
+        path=out/(stem+".json")
+        suffix=2
+        while path.exists():
+            path=out/(f"{stem}_{suffix}.json"); suffix+=1
         path.write_text(json.dumps(data,indent=2,allow_nan=False)+"\n")
         app.last_rf_record_path=str(path)
         app.rf_record_message=f"SAVED {len(samples)}"
@@ -176,7 +326,7 @@ def tap(app, x, y):
             app.page = "main"
             return
         idx = int((y - SETTINGS_TOP) / SETTINGS_STEP)
-        keys = ["demo_mode", "brightness", "record_rf", "wifi",
+        keys = ["demo_mode", "brightness", "record_rf", "recordings", "wifi",
                 "update", "spectrum", "debug"]
         if not 0 <= idx < min(SETTINGS_COUNT, len(keys)): return
         key = keys[idx]
@@ -190,10 +340,61 @@ def tap(app, x, y):
         elif key == "record_rf":
             if not bool(getattr(app,"rf_recording",False)):
                 app.record_confirm_opened=time.monotonic(); app.page="record_confirm"
+        elif key == "recordings":
+            app.recording_offset=0
+            _refresh_recordings(app)
+            app.page="recordings"
         elif key == "wifi": app.page = "wifi"; app._wifi_scan()
         elif key == "update": app._update_action()
         elif key == "spectrum": app.page = "spectrum"
         elif key == "debug": app.page = "debug"
+        return
+
+    if app.page == "recordings":
+        entries=getattr(app,"recording_entries",None)
+        if entries is None:
+            entries=_refresh_recordings(app)
+        if y < 62:
+            app.page="settings"
+            return
+        if y >= 408:
+            page_size=6
+            off=int(getattr(app,"recording_offset",0))
+            if x < 160:
+                app.recording_offset=max(0,off-page_size)
+            else:
+                app.recording_offset=min(max(0,len(entries)-1),off+page_size)
+            return
+        idx=int((y-70)/54)
+        off=int(getattr(app,"recording_offset",0))
+        if 0 <= idx < 6 and off+idx < len(entries):
+            _select_recording(app,entries[off+idx])
+        return
+
+    if app.page == "recording_detail":
+        if y < 62:
+            app.page="recordings"
+            return
+        if 188 <= y <= 286:
+            _start_recording_replay(app)
+        elif 316 <= y <= 414:
+            app.recording_delete_opened=time.monotonic()
+            app.page="recording_delete_confirm"
+        return
+
+    if app.page == "recording_delete_confirm":
+        if now-float(getattr(app,"recording_delete_opened",0.0)) < 0.30:
+            return
+        if 350 <= y <= 455:
+            _delete_selected_recording(app)
+        elif y < 350:
+            app.page="recording_detail"
+        return
+
+    if app.page == "recording_replay":
+        if y < 62 or y >= 408:
+            _stop_recording_replay(app)
+            app.page="recording_detail"
         return
 
     if app.page == "record_confirm":
