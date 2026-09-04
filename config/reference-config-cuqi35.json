@@ -1,6 +1,6 @@
 {
   "alert_hold_s": 3.0,
-  "app_version": "0.7.29",
+  "app_version": "0.7.30",
   "artifact_calibration_sweeps": 5,
   "artifact_duty_delta": 0.12,
   "artifact_min_baseline_hits": 4,

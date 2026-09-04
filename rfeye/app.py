@@ -584,6 +584,11 @@ class App:
             return "UNKNOWN"
 
     def _update_action(self):
+        # RESTART used to be display text only: tapping it fell through to a
+        # fresh update check. Keep it as a real fallback action as well.
+        if self.update_message == "RESTART":
+            self._request_app_restart(0.15)
+            return
         if self.update_busy:
             return
         if self.update_manifest and self.update_message == "INSTALL":
@@ -607,12 +612,27 @@ class App:
             self.update_message = "NOT SET" if not self.cfg.get("update_manifest_url") else "ERROR"
         self.update_busy = False
 
+    def _request_app_restart(self, delay=0.0):
+        # The appliance service has Restart=always. Ending the normal app loop
+        # is therefore enough to perform a reliable restart without sudo or a
+        # systemctl subprocess. Normal cleanup closes the SDR, buzzer and pygame
+        # before systemd starts the freshly installed files.
+        self.update_message = "RESTARTING"
+        self.update_busy = True
+        if delay > 0:
+            time.sleep(float(delay))
+        self.running = False
+
     def _install_update_worker(self):
         try:
             m = self.update_manifest or {}
             data = download_update(m.get("url", ""), m.get("sha256", ""))
             install_zip_bytes(data)
-            self.update_message = "RESTART"
+            # Do not wait for another tap. The updater code currently in memory
+            # requests a graceful exit after every successful install; systemd
+            # then relaunches RF Eye from the newly copied version.
+            self._request_app_restart(0.75)
+            return
         except Exception:
             self.update_message = "ERROR"
         self.update_busy = False
