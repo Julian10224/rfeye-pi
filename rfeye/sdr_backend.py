@@ -1,4 +1,5 @@
-import math, os, shutil, signal, subprocess, threading, time, ctypes, ctypes.util
+import json, math, os, shutil, signal, subprocess, threading, time, ctypes, ctypes.util
+from pathlib import Path
 import numpy as np
 
 try:
@@ -98,7 +99,9 @@ class SDRBackend:
         self._idle_site_cycle=0
         self._confirm_streak=0; self._clear_streak=0; self._candidate_freq=None
         self._carrier_state={}; self._last_detection_time=0.
-        self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}
+        self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}; self._artifact_tainted=set()
+        self._artifact_baseline_loaded=False
+        self._load_artifact_baseline()
         self.last_broadband_rejected=False; self.last_comb_rejected=False
     def set_demo(self,v):
         v=bool(v)
@@ -109,7 +112,8 @@ class SDRBackend:
                 self.mobile_level=0.; self.site_level=0.; self.activity_confidence=0.; self.mobile_confirmed=False
                 self._confirm_streak=0; self._clear_streak=0; self._candidate_freq=None
                 self._carrier_state={}; self._last_detection_time=0.
-                self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}
+                self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}; self._artifact_tainted=set()
+                self._artifact_baseline_loaded=False; self._load_artifact_baseline()
                 self.last_broadband_rejected=False; self.last_comb_rejected=False
                 self.status='SCANNING'; self.error=''; self.last_update=time.time()
     def start(self):
@@ -135,6 +139,8 @@ class SDRBackend:
             'static_rejected':bool(self.last_comb_rejected),
             'artifact_calibrating':bool(self._artifact_sweep<int(self.cfg.get('artifact_calibration_sweeps',5))),
             'artifact_sweep':int(self._artifact_sweep),'artifact_baseline_count':len(self._artifact_baseline),
+            'artifact_baseline_loaded':bool(self._artifact_baseline_loaded),
+            'artifact_tainted_count':len(self._artifact_tainted),
             'sdr_path':str(getattr(self,'sdr_path','?'))}
     def _run(self):
         while self.running:
@@ -298,24 +304,74 @@ class SDRBackend:
             peaks.sort(key=lambda q:(q['site_quality'],q['snr_db']),reverse=True)
         return peaks[:max(32,int(self.cfg.get('max_signals',3))*10)],f,p,floor
 
+    def _artifact_state_path(self):
+        override=os.getenv('RFEYE_ARTIFACT_BASELINE')
+        if override:return Path(override)
+        return Path.home()/'.local'/'state'/'rfeye'/'artifact-baseline.json'
+
+    def _load_artifact_baseline(self):
+        if not bool(self.cfg.get('artifact_baseline_persist',True)):return False
+        try:
+            path=self._artifact_state_path()
+            if not path.exists():return False
+            data=json.loads(path.read_text())
+            if data.get('schema')!='rfeye-artifact-baseline-v1':return False
+            if int(data.get('detector_profile_version',0))!=int(self.cfg.get('detector_profile_version',0)):return False
+            if int(data.get('sample_rate',0))!=int(self.cfg.get('sample_rate',0)):return False
+            if int(data.get('mobile_band_start_hz',0))!=int(self.cfg.get('mobile_band_start_hz',0)):return False
+            if int(data.get('mobile_band_end_hz',0))!=int(self.cfg.get('mobile_band_end_hz',0)):return False
+            max_days=max(1.,float(self.cfg.get('artifact_baseline_max_age_days',30.0)))
+            if time.time()-float(data.get('saved_at',0))>max_days*86400.:return False
+            loaded={}
+            for fk,v in (data.get('baseline') or {}).items():
+                f=int(fk)
+                vals={k:float(v[k]) for k in ('power','duty','span','rf_snr')}
+                vals['hits']=int(v.get('hits',0))
+                if not all(math.isfinite(vals[k]) for k in ('power','duty','span','rf_snr')):continue
+                loaded[f]=vals
+            if not loaded:return False
+            self._artifact_baseline=loaded
+            self._artifact_sweep=max(3,int(self.cfg.get('artifact_calibration_sweeps',5)))
+            self._artifact_baseline_loaded=True
+            return True
+        except Exception:
+            return False
+
+    def _save_artifact_baseline(self):
+        if not self._artifact_baseline or not bool(self.cfg.get('artifact_baseline_persist',True)):return
+        try:
+            path=self._artifact_state_path();path.parent.mkdir(parents=True,exist_ok=True)
+            data={'schema':'rfeye-artifact-baseline-v1',
+                  'detector_profile_version':int(self.cfg.get('detector_profile_version',0)),
+                  'sample_rate':int(self.cfg.get('sample_rate',0)),
+                  'mobile_band_start_hz':int(self.cfg.get('mobile_band_start_hz',0)),
+                  'mobile_band_end_hz':int(self.cfg.get('mobile_band_end_hz',0)),
+                  'saved_at':time.time(),
+                  'baseline':{str(f):dict(v) for f,v in self._artifact_baseline.items()}}
+            tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(data,indent=2,sort_keys=True)+'\n');tmp.replace(path)
+        except Exception:
+            pass
+
     def _reject_static_artifacts(self,peaks):
-        # Learn the stationary RF environment during the first few fast sweeps.
-        # A fixed receiver/Pi spur is present sweep after sweep with almost the
-        # same level, duty and burst span. A new mobile burst is either on a new
-        # carrier or changes those metrics enough to escape the baseline.
+        # Startup learning is deliberately conservative: a carrier is only
+        # admitted to the clutter map when it is present often enough AND its
+        # RF-SNR, duty and burst span are temporally stable. Any carrier that
+        # becomes variable during warm-up is marked tainted and can escape
+        # immediately instead of being learned as background.
         self._artifact_sweep+=1
         warm=max(3,int(self.cfg.get('artifact_calibration_sweeps',5)))
         minhits=max(2,int(self.cfg.get('artifact_min_baseline_hits',4)))
         rdelta=max(.5,float(self.cfg.get('artifact_rf_snr_delta_db',5.0)))
         ddelta=max(.02,float(self.cfg.get('artifact_duty_delta',.12)))
         sdelta=max(.5,float(self.cfg.get('artifact_span_delta_db',3.5)))
+        max_rstd=max(.1,float(self.cfg.get('artifact_max_rf_snr_std_db',2.0)))
+        max_dstd=max(.005,float(self.cfg.get('artifact_max_duty_std',.08)))
+        max_sstd=max(.1,float(self.cfg.get('artifact_max_span_std_db',2.5)))
         self.last_comb_rejected=False
 
         by_freq={}
         for q in peaks:
             f=int(round(float(q.get('freq_hz',0))/25000.)*25000)
-            # If adjacent raster bins describe one broad receiver spur, retain
-            # the strongest representative for baseline statistics.
             old=by_freq.get(f)
             if old is None or float(q.get('power_db',-999))>float(old.get('power_db',-999)):
                 by_freq[f]=q
@@ -323,19 +379,37 @@ class SDRBackend:
         if self._artifact_sweep<=warm:
             for f,q in by_freq.items():
                 hist=self._artifact_samples.setdefault(f,[])
-                hist.append((float(q.get('power_db',0)),float(q.get('duty',0)),float(q.get('burst_span_db',0)),float(q.get('rf_snr_db',q.get('snr_db',0)))))
+                hist.append((float(q.get('power_db',0)),float(q.get('duty',0)),
+                             float(q.get('burst_span_db',0)),
+                             float(q.get('rf_snr_db',q.get('snr_db',0)))))
                 if len(hist)>warm:del hist[:-warm]
+                if len(hist)>=2 and f not in self._artifact_tainted:
+                    a=np.asarray(hist,dtype=np.float32)
+                    if (float(np.std(a[:,3]))>max_rstd or
+                        float(np.std(a[:,1]))>max_dstd or
+                        float(np.std(a[:,2]))>max_sstd):
+                        self._artifact_tainted.add(f)
+
             if self._artifact_sweep==warm:
                 for f,hist in self._artifact_samples.items():
-                    if len(hist)<minhits:continue
+                    if f in self._artifact_tainted or len(hist)<minhits:continue
                     a=np.asarray(hist,dtype=np.float32)
+                    rstd=float(np.std(a[:,3]));dstd=float(np.std(a[:,1]));sstd=float(np.std(a[:,2]))
+                    if rstd>max_rstd or dstd>max_dstd or sstd>max_sstd:continue
                     self._artifact_baseline[f]={'power':float(np.median(a[:,0])),
                         'duty':float(np.median(a[:,1])),'span':float(np.median(a[:,2])),
-                        'rf_snr':float(np.median(a[:,3])),'hits':len(hist)}
-            # Suppress alerts only during the short startup calibration. Normal
-            # scan cadence still runs so the baseline costs no extra SDR passes.
-            self.last_comb_rejected=bool(peaks)
-            return []
+                        'rf_snr':float(np.median(a[:,3])),'hits':len(hist),
+                        'rf_snr_std':rstd,'duty_std':dstd,'span_std':sstd}
+                self._save_artifact_baseline()
+
+            out=[]
+            for q in peaks:
+                f=int(round(float(q.get('freq_hz',0))/25000.)*25000)
+                if f in self._artifact_tainted:
+                    q=dict(q);q['warmup_transient']=True
+                    out.append(q)
+            self.last_comb_rejected=len(out)<len(peaks)
+            return out
 
         out=[]
         for q in peaks:
@@ -347,13 +421,11 @@ class SDRBackend:
             dd=abs(float(q.get('duty',0))-float(base['duty']))
             ds=abs(float(q.get('burst_span_db',0))-float(base['span']))
             if dr>rdelta or dd>ddelta or ds>sdelta:
-                # Significant shape/SNR departure from the stationary baseline:
-                # preserve it even if AGC changed the absolute power everywhere.
                 q=dict(q);q['baseline_departure']=max(dr/rdelta,dd/ddelta,ds/sdelta)
                 out.append(q);continue
             self.last_comb_rejected=True
-            # Slowly follow harmless thermal/AGC drift without learning a new
-            # transmitter into the baseline.
+            # Only tiny EMA tracking is allowed after learning. It follows
+            # thermal/AGC drift but cannot quickly absorb a new transmitter.
             base['power']=float(base['power']*.98+float(q.get('power_db',0))*.02)
             base['duty']=float(base['duty']*.98+float(q.get('duty',0))*.02)
             base['span']=float(base['span']*.98+float(q.get('burst_span_db',0))*.02)

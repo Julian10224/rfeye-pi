@@ -1,4 +1,4 @@
-name: RF Eye 0.7.30 appliance checks
+name: RF Eye 0.7.31 appliance checks
 
 on:
   push:
@@ -21,8 +21,8 @@ jobs:
             scripts/generate-plymouth-assets-cuqi35.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.7.30"
-          grep -q '"app_version": "0.7.30"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.7.31"
+          grep -q '"app_version": "0.7.31"' rfeye/config.py
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
           grep -q 'SETTINGS_COUNT=7' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
@@ -35,6 +35,9 @@ jobs:
           grep -q 'self._request_app_restart(0.75)' rfeye/app.py
           grep -q 'if self.update_message == "RESTART"' rfeye/app.py
           grep -q '^Restart=always$' config/systemd/rfeye-user.service.in
+          grep -q 'artifact-baseline.json' rfeye/sdr_backend.py
+          grep -q 'warmup_transient' rfeye/sdr_backend.py
+          grep -q 'artifact_max_rf_snr_std_db' rfeye/config.py
           ! grep -q 'python3 scripts/patch-' install.sh install-cuqi35.sh scripts/build-release.sh
       - name: Verify captured reference startup files
         run: |
@@ -60,11 +63,15 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.7.30'
+          assert c['app_version']=='0.7.31'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['detector_profile_version']==3
+          assert c['detector_profile_version']==4
+          assert c['artifact_baseline_persist'] is True
+          assert c['artifact_max_rf_snr_std_db']==2.0
+          assert c['artifact_max_duty_std']==0.08
+          assert c['artifact_max_span_std_db']==2.5
           assert 'threshold_db' not in c
           assert c['mobile_capture_ms']==64.0
           assert c['site_capture_ms']==36.0
@@ -81,5 +88,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.30"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.31"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"
