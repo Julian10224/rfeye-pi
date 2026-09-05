@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO_SLUG="${RFEYE_REPO:-Julian10224/rfeye-pi}"
+REPO_BRANCH="${RFEYE_BRANCH:-main}"
 APP_ROOT=/opt/rfeye
 SRC_ROOT=/opt/rfeye-src
 
@@ -73,7 +74,7 @@ rm -rf "$SRC_ROOT"
 if [[ -d "${RFEYE_LOCAL_SOURCE:-}" ]]; then
   cp -a "$RFEYE_LOCAL_SOURCE" "$SRC_ROOT"
 else
-  git clone --depth 1 "https://github.com/${REPO_SLUG}.git" "$SRC_ROOT"
+  git clone --depth 1 --branch "$REPO_BRANCH" "https://github.com/${REPO_SLUG}.git" "$SRC_ROOT"
 fi
 
 rm -rf "$APP_ROOT"
@@ -207,14 +208,21 @@ loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 bash "$SRC_ROOT/scripts/optimize-rpi-appliance.sh" "$TARGET_USER"
 
 echo "[8/9] Configuring Wi-Fi updater..."
-MANIFEST_URL="https://raw.githubusercontent.com/${REPO_SLUG}/main/update/manifest.json"
+MANIFEST_URL="https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/update/manifest.json"
 python3 - "$APP_ROOT/rfeye/config.py" "$MANIFEST_URL" <<'PY'
 from pathlib import Path
-import sys
+import re, sys
 p = Path(sys.argv[1])
 url = sys.argv[2]
 s = p.read_text()
-s = s.replace('"update_manifest_url": "",', f'"update_manifest_url": "{url}",')
+s, count = re.subn(
+    r'("update_manifest_url"\s*:\s*)"[^"]*"',
+    lambda m: m.group(1) + '"' + url + '"',
+    s,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("Could not set update_manifest_url in config.py")
 p.write_text(s)
 PY
 

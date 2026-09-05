@@ -68,6 +68,8 @@ DEFAULTS = {
     "scan_start_hz": 380_000_000,
     "scan_end_hz": 395_000_000,
     "sample_rate": 2_048_000,
+    "sdr_device_index": 0,
+    "allow_cli_sdr_fallback": True,
     "fft_size": 1024,
     "fft_blocks": 8,
     "mobile_capture_ms": 64.0,
@@ -143,6 +145,7 @@ DEFAULTS = {
     "site_band_end_hz": 395_000_000,
     "max_signals": 3,
     "muted": False,
+    "startup_chime": True,
     "demo_mode": False,
     "auto_demo_if_no_sdr": False,
     "audio_mode": "adaptive",
@@ -162,7 +165,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.36",
+    "app_version": "0.7.37",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -229,6 +232,7 @@ def load_config():
     for obsolete in (
         "threshold_db", "threshold_min_db", "threshold_max_db",
         "threshold_step_db", "threshold_soft_margin_db", "min_burst_span_db",
+        "buzzer_duration_ms", "buzzer_high_hz", "buzzer_low_hz",
     ):
         cfg.pop(obsolete, None)
     return cfg
@@ -237,4 +241,12 @@ def load_config():
 def save_config(cfg):
     p = _config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, indent=2))
+    text = json.dumps(cfg, indent=2) + "\n"
+    try:
+        if p.exists() and p.read_text() == text:
+            return
+    except Exception:
+        pass
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(p)

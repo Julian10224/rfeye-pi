@@ -1,4 +1,4 @@
-name: RF Eye 0.7.36 appliance checks
+name: RF Eye 0.7.37 appliance checks
 
 on:
   push:
@@ -11,20 +11,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y device-tree-compiler python3-numpy
+        run: sudo apt-get update && sudo apt-get install -y device-tree-compiler python3-numpy python3-pygame
       - name: Check shell and Python syntax
         run: |
           bash -n install.sh install-cuqi35.sh scripts/start-rfeye.sh \
             scripts/apply-cuqi35-system-fixes.sh scripts/optimize-rpi-appliance.sh \
             scripts/install-networkmanager-policy.sh scripts/build-release.sh
-          python3 -m py_compile rfeye/*.py scripts/generate-plymouth-assets.py \
-            scripts/generate-plymouth-assets-cuqi35.py scripts/detector-selftest.py
+          python3 -m py_compile rfeye/*.py scripts/*.py
+      - name: Run application and updater regression tests
+        run: |
+          PYTHONPATH=rfeye SDL_VIDEODRIVER=dummy python3 scripts/app-selftest.py
+          PYTHONPATH=rfeye python3 scripts/updater-selftest.py
       - name: Run detector profile regression tests
         run: PYTHONPATH=rfeye python3 scripts/detector-selftest.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.7.36"
-          grep -q '"app_version": "0.7.36"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.7.37"
+          grep -q '"app_version": "0.7.37"' rfeye/config.py
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
           grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
@@ -58,8 +61,13 @@ jobs:
           grep -q 't.join(timeout=timeout)' rfeye/sdr_backend.py
           grep -q 'finally:' rfeye/sdr_backend.py
           grep -q 'sdr_stop_join_s' rfeye/config.py
+          grep -q 'def _safe_extract_runtime' rfeye/updater.py
+          grep -q 'valid SHA256 is required' rfeye/updater.py
+          grep -q 'def _split_nmcli_terse' rfeye/app.py
+          grep -q 'Re-discover on every retry' rfeye/compact_touch.py
           ! grep -q 'm=\[\]' rfeye/sdr_backend.py
           ! grep -q 'python3 scripts/patch-' install.sh install-cuqi35.sh scripts/build-release.sh
+          test -z "$(find scripts -maxdepth 1 -type f -name 'patch-*.py' -print -quit)"
       - name: Verify captured reference startup files
         run: |
           printf '%s  %s\n' \
@@ -84,7 +92,7 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.7.36'
+          assert c['app_version']=='0.7.37'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
@@ -107,6 +115,12 @@ jobs:
           assert c['broadband_temporal_min_departure']==1.25
           assert c['broadband_dynamic_keep_max']==6
           assert c['sdr_stop_join_s']==8.0
+          assert c['sdr_device_index']==0
+          assert c['allow_cli_sdr_fallback'] is True
+          assert c['startup_chime'] is True
+          assert 'buzzer_duration_ms' not in c
+          assert 'buzzer_high_hz' not in c
+          assert 'buzzer_low_hz' not in c
           assert c['tetra_channel_spacing_hz']==25000.0
           assert c['tetra_raster_offset_hz']==12500.0
           assert c['site_scan_interval']==3
@@ -136,5 +150,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.36"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.37"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"

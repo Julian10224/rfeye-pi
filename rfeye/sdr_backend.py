@@ -108,7 +108,9 @@ class SDRBackend:
         self.last_post_comb_candidates=0; self.last_coherent_comb_rejected=0; self.last_comb_event_teeth=0
         self.last_novelty_rejected=0; self.last_pair_rejected=0; self.last_confidence_rejected=0
         self.debug_mobile_candidates=[]
-        self.last_broadband_rejected=False; self.last_comb_rejected=False
+        self.last_broadband_rejected=False
+        self.last_static_rejected=False
+        self.last_comb_rejected=False
     def set_demo(self,v):
         v=bool(v)
         with self.lock:
@@ -127,7 +129,9 @@ class SDRBackend:
                 self.last_post_comb_candidates=0; self.last_coherent_comb_rejected=0; self.last_comb_event_teeth=0
                 self.last_novelty_rejected=0; self.last_pair_rejected=0; self.last_confidence_rejected=0
                 self.debug_mobile_candidates=[]
-                self.last_broadband_rejected=False; self.last_comb_rejected=False
+                self.last_broadband_rejected=False
+                self.last_static_rejected=False
+                self.last_comb_rejected=False
                 self.status='SCANNING'; self.error=''; self.last_update=time.time()
     def start(self):
         if self.running:return
@@ -157,8 +161,9 @@ class SDRBackend:
             'site_scan_ms':float(self.last_site_scan_ms),'capture_ms':float(self.last_capture_ms),
             'scan_windows':int(self.last_scan_windows),
             'confirm_streak':int(self._confirm_streak),'clear_streak':int(self._clear_streak),
-            'broadband_rejected':bool(self.last_broadband_rejected),'comb_rejected':bool(self.last_comb_rejected),
-            'static_rejected':bool(self.last_comb_rejected),
+            'broadband_rejected':bool(self.last_broadband_rejected),
+            'comb_rejected':bool(self.last_comb_rejected),
+            'static_rejected':bool(self.last_static_rejected),
             'artifact_calibrating':bool(self._artifact_sweep<int(self.cfg.get('artifact_calibration_sweeps',5))),
             'artifact_sweep':int(self._artifact_sweep),'artifact_baseline_count':len(self._artifact_baseline),
             'artifact_baseline_loaded':bool(self._artifact_baseline_loaded),
@@ -201,9 +206,10 @@ class SDRBackend:
 
     def _centers_for(self,a,b,sr):
         usable=sr*.68; half=usable/2; step=usable*.9; out=[]; c=a+half
+        raster=max(1.0,float(self.cfg.get('tetra_channel_spacing_hz',25000.0)))
         while True:
-            x=a+round((c-a)/25000.)*25000.
-            if out and x<=out[-1]:x=out[-1]+25000.
+            x=a+round((c-a)/raster)*raster
+            if out and x<=out[-1]:x=out[-1]+raster
             out.append(x)
             if x+half>=b:return out
             c=x+step
@@ -260,10 +266,13 @@ class SDRBackend:
                 try:os.killpg(proc.pid,signal.SIGKILL)
                 except Exception:proc.kill()
                 out,err=proc.communicate();raise RuntimeError('rtl_sdr capture timeout')
-            if proc.returncode!=0 or len(out)<n*2:
+            expected_bytes=int(n*blocks)*2
+            if proc.returncode!=0 or len(out)<expected_bytes:
                 msg=err.decode('utf-8','ignore').strip()[-240:]
+                if proc.returncode==0 and len(out)<expected_bytes:
+                    msg=f'rtl_sdr short capture {len(out)}/{expected_bytes} bytes'
                 raise RuntimeError(msg or f'rtl_sdr exit {proc.returncode}')
-            raw=np.frombuffer(out,dtype=np.uint8).astype(np.float32)
+            raw=np.frombuffer(out[:expected_bytes],dtype=np.uint8).astype(np.float32)
             iq=(raw[0::2]-127.5)+1j*(raw[1::2]-127.5)
 
         if iq is None or len(iq)<n:
@@ -366,7 +375,9 @@ class SDRBackend:
         sr=int(self.cfg.get('sample_rate',2048000)); n=int(self.cfg.get('fft_size',1024)); base=int(self.cfg.get('fft_blocks',8))
         ms=float(self.cfg.get('mobile_capture_ms' if label=='MOBILE' else 'site_capture_ms',64.)); blocks=max(base,math.ceil(sr*ms/1000/n))
         usable=sr*.68/2; half=float(self.cfg.get('tetra_channel_half_width_hz',9000)); gate=float(self.cfg.get('burst_gate_db',6))
-        channels=np.arange(a+12500.,b,25000.,dtype=np.float64); obs={}; fs=[]; ps=[]
+        spacing=max(1.0,float(self.cfg.get('tetra_channel_spacing_hz',25000.0)))
+        offset=float(self.cfg.get('tetra_raster_offset_hz',12500.0))
+        channels=np.arange(a+offset,b,spacing,dtype=np.float64); obs={}; fs=[]; ps=[]
         bin_hz=float(sr)/float(n); half_bins=max(1,int(math.ceil(half/bin_hz)))
         offsets=np.arange(-half_bins,half_bins+1,dtype=np.int32); db_to_ln=math.log(10.0)/10.0
         for center in self._centers_for(a,b,sr):
@@ -581,7 +592,7 @@ class SDRBackend:
         max_rstd=max(.1,float(self.cfg.get('artifact_max_rf_snr_std_db',2.0)))
         max_dstd=max(.005,float(self.cfg.get('artifact_max_duty_std',.08)))
         max_sstd=max(.1,float(self.cfg.get('artifact_max_span_std_db',2.5)))
-        self.last_comb_rejected=False
+        self.last_static_rejected=False
 
         by_freq={}
         for q in peaks:
@@ -623,7 +634,7 @@ class SDRBackend:
                 if f in self._artifact_tainted:
                     q=dict(q);q['warmup_transient']=True
                     out.append(q)
-            self.last_comb_rejected=len(out)<len(peaks)
+            self.last_static_rejected=len(out)<len(peaks)
             return out
 
         out=[]
@@ -638,7 +649,7 @@ class SDRBackend:
             if dr>rdelta or dd>ddelta or ds>sdelta:
                 q=dict(q);q['baseline_departure']=max(dr/rdelta,dd/ddelta,ds/sdelta)
                 out.append(q);continue
-            self.last_comb_rejected=True
+            self.last_static_rejected=True
             # Only tiny EMA tracking is allowed after learning. It follows
             # thermal/AGC drift but cannot quickly absorb a new transmitter.
             base['power']=float(base['power']*.98+float(q.get('power_db',0))*.02)
@@ -758,6 +769,7 @@ class SDRBackend:
             self.last_mobile_scan_ms=(time.perf_counter()-_mobile_t)*1000.
             limit=max(0,int(self.cfg.get('max_mobile_candidates_per_sweep',12)))
             self.last_broadband_rejected=False
+            self.last_static_rejected=False
             self.last_comb_rejected=False
             self.last_raw_mobile_candidates=len(m)
             # Baseline suppression runs first. Keep diagnostic visibility of
@@ -841,7 +853,8 @@ class SDRBackend:
                 if not recent and self.scan_failures>=3:
                     self.status='NO SDR';self.peaks=[];self.mobile_peaks=[];self.site_peaks=[];self.mobile_level=0.;self.site_level=0.;self.activity_confidence=0.;self.mobile_confirmed=False
                     self._confirm_streak=0;self._clear_streak=0;self._candidate_freq=None
-                    self._carrier_state={};self._last_detection_time=0.;self.last_broadband_rejected=False
+                    self._carrier_state={};self._last_detection_time=0.
+                    self.last_broadband_rejected=False;self.last_static_rejected=False;self.last_comb_rejected=False
                     self.spectrum_freqs=np.array([],dtype=np.float32);self.spectrum_db=np.array([],dtype=np.float32)
                 self.error=err;self.demo_active=False
             return False

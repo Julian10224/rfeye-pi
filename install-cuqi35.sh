@@ -76,10 +76,15 @@ trap cleanup EXIT
 git clone --depth 1 --branch "$REPO_BRANCH" "https://github.com/${REPO_SLUG}.git" "$TMP_ROOT/src"
 
 echo "[MHS35 2/8] Installing RF Eye appliance core..."
-RFEYE_LOCAL_SOURCE="$TMP_ROOT/src" RFEYE_REPO="$REPO_SLUG" bash "$TMP_ROOT/src/install.sh"
-# Start importing Pygame while Labwc is still coming up and defer SDR/NumPy
-# until after the display path is ready. OTA builds apply the same transform.
-python3 -m py_compile /opt/rfeye/rfeye/app.py
+RFEYE_LOCAL_SOURCE="$TMP_ROOT/src" RFEYE_REPO="$REPO_SLUG" RFEYE_BRANCH="$REPO_BRANCH" \
+  bash "$TMP_ROOT/src/install.sh"
+# Syntax-check the installed entry point without creating a root-owned
+# __pycache__ inside the user-owned OTA runtime directory.
+python3 - <<'PY'
+from pathlib import Path
+p=Path('/opt/rfeye/rfeye/app.py')
+compile(p.read_text(),str(p),'exec')
+PY
 
 BOOT=/boot/firmware
 [[ -d "$BOOT" ]] || BOOT=/boot

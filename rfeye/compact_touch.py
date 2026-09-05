@@ -37,19 +37,27 @@ def _map(app,raw_x,raw_y):
     return max(0,min(319,int(round(x)))), max(0,min(479,int(round(y))))
 
 def install(app):
-    path=_event_device()
     app._direct_touch_queue=deque(maxlen=12)
-    app._direct_touch_path=path
-    if not path: return
+    app._direct_touch_path=_event_device()
     def worker():
         raw_x=2048; raw_y=2048; pending=False; touching=False; dirty=False; last_emit=0.0
         while getattr(app,'running',True):
+            fd=None
             try:
+                # Re-discover on every retry. This covers late driver startup
+                # and event-number changes without requiring an app restart.
+                path=_event_device()
+                app._direct_touch_path=path
+                if not path:
+                    time.sleep(0.5)
+                    continue
                 fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK)
                 while getattr(app,'running',True):
                     ready,_,_=select.select([fd],[],[],0.25)
                     if not ready: continue
                     data=os.read(fd,EVENT.size*32)
+                    if not data:
+                        raise OSError('touch device closed')
                     for off in range(0,len(data)-EVENT.size+1,EVENT.size):
                         _sec,_usec,etype,code,value=EVENT.unpack_from(data,off)
                         if etype==EV_ABS and code==ABS_X: raw_x=value; dirty=True
@@ -63,9 +71,13 @@ def install(app):
                             if pending or slider_drag:
                                 app._direct_touch_queue.append((raw_x,raw_y,mapped[0],mapped[1])); last_emit=now
                             pending=False; dirty=False
-                os.close(fd)
             except Exception:
-                time.sleep(0.5)
+                if getattr(app,'running',True):
+                    time.sleep(0.5)
+            finally:
+                if fd is not None:
+                    try: os.close(fd)
+                    except OSError: pass
     threading.Thread(target=worker,name='rfeye-xpt2046',daemon=True).start()
 
 def drain(app):

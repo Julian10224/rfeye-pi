@@ -111,9 +111,10 @@ class ReplayEngine:
         idx.sort(key=lambda i:float(score[i]),reverse=True)
         out=[];seen=set()
         a=float(self.cfg.get("mobile_band_start_hz",380e6))
-        raster0=a+12500.0
+        spacing=max(1.0,float(self.cfg.get("tetra_channel_spacing_hz",25000.0)))
+        raster0=a+float(self.cfg.get("tetra_raster_offset_hz",12500.0))
         for i in idx[:8]:
-            rf=raster0+round((float(f[i])-raster0)/25000.0)*25000.0
+            rf=raster0+round((float(f[i])-raster0)/spacing)*spacing
             if rf in seen: continue
             seen.add(rf)
             dep=float(score[i])

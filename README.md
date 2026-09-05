@@ -1,6 +1,6 @@
-# RF Eye 0.7.36 for Raspberry Pi
+# RF Eye 0.7.37 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.7.36 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.7.37 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.7.36 appliance path:
+The installer reproduces the working 0.7.37 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.7.36
+## User interface in 0.7.37
 
 The compact profile contains:
 
@@ -149,7 +149,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.7.36 uses a **TMB12A03 active buzzer**:
+RF Eye 0.7.37 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -172,13 +172,13 @@ That manifest points to the deterministic OTA package on `main`:
 https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/rfeye-update.zip
 ```
 
-The updater downloads the ZIP, verifies its SHA-256, makes a backup and replaces the RF Eye application files. Starting with 0.7.30, a successful OTA install automatically exits the running app after showing `RESTARTING`; the `rfeye-user.service` (`Restart=always`) then relaunches RF Eye from the newly installed files. The visible `RESTART` action is also a real manual restart fallback.
+The updater downloads the ZIP, requires and verifies its SHA-256, validates every archive path before extraction, makes a backup and replaces the RF Eye application contents. Starting with 0.7.37, replacement is a real content replacement rather than an overlay, so a file deliberately removed by a release cannot survive as a stale Python module. A copy/delete failure triggers best-effort restoration from the backup. Starting with 0.7.30, a successful OTA install automatically exits the running app after showing `RESTARTING`; the `rfeye-user.service` (`Restart=always`) then relaunches RF Eye from the newly installed files. The visible `RESTART` action is also a real manual restart fallback.
 
 Application-only OTA updates update `/opt/rfeye/rfeye`. Device Tree, systemd, Plymouth and boot-service changes are applied by `install-cuqi35.sh` and therefore require root.
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.7.36**.
+`VERSION` and `rfeye/config.py` identify this release as **0.7.37**.
 
 Build the OTA package with:
 
@@ -186,7 +186,7 @@ Build the OTA package with:
 ./scripts/build-release.sh
 ```
 
-The build normalizes archive metadata so unchanged source produces the same ZIP SHA-256. GitHub Actions rebuilds the `main` manifest/ZIP after a release commit and runs syntax, compact-UI, startup-snapshot and deterministic-release checks.
+The build normalizes archive metadata so unchanged source produces the same ZIP SHA-256 and compiles every shipped Python runtime module. GitHub Actions rebuilds the `main` manifest/ZIP after a release commit and runs syntax, detector, headless compact-App/UI, updater/rollback, startup-snapshot and deterministic-release checks.
 
 ## Diagnostics
 

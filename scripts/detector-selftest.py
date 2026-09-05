@@ -7,6 +7,7 @@ import os
 import tempfile
 
 import numpy as np
+import sdr_backend as sdr_module
 
 os.environ.setdefault("RFEYE_ARTIFACT_BASELINE", tempfile.mktemp(prefix="rfeye-selftest-", suffix=".json"))
 
@@ -84,6 +85,10 @@ def main():
     for _ in range(5):
         b._reject_static_artifacts([stable_peak(380_037_500),stable_peak(380_062_500)])
     assert set(b._artifact_baseline)=={380_037_500,380_062_500}
+    b.last_comb_rejected=False
+    assert b._reject_static_artifacts([stable_peak(380_037_500)])==[]
+    assert b.last_static_rejected is True
+    assert b.last_comb_rejected is False
 
     # Learn the measured Pi/RTL-SDR 400 kHz comb from the artifact map.
     b=backend()
@@ -101,10 +106,13 @@ def main():
     rows=[candidate(freq=380_812_500,dep=2.2),
           candidate(freq=381_612_500,dep=2.0),
           candidate(freq=383_437_500,dep=2.5)]
+    b.last_static_rejected=False
     out=b._reject_coherent_comb(rows)
     assert [int(q["freq_hz"]) for q in out]==[383_437_500]
     assert b.last_coherent_comb_rejected==2
     assert b.last_comb_event_teeth>=2
+    assert b.last_comb_rejected is True
+    assert b.last_static_rejected is False
 
     # One comb tooth alone is not blacklisted; only coherent periodic motion is.
     out=b._reject_coherent_comb([candidate(freq=380_812_500,dep=2.5)])
@@ -180,6 +188,28 @@ def main():
     b=pipeline_backend([[candidate(dep=2.5)]])
     assert b._scan_cycle()
     assert b.snapshot()["peaks"]
+
+    # The rtl_sdr CLI fallback must never accept a partial one-block capture
+    # when multiple FFT blocks were requested.
+    b=backend()
+    b._direct_samples=lambda *_args,**_kwargs: (_ for _ in ()).throw(RuntimeError("direct failed"))
+    old_which=sdr_module.shutil.which
+    old_popen=sdr_module.subprocess.Popen
+    class ShortProc:
+        def __init__(self,*args,**kwargs): self.pid=12345; self.returncode=0
+        def communicate(self,timeout=None): return (bytes(16),b"")
+    sdr_module.shutil.which=lambda name: "/fake/rtl_sdr" if name=="rtl_sdr" else old_which(name)
+    sdr_module.subprocess.Popen=ShortProc
+    try:
+        try:
+            b._capture(382e6,2048000,8,4,True)
+        except RuntimeError as exc:
+            assert "short capture 16/64 bytes" in str(exc)
+        else:
+            raise AssertionError("partial CLI capture was accepted")
+    finally:
+        sdr_module.shutil.which=old_which
+        sdr_module.subprocess.Popen=old_popen
 
     print("RF Eye detector profile v7 self-test: OK")
 

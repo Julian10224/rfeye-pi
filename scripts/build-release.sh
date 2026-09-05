@@ -20,14 +20,9 @@ find "$STAGE/rfeye" -type d -name '.backup-*' -prune -exec rm -rf {} +
 find "$STAGE/rfeye" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGE/rfeye" -name '*.bak*' -delete
 
-python3 -m py_compile \
-  "$STAGE/rfeye/app.py" \
-  "$STAGE/rfeye/sdr_backend.py" \
-  "$STAGE/rfeye/compact_display_patch.py" \
-  "$STAGE/rfeye/compact_ui_controls.py" \
-  "$STAGE/rfeye/compact_ui_draw.py" \
-  "$STAGE/rfeye/compact_touch.py" \
-  "$STAGE/rfeye/compact_wifi_ui.py"
+# Compile every shipped Python runtime module, not only the historically
+# patched subset. A syntax error in updater/replay/Wi-Fi must fail the build.
+python3 -m py_compile "$STAGE"/rfeye/*.py
 find "$STAGE/rfeye" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$STAGE/rfeye" -name '*.pyc' -delete
 

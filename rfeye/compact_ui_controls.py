@@ -33,7 +33,7 @@ def _record_payload_snapshot(app):
         "detector":{k:_plain(snap.get(k)) for k in (
             "status","activity_confidence","mobile_confirmed","noise",
             "mobile_level","site_level","peaks","mobile_peaks","site_peaks",
-            "broadband_rejected","static_rejected","artifact_calibrating",
+            "broadband_rejected","static_rejected","comb_rejected","artifact_calibrating",
             "artifact_sweep","artifact_baseline_count","artifact_baseline_loaded",
             "artifact_tainted_count","raw_mobile_candidate_count",
             "post_artifact_candidate_count","post_comb_candidate_count",
@@ -117,6 +117,10 @@ def _recording_replay_worker(app,path,generation):
         data=load_recording(path)
         samples=data.get("samples") or []
         eng=ReplayEngine(app.cfg,data)
+        # The user may have stopped this replay while JSON/engine setup was in
+        # progress. A stale worker must never resurrect or overwrite newer UI.
+        if int(getattr(app,"recording_replay_generation",0))!=int(generation):
+            return
         app.recording_replay_mode=eng.mode
         app.recording_replay_total=len(samples)
         app.recording_replay_alerts=0
@@ -125,7 +129,6 @@ def _recording_replay_worker(app,path,generation):
         app.recording_replay_error=""
         app.recording_replay_running=True
         app.recording_replay_finished=False
-        app.recording_replay_stop=False
         app.last_beep=0.0
         previous_ts=None
         for i,sample in enumerate(samples):
@@ -133,6 +136,8 @@ def _recording_replay_worker(app,path,generation):
                     int(getattr(app,"recording_replay_generation",0))!=int(generation)):
                 break
             snap=eng.process(sample,i)
+            if int(getattr(app,"recording_replay_generation",0))!=int(generation):
+                break
             app.recording_replay_snapshot=snap
             app.recording_replay_index=i+1
             if snap.get("peaks"):
@@ -155,9 +160,10 @@ def _recording_replay_worker(app,path,generation):
             app.recording_replay_running=False
             app.recording_replay_finished=not bool(getattr(app,"recording_replay_stop",False))
     except Exception as e:
-        app.recording_replay_error=str(e)[-80:]
-        app.recording_replay_running=False
-        app.recording_replay_finished=True
+        if int(getattr(app,"recording_replay_generation",0))==int(generation):
+            app.recording_replay_error=str(e)[-80:]
+            app.recording_replay_running=False
+            app.recording_replay_finished=True
 
 
 def _start_recording_replay(app):

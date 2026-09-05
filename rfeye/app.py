@@ -31,6 +31,29 @@ RED = (230, 54, 54)
 def clamp(v, lo=0.0, hi=1.0):
     return max(lo, min(hi, v))
 
+
+def _split_nmcli_terse(line, expected_fields):
+    """Split nmcli terse output while honoring its backslash escaping."""
+    fields = []
+    current = []
+    escaped = False
+    for ch in str(line):
+        if escaped:
+            current.append(ch)
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == ":" and len(fields) < int(expected_fields) - 1:
+            fields.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if escaped:
+        current.append("\\")
+    fields.append("".join(current))
+    return fields
+
+
 class App:
     def __init__(self, cfg, fullscreen=True):
         self.cfg = cfg
@@ -390,13 +413,13 @@ class App:
                 for _ in range(5):
                     time.sleep(1.5)
                     cp = subprocess.run([
-                        "nmcli","-t","--escape","no","-f","IN-USE,SSID,SIGNAL,SECURITY",
+                        "nmcli","-t","--escape","yes","-f","IN-USE,SSID,SIGNAL,SECURITY",
                         "dev","wifi","list","--rescan","no","ifname","wlan0"
                     ], capture_output=True, text=True, timeout=12)
                     if cp.returncode != 0:
                         continue
                     for line in cp.stdout.splitlines():
-                        parts=line.split(":",3)
+                        parts=_split_nmcli_terse(line,4)
                         if len(parts) < 4: continue
                         active,ssid,signal,sec=parts
                         ssid=ssid.strip()
@@ -990,7 +1013,11 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
-    App(cfg, fullscreen=not args.window).run()
+    # Persist normalized migrations/version fields once; save_config is a
+    # no-op when the file is already byte-identical.
+    save_config(cfg)
+    fullscreen = bool(cfg.get("fullscreen", True)) and not args.window
+    App(cfg, fullscreen=fullscreen).run()
 
 if __name__ == "__main__":
     main()
