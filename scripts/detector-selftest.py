@@ -16,7 +16,7 @@ from sdr_backend import SDRBackend
 
 def backend():
     cfg=copy.deepcopy(DEFAULTS)
-    cfg["detector_profile_version"]=6
+    cfg["detector_profile_version"]=7
     cfg["artifact_baseline_persist"]=False
     return SDRBackend(cfg)
 
@@ -84,6 +84,31 @@ def main():
     for _ in range(5):
         b._reject_static_artifacts([stable_peak(380_037_500),stable_peak(380_062_500)])
     assert set(b._artifact_baseline)=={380_037_500,380_062_500}
+
+    # Learn the measured Pi/RTL-SDR 400 kHz comb from the artifact map.
+    b=backend()
+    comb=[]
+    for center in (380_812_500,381_612_500,382_412_500,384_012_500):
+        comb.extend((center-25_000,center,center+25_000))
+    b._artifact_baseline={f:{"power":20.0,"duty":.25,"span":12.0,
+                             "rf_snr":15.0,"hits":5} for f in comb}
+    assert b._update_artifact_comb_profile()
+    assert b._artifact_comb_support>=8 and b._artifact_comb_teeth>=4
+    assert b._comb_distance(383_437_500)>float(b.cfg["artifact_comb_half_width_hz"])
+
+    # Coherent motion on two different comb teeth is hardware interference:
+    # reject the comb members but preserve an isolated off-comb C2000 carrier.
+    rows=[candidate(freq=380_812_500,dep=2.2),
+          candidate(freq=381_612_500,dep=2.0),
+          candidate(freq=383_437_500,dep=2.5)]
+    out=b._reject_coherent_comb(rows)
+    assert [int(q["freq_hz"]) for q in out]==[383_437_500]
+    assert b.last_coherent_comb_rejected==2
+    assert b.last_comb_event_teeth>=2
+
+    # One comb tooth alone is not blacklisted; only coherent periodic motion is.
+    out=b._reject_coherent_comb([candidate(freq=380_812_500,dep=2.5)])
+    assert len(out)==1 and int(out[0]["freq_hz"])==380_812_500
 
     # Memory-only duplex context needs multiple site refresh hits.
     b=backend()
@@ -156,7 +181,7 @@ def main():
     assert b._scan_cycle()
     assert b.snapshot()["peaks"]
 
-    print("RF Eye detector profile v6 self-test: OK")
+    print("RF Eye detector profile v7 self-test: OK")
 
 
 if __name__=="__main__":

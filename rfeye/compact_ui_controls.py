@@ -36,7 +36,10 @@ def _record_payload_snapshot(app):
             "broadband_rejected","static_rejected","artifact_calibrating",
             "artifact_sweep","artifact_baseline_count","artifact_baseline_loaded",
             "artifact_tainted_count","raw_mobile_candidate_count",
-            "post_artifact_candidate_count","broadband_kept_count",
+            "post_artifact_candidate_count","post_comb_candidate_count",
+            "coherent_comb_rejected_count","comb_event_teeth",
+            "comb_profile_support","comb_profile_teeth","comb_profile_phase_hz",
+            "broadband_kept_count",
             "novelty_rejected_count","pair_rejected_count","confidence_rejected_count",
             "debug_mobile_candidates","confirm_streak","clear_streak",
             "cycle_ms","mobile_scan_ms","site_scan_ms","capture_ms","scan_windows","sdr_path")},
@@ -210,7 +213,7 @@ def _record_rf_worker(app, duration):
             samples.append(item)
         ended=datetime.now().astimezone(); cfg=app.cfg
         data={
-            "schema":"rfeye-rf-series-v6",
+            "schema":"rfeye-rf-series-v7",
             "recorded_from":started.isoformat(timespec="milliseconds"),
             "recorded_to":ended.isoformat(timespec="milliseconds"),
             "requested_duration_s":float(duration),
@@ -222,6 +225,10 @@ def _record_rf_worker(app, duration):
                 "artifact_rf_snr_delta_db","artifact_duty_delta","artifact_span_delta_db",
                 "artifact_max_rf_snr_std_db","artifact_max_duty_std","artifact_max_span_std_db",
                 "artifact_baseline_persist","artifact_baseline_max_age_days",
+                "artifact_comb_period_hz","artifact_comb_half_width_hz",
+                "artifact_comb_min_baseline_support","artifact_comb_min_baseline_teeth",
+                "artifact_comb_min_baseline_fraction","artifact_comb_event_min_departure",
+                "artifact_comb_event_min_teeth",
                 "temporal_baseline_alpha","temporal_state_max_age_s",
                 "temporal_rf_snr_scale_db","temporal_duty_scale","temporal_span_scale_db",
                 "broadband_temporal_min_departure","broadband_dynamic_keep_max",

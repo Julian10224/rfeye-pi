@@ -1,6 +1,6 @@
-# RF Eye 0.7.35 for Raspberry Pi
+# RF Eye 0.7.36 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.7.35 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.7.36 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.7.35 appliance path:
+The installer reproduces the working 0.7.36 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.7.35
+## User interface in 0.7.36
 
 The compact profile contains:
 
@@ -119,13 +119,15 @@ The five-point affine calibration is saved immediately in the local RF Eye confi
 
 ## RF activity scanner
 
-The SDR backend keeps a persistent `librtlsdr` handle open where possible and uses vectorized FFT-based scanning over the configured bands. Detector profile v6 uses the C2000/TETRA 25 kHz raster with the required +12.5 kHz offset (380.0125 MHz + N×25 kHz), so adjacent carriers never share artifact or hysteresis state. The mobile/uplink band is revisited at roughly one-second cadence on the reference Pi; downlink context is refreshed every three mobile sweeps and retained only briefly. Soft burst/SNR scoring remains automatic, while a per-channel temporal reference with common-mode AGC correction supplies the novelty gate.
+The SDR backend keeps a persistent `librtlsdr` handle open where possible and uses vectorized FFT-based scanning over the configured bands. Detector profile v7 retains the corrected C2000/TETRA 25 kHz raster with the required +12.5 kHz offset (380.0125 MHz + N×25 kHz), so adjacent carriers never share artifact or hysteresis state. The mobile/uplink band is revisited at roughly one-second cadence on the reference Pi; downlink context is refreshed every three mobile sweeps and retained only briefly. Soft burst/SNR scoring remains automatic, while a per-channel temporal reference with common-mode AGC correction supplies the novelty gate.
 
 On the first calibration for a detector profile, five normal sweeps observe the local Pi/RTL-SDR RF environment. A frequency is added to the stationary clutter map only when it is present in enough sweeps and remains stable in relative RF-SNR, burst duty and burst span. A carrier whose metrics become variable during those sweeps is marked transient and may escape the startup filter immediately instead of being learned as background.
 
-The resulting hardware baseline is stored locally under the user's RF Eye state directory and reused on later restarts (subject to detector profile/band/sample-rate validation and a maximum age). Profile v6 invalidates older v5 baselines because the previous absolute 25 kHz rounding could merge adjacent +12.5 kHz-offset carriers. A loaded v6 baseline still uses slow EMA drift tracking, while new or materially changed carriers pass through to duplex/confidence/hysteresis processing.
+The resulting hardware baseline is stored locally under the user's RF Eye state directory and reused on later restarts (subject to detector profile/band/sample-rate validation and a maximum age). Profile v6 invalidated older v5 baselines because the previous absolute 25 kHz rounding could merge adjacent +12.5 kHz-offset carriers. Profile v7 keeps the same corrected baseline representation and can safely adopt a v6 baseline once during OTA migration, immediately persisting it as v7.
 
-Starting with RF Eye 0.7.32, an unusually busy sweep no longer deletes the entire candidate set. The broadband guard instead keeps only carriers whose RF-SNR, duty or burst span changed materially relative to their own slow temporal reference. Profile v6 extends this into the final decision: a candidate cannot confirm at all unless temporal departure is at least 1.25. Memory-only +10 MHz duplex context expires after 5 seconds and requires at least two site observations. Ordinary candidates need two valid hits on the same true TETRA carrier; one-sweep confirmation is reserved for a strong novelty event with a strong current or very fresh duplex pair.
+Starting with RF Eye 0.7.32, an unusually busy sweep no longer deletes the entire candidate set. The broadband guard instead keeps only carriers whose RF-SNR, duty or burst span changed materially relative to their own slow temporal reference. Profile v6 added the final novelty/duplex gate: a candidate cannot confirm unless temporal departure is at least 1.25; memory-only +10 MHz context expires after 5 seconds and requires at least two site observations; ordinary candidates need two valid hits on the same true TETRA carrier.
+
+Driving recordings from profile v6 exposed a separate hardware failure mode. The reference Pi/RTL-SDR produced a strong periodic artifact family at approximately 400 kHz spacing, often with ±25 kHz sidebands. Because 10 MHz is exactly 25 × 400 kHz, the same local hardware comb appeared at the nominal duplex partner frequencies and could therefore validate itself as a false C2000 pair. Profile v7 learns the dominant comb phase from the unit's own artifact baseline. The comb guard activates only when that baseline has strong periodic support and rejects comb-family candidates only when at least two different 400 kHz teeth change coherently in the same sweep. A single isolated carrier on the same frequency grid is not blacklisted and remains eligible for normal C2000 processing.
 
 The display reports RF activity/status only; it does not identify a transmitter or determine an exact physical distance.
 
@@ -141,13 +143,13 @@ Captured JSON files are stored locally under:
 
 They are not committed to GitHub automatically. New files use the human-readable local start time as their filename, for example `2026-09-04_20-26-35.json`. Opening the Recordings browser also migrates older `rf-series-...` names from the embedded `recorded_from` timestamp without changing recording contents.
 
-Recording schema v6 stores raw/post-artifact counts plus dedicated novelty-, duplex-pair- and confidence-rejection counts, the broadband-kept count and a compact pre-pair debug set. The Recordings browser replays files through the current downstream detector and normal buzzer rhythm. v6 files are labelled **EXACT v6**; existing v5 files remain **EXACT v5** because they already contain the required pre-pair candidate data. Older v3/v4 files remain **LEGACY APPROX** because the historical broadband bug discarded block-level candidate fields that cannot be reconstructed exactly. Delete is protected by a separate YES/NO confirmation page.
+Recording schema v7 additionally stores the learned comb profile support/phase, number of coherent comb teeth in each sweep and how many candidates the comb guard removed, alongside the v6 novelty-, duplex-pair- and confidence diagnostics. The Recordings browser replays files through the current downstream detector and normal buzzer rhythm. v7 files are labelled **EXACT v7**; existing v6/v5 files remain exact downstream replays because they already contain the required pre-pair candidate data. Older v3/v4 files remain **LEGACY APPROX** because the historical broadband bug discarded block-level candidate fields that cannot be reconstructed exactly. Delete is protected by a separate YES/NO confirmation page.
 
 Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF Eye 0.7.34, the scan worker owns the persistent librtlsdr handle and closes it only after synchronous capture work has finished. The UI/service thread never closes the handle underneath an active `rtlsdr_read_sync()` call.
 
 ## Buzzer wiring
 
-RF Eye 0.7.35 uses a **TMB12A03 active buzzer**:
+RF Eye 0.7.36 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -176,7 +178,7 @@ Application-only OTA updates update `/opt/rfeye/rfeye`. Device Tree, systemd, Pl
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.7.35**.
+`VERSION` and `rfeye/config.py` identify this release as **0.7.36**.
 
 Build the OTA package with:
 

@@ -101,9 +101,11 @@ class SDRBackend:
         self._carrier_state={}; self._last_detection_time=0.
         self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}; self._artifact_tainted=set()
         self._artifact_baseline_loaded=False
+        self._artifact_comb_phase_hz=None; self._artifact_comb_support=0; self._artifact_comb_teeth=0
         self._load_artifact_baseline()
         self._mobile_temporal={}
         self.last_raw_mobile_candidates=0; self.last_post_artifact_candidates=0; self.last_broadband_kept=0
+        self.last_post_comb_candidates=0; self.last_coherent_comb_rejected=0; self.last_comb_event_teeth=0
         self.last_novelty_rejected=0; self.last_pair_rejected=0; self.last_confidence_rejected=0
         self.debug_mobile_candidates=[]
         self.last_broadband_rejected=False; self.last_comb_rejected=False
@@ -117,9 +119,12 @@ class SDRBackend:
                 self._confirm_streak=0; self._clear_streak=0; self._candidate_freq=None
                 self._carrier_state={}; self._last_detection_time=0.
                 self._artifact_sweep=0; self._artifact_samples={}; self._artifact_baseline={}; self._artifact_tainted=set()
-                self._artifact_baseline_loaded=False; self._load_artifact_baseline()
+                self._artifact_baseline_loaded=False
+                self._artifact_comb_phase_hz=None; self._artifact_comb_support=0; self._artifact_comb_teeth=0
+                self._load_artifact_baseline()
                 self._mobile_temporal={}
                 self.last_raw_mobile_candidates=0; self.last_post_artifact_candidates=0; self.last_broadband_kept=0
+                self.last_post_comb_candidates=0; self.last_coherent_comb_rejected=0; self.last_comb_event_teeth=0
                 self.last_novelty_rejected=0; self.last_pair_rejected=0; self.last_confidence_rejected=0
                 self.debug_mobile_candidates=[]
                 self.last_broadband_rejected=False; self.last_comb_rejected=False
@@ -160,6 +165,13 @@ class SDRBackend:
             'artifact_tainted_count':len(self._artifact_tainted),
             'raw_mobile_candidate_count':int(self.last_raw_mobile_candidates),
             'post_artifact_candidate_count':int(self.last_post_artifact_candidates),
+            'post_comb_candidate_count':int(self.last_post_comb_candidates),
+            'coherent_comb_rejected_count':int(self.last_coherent_comb_rejected),
+            'comb_event_teeth':int(self.last_comb_event_teeth),
+            'comb_profile_support':int(self._artifact_comb_support),
+            'comb_profile_teeth':int(self._artifact_comb_teeth),
+            'comb_profile_phase_hz':(float(self._artifact_comb_phase_hz)
+                                     if self._artifact_comb_phase_hz is not None else None),
             'broadband_kept_count':int(self.last_broadband_kept),
             'novelty_rejected_count':int(self.last_novelty_rejected),
             'pair_rejected_count':int(self.last_pair_rejected),
@@ -422,6 +434,81 @@ class SDRBackend:
             limit=max(limit,int(self.cfg.get('site_max_candidates',64)))
         return peaks[:limit],f,p,floor
 
+    def _comb_distance(self,freq_hz,phase_hz=None):
+        phase=self._artifact_comb_phase_hz if phase_hz is None else phase_hz
+        if phase is None:
+            return 1e18
+        period=max(float(self.cfg.get('artifact_comb_period_hz',400000.0)),25000.0)
+        d=(float(freq_hz)-float(phase))%period
+        return min(d,period-d)
+
+    def _update_artifact_comb_profile(self):
+        self._artifact_comb_phase_hz=None
+        self._artifact_comb_support=0
+        self._artifact_comb_teeth=0
+        fs=sorted(int(f) for f in self._artifact_baseline)
+        if not fs:
+            return False
+        period=max(float(self.cfg.get('artifact_comb_period_hz',400000.0)),25000.0)
+        half=max(float(self.cfg.get('artifact_comb_half_width_hz',50000.0)),0.0)
+        step=max(float(self.cfg.get('tetra_channel_spacing_hz',25000.0)),1.0)
+        origin=float(self.cfg.get('mobile_band_start_hz',380e6))+float(
+            self.cfg.get('tetra_raster_offset_hz',12500.0))
+        bins=max(1,int(round(period/step)))
+        best=None
+        for k in range(bins):
+            phase=origin+k*step
+            matched=[f for f in fs if self._comb_distance(f,phase)<=half]
+            teeth=len(set(int(round((f-phase)/period)) for f in matched))
+            score=(len(matched),teeth)
+            if best is None or score>best[0]:
+                best=(score,phase)
+        if best is None:
+            return False
+        support,teeth=best[0]
+        fraction=float(support)/max(1,len(fs))
+        if (support < int(self.cfg.get('artifact_comb_min_baseline_support',8)) or
+                teeth < int(self.cfg.get('artifact_comb_min_baseline_teeth',4)) or
+                fraction < float(self.cfg.get('artifact_comb_min_baseline_fraction',.45))):
+            return False
+        self._artifact_comb_phase_hz=float(best[1])
+        self._artifact_comb_support=int(support)
+        self._artifact_comb_teeth=int(teeth)
+        return True
+
+    def _reject_coherent_comb(self,peaks):
+        self.last_coherent_comb_rejected=0
+        self.last_comb_event_teeth=0
+        if self._artifact_comb_phase_hz is None or not peaks:
+            self.last_post_comb_candidates=len(peaks)
+            return peaks
+        period=max(float(self.cfg.get('artifact_comb_period_hz',400000.0)),25000.0)
+        half=max(float(self.cfg.get('artifact_comb_half_width_hz',50000.0)),0.0)
+        depmin=max(.5,float(self.cfg.get(
+            'artifact_comb_event_min_departure',
+            self.cfg.get('novelty_min_departure',1.25))))
+        min_teeth=max(2,int(self.cfg.get('artifact_comb_event_min_teeth',2)))
+        hot_teeth=set()
+        for q in peaks:
+            if (self._comb_distance(q.get('freq_hz',0))<=half and
+                    float(q.get('temporal_departure',0))>=depmin):
+                hot_teeth.add(int(round(
+                    (float(q.get('freq_hz',0))-self._artifact_comb_phase_hz)/period)))
+        self.last_comb_event_teeth=len(hot_teeth)
+        if len(hot_teeth)<min_teeth:
+            self.last_post_comb_candidates=len(peaks)
+            return peaks
+        out=[]
+        for q in peaks:
+            if self._comb_distance(q.get('freq_hz',0))<=half:
+                self.last_coherent_comb_rejected+=1
+                continue
+            out.append(q)
+        self.last_post_comb_candidates=len(out)
+        if self.last_coherent_comb_rejected:
+            self.last_comb_rejected=True
+        return out
+
     def _artifact_state_path(self):
         override=os.getenv('RFEYE_ARTIFACT_BASELINE')
         if override:return Path(override)
@@ -434,7 +521,13 @@ class SDRBackend:
             if not path.exists():return False
             data=json.loads(path.read_text())
             if data.get('schema')!='rfeye-artifact-baseline-v1':return False
-            if int(data.get('detector_profile_version',0))!=int(self.cfg.get('detector_profile_version',0)):return False
+            stored_profile=int(data.get('detector_profile_version',0))
+            current_profile=int(self.cfg.get('detector_profile_version',0))
+            # v7 changes only the downstream treatment of the already-correct
+            # v6 raster baseline. Reuse a v6 baseline once, then persist it as
+            # v7 so OTA installation has comb protection immediately.
+            upgrade_v6=(current_profile==7 and stored_profile==6)
+            if stored_profile!=current_profile and not upgrade_v6:return False
             if int(data.get('sample_rate',0))!=int(self.cfg.get('sample_rate',0)):return False
             if int(data.get('mobile_band_start_hz',0))!=int(self.cfg.get('mobile_band_start_hz',0)):return False
             if int(data.get('mobile_band_end_hz',0))!=int(self.cfg.get('mobile_band_end_hz',0)):return False
@@ -451,6 +544,9 @@ class SDRBackend:
             self._artifact_baseline=loaded
             self._artifact_sweep=max(3,int(self.cfg.get('artifact_calibration_sweeps',5)))
             self._artifact_baseline_loaded=True
+            self._update_artifact_comb_profile()
+            if upgrade_v6:
+                self._save_artifact_baseline()
             return True
         except Exception:
             return False
@@ -518,6 +614,7 @@ class SDRBackend:
                         'duty':float(np.median(a[:,1])),'span':float(np.median(a[:,2])),
                         'rf_snr':float(np.median(a[:,3])),'hits':len(hist),
                         'rf_snr_std':rstd,'duty_std':dstd,'span_std':sstd}
+                self._update_artifact_comb_profile()
                 self._save_artifact_baseline()
 
             out=[]
@@ -671,6 +768,10 @@ class SDRBackend:
                                        float(q.get('baseline_departure',0)),
                                        float(q.get('burst_quality',0))),reverse=True)
             self.debug_mobile_candidates=[dict(q) for q in dbg[:12]]
+            # A learned local hardware comb can produce matching +10 MHz
+            # structures in both scans. Suppress only coherent multi-tooth
+            # comb motion; isolated carriers remain eligible.
+            m=self._reject_coherent_comb(m)
             m=self._apply_broadband_guard(m,limit)
             # Mobile/uplink scanning stays on the fast path. Downlink context is
             # refreshed periodically and kept in memory; forcing a second 5 MHz

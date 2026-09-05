@@ -58,7 +58,7 @@ except Exception:
     pass
 
 DEFAULTS = {
-    "detector_profile_version": 6,
+    "detector_profile_version": 7,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -88,6 +88,13 @@ DEFAULTS = {
     "artifact_max_span_std_db": 2.5,
     "artifact_baseline_persist": True,
     "artifact_baseline_max_age_days": 30.0,
+    "artifact_comb_period_hz": 400_000.0,
+    "artifact_comb_half_width_hz": 50_000.0,
+    "artifact_comb_min_baseline_support": 8,
+    "artifact_comb_min_baseline_teeth": 4,
+    "artifact_comb_min_baseline_fraction": 0.45,
+    "artifact_comb_event_min_departure": 1.25,
+    "artifact_comb_event_min_teeth": 2,
     "temporal_baseline_alpha": 0.08,
     "temporal_state_max_age_s": 30.0,
     "temporal_rf_snr_scale_db": 4.0,
@@ -155,7 +162,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.35",
+    "app_version": "0.7.36",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -189,11 +196,10 @@ def load_config():
     cfg["audio_mode"] = "adaptive"
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
-    # Detector profile v6 fixes the TETRA +12.5 kHz carrier-key bug and
-    # requires material temporal novelty plus fresh/verified duplex context
-    # before a mobile candidate can confirm. This intentionally invalidates
-    # the old artifact baseline because v5 could merge adjacent carriers.
-    if int(saved.get("detector_profile_version", 0) or 0) < 6:
+    # Detector profile v7 keeps the corrected +12.5 kHz TETRA raster and
+    # v6 novelty/duplex gates, then adds a learned coherent-comb rejector for
+    # the Pi/RTL-SDR hardware pattern seen during real driving tests.
+    if int(saved.get("detector_profile_version", 0) or 0) < 7:
         for key in (
             "mobile_capture_ms", "site_capture_ms", "site_scan_interval",
             "carrier_memory_s", "confirm_window_s", "alert_hold_s",
@@ -203,6 +209,10 @@ def load_config():
             "artifact_max_rf_snr_std_db", "artifact_max_duty_std",
             "artifact_max_span_std_db", "artifact_baseline_persist",
             "artifact_baseline_max_age_days",
+            "artifact_comb_period_hz", "artifact_comb_half_width_hz",
+            "artifact_comb_min_baseline_support", "artifact_comb_min_baseline_teeth",
+            "artifact_comb_min_baseline_fraction", "artifact_comb_event_min_departure",
+            "artifact_comb_event_min_teeth",
             "temporal_baseline_alpha", "temporal_state_max_age_s",
             "temporal_rf_snr_scale_db", "temporal_duty_scale",
             "temporal_span_scale_db", "broadband_temporal_min_departure",
@@ -215,7 +225,7 @@ def load_config():
             "require_current_duplex_pair",
         ):
             cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 6
+    cfg["detector_profile_version"] = 7
     for obsolete in (
         "threshold_db", "threshold_min_db", "threshold_max_db",
         "threshold_step_db", "threshold_soft_margin_db", "min_burst_span_db",

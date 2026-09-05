@@ -46,6 +46,8 @@ def schema_mode(data):
     samples=data.get("samples") or []
     has_debug=any((s.get("detector") or {}).get("debug_mobile_candidates") is not None
                   for s in samples)
+    if "v7" in schema and has_debug:
+        return "EXACT v7"
     if "v6" in schema and has_debug:
         return "EXACT v6"
     if "v5" in schema and has_debug:
@@ -138,6 +140,11 @@ class ReplayEngine:
         site=[dict(q) for q in (d.get("site_peaks") or [])]
         self.det._remember_sites(site,t)
         candidates=self._v5_candidates(d) if self.mode.startswith("EXACT") else self._legacy_candidates(sample)
+        # Replays use the same learned coherent-comb guard as live scanning.
+        # Exact v5/v6/v7 recordings contain the pre-pair candidates required
+        # for this. Legacy candidates are also safe to pass through because a
+        # single isolated carrier is never rejected by the comb guard.
+        candidates=self.det._reject_coherent_comb(candidates)
 
         require=bool(self.cfg.get("require_duplex_pair",True))
         require_now=bool(self.cfg.get("require_current_duplex_pair",False))

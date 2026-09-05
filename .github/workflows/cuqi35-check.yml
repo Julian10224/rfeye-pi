@@ -1,4 +1,4 @@
-name: RF Eye 0.7.35 appliance checks
+name: RF Eye 0.7.36 appliance checks
 
 on:
   push:
@@ -23,8 +23,8 @@ jobs:
         run: PYTHONPATH=rfeye python3 scripts/detector-selftest.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.7.35"
-          grep -q '"app_version": "0.7.35"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.7.36"
+          grep -q '"app_version": "0.7.36"' rfeye/config.py
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
           grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
@@ -43,8 +43,11 @@ jobs:
           grep -q 'def _annotate_mobile_temporal' rfeye/sdr_backend.py
           grep -q 'm=self._apply_broadband_guard(m,limit)' rfeye/sdr_backend.py
           grep -q 'debug_mobile_candidates' rfeye/compact_ui_controls.py
-          grep -q 'rfeye-rf-series-v6' rfeye/compact_ui_controls.py
+          grep -q 'rfeye-rf-series-v7' rfeye/compact_ui_controls.py
           grep -q 'def _carrier_key' rfeye/sdr_backend.py
+          grep -q 'def _update_artifact_comb_profile' rfeye/sdr_backend.py
+          grep -q 'def _reject_coherent_comb' rfeye/sdr_backend.py
+          grep -q 'coherent_comb_rejected_count' rfeye/compact_ui_controls.py
           grep -q 'novelty_rejected_count' rfeye/sdr_backend.py
           grep -q 'pair_rejected_count' rfeye/sdr_backend.py
           grep -q 'confidence_rejected_count' rfeye/sdr_backend.py
@@ -81,15 +84,22 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.7.35'
+          assert c['app_version']=='0.7.36'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['detector_profile_version']==6
+          assert c['detector_profile_version']==7
           assert c['artifact_baseline_persist'] is True
           assert c['artifact_max_rf_snr_std_db']==2.0
           assert c['artifact_max_duty_std']==0.08
           assert c['artifact_max_span_std_db']==2.5
+          assert c['artifact_comb_period_hz']==400000.0
+          assert c['artifact_comb_half_width_hz']==50000.0
+          assert c['artifact_comb_min_baseline_support']==8
+          assert c['artifact_comb_min_baseline_teeth']==4
+          assert c['artifact_comb_min_baseline_fraction']==0.45
+          assert c['artifact_comb_event_min_departure']==1.25
+          assert c['artifact_comb_event_min_teeth']==2
           assert c['temporal_baseline_alpha']==0.08
           assert c['temporal_rf_snr_scale_db']==4.0
           assert c['temporal_duty_scale']==0.10
@@ -126,5 +136,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.35"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.7.36"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"
