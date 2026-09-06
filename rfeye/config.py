@@ -117,10 +117,11 @@ DEFAULTS = {
     "duplex_split_hz": 10_000_000.0,
     "site_lock_hits": 3,
     "site_unlock_misses": 4,
-    "site_lock_stale_s": 3600.0,
+    "site_lock_stale_s": 600.0,
     "site_lock_max_age_days": 21.0,
     "site_forget_s": 1800.0,
-    "site_reverify_s": 300.0,
+    "site_reverify_s": 60.0,
+    "site_lost_rounds": 3,
     "site_state_persist": True,
 
     # Uplink alarm smoothing. Everything reaching this has already passed the
@@ -170,7 +171,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.3",
+    "app_version": "0.9.4",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

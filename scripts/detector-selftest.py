@@ -66,6 +66,12 @@ class FakeAir:
         self.snr_db = float(snr_db)
         self.seed = 0
 
+    def silence(self):
+        """Everything off air, as if the antenna had been unscrewed."""
+        self.downlinks = []
+        self.uplinks = []
+        self.interferers = []
+
     def _emitters(self):
         for f in self.downlinks:
             yield f, "downlink"
@@ -132,9 +138,11 @@ def make_backend(air, statefile, **overrides):
     return b
 
 
-def run(backend, cycles):
+def run(backend, cycles, at=None):
     log = []
     for i in range(int(cycles)):
+        if at and i in at:
+            at[i]()
         ok = backend._scan_cycle()
         s = backend.snapshot()
         log.append(s)
@@ -147,12 +155,12 @@ def run(backend, cycles):
     return log
 
 
-def scenario(name, air, cycles=14, **overrides):
+def scenario(name, air, cycles=14, at=None, **overrides):
     print(f"\n{name}")
     with tempfile.TemporaryDirectory() as d:
         b = make_backend(air, os.path.join(d, "sites.json"), **overrides)
         try:
-            return run(b, cycles)
+            return run(b, cycles, at=at)
         finally:
             b.running = False
 
@@ -262,8 +270,32 @@ def main():
                             - (TRAFFIC - 10_000_000.0)) < 1000.0,
           ("%.4f MHz" % (hit["peaks"][0]["freq_hz"] / 1e6)) if hit else "no alert")
 
+    # 9 -- the antenna comes off. A locked site whose carriers all stop
+    #      answering is not a quiet site, it is a receiver that has lost it.
+    #      Reporting a locked network in that state tells the user the device
+    #      is watching when it is deaf, which is worse than saying nothing.
+    air = FakeAir(downlinks=DOWNLINKS)
+    log = scenario("9. antenna removed after the network is locked",
+                   air, cycles=34, at={12: air.silence},
+                   site_reverify_s=0.0, site_lost_rounds=3)
+    before = [s for s in log[:12] if s["site_locked_count"]]
+    after = log[12:]
+    check("was locked before the antenna came off", bool(before),
+          "max locked = %d" % max((s["site_locked_count"] for s in log[:12]),
+                                  default=0))
+    cleared = next((i for i, s in enumerate(after)
+                    if s["site_locked_count"] == 0), None)
+    check("drops the lock once nothing answers", cleared is not None,
+          "still locked after %d cycles" % len(after) if cleared is None
+          else "cleared %d cycles after going silent" % (cleared + 1))
+    check("goes back to SEARCHING, not a stale LOCKED",
+          after[-1]["detector_state"] == "SEARCHING",
+          after[-1]["detector_state"])
+    check("never alerts while deaf",
+          not any(s["mobile_confirmed"] for s in after))
+
     # Dwell planning and raster maths, independent of any capture.
-    print("\n9. planner and raster")
+    print("\n10. planner and raster")
     centre, members = plan_dwell(UPLINKS, 288_000.0)
     check("one dwell covers a whole site's uplink list", len(members) == len(UPLINKS),
           f"{len(members)}/{len(UPLINKS)} channels")

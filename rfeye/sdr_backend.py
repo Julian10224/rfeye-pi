@@ -553,23 +553,26 @@ class SDRBackend:
         # test at least once, so they are the cheapest route to a lock.
         priority=[c['freq_hz'] for c in self.sites.candidates(now)]
 
-        if not self._site_queue:
-            # Only once the band pass is finished does re-proving a locked
-            # carrier get a turn. Doing it sooner starves the pass: the same
-            # locked carriers anchor every dwell and the rest of the band is
-            # never reached, so a site's other carriers stay undiscovered and
-            # their uplink channels stay unwatched.
-            if locked and now-self._site_verify_at>=max(30.,float(
-                    self.cfg.get('site_reverify_s',300.0))):
-                priority.insert(0,locked[self._survey_idx%len(locked)]['freq_hz'])
-                self._survey_idx+=1
-            if not priority:
-                if locked:
-                    return []
-                interval=max(5.,float(self.cfg.get('survey_idle_interval_s',15.0)))
-                if self._survey_at and now-self._survey_at<interval:
-                    return []
-                self._refill_site_queue(now)
+        # Re-proving a locked carrier is on its own timer, not queued behind
+        # the band pass. Waiting for the pass to finish meant a locked site
+        # went unchecked for the hundreds of rounds a full sweep takes, so a
+        # receiver that had stopped hearing anything -- an unplugged antenna,
+        # a drive out of coverage -- kept reporting a locked network. The
+        # timer keeps it rare enough not to starve the pass, which is what
+        # putting it behind the queue was trying to achieve.
+        reverify=max(0.,float(self.cfg.get('site_reverify_s',60.0)))
+        if locked and now-self._site_verify_at>=reverify:
+            priority.insert(0,locked[self._survey_idx%len(locked)]['freq_hz'])
+            self._survey_idx+=1
+            self._site_verify_at=now
+
+        if not priority and not self._site_queue:
+            if locked:
+                return []
+            interval=max(5.,float(self.cfg.get('survey_idle_interval_s',15.0)))
+            if self._survey_at and now-self._survey_at<interval:
+                return []
+            self._refill_site_queue(now)
 
         # The queue rides along behind the priority list, so a dwell aimed at
         # a candidate also sweeps up whichever queued neighbours fit the same
@@ -584,12 +587,21 @@ class SDRBackend:
             if k not in seen:
                 seen.add(k); ordered.append(float(k))
 
+        locked_keys={int(round(x['freq_hz'])) for x in locked}
         results=self._verify(ordered,'DOWNLINK')
         for r in results:
             # A carrier that failed only because there was nothing to hear is
             # idle, not disproved -- traffic carriers are idle most of the time.
             silent=(not r.ok and r.failed()==['snr'])
             self.sites.observe(r.freq_hz,r.ok,r.quality,now,silent=silent)
+
+        # Only a round that actually re-tested a locked carrier can say
+        # anything about whether the site is still audible. A band-pass dwell
+        # across empty spectrum proves nothing and must not count.
+        retested=[r for r in results if int(round(r.freq_hz)) in locked_keys]
+        if retested:
+            if self.sites.note_round(any(r.ok for r in retested),now):
+                self.alarm.reset()
 
         covered={int(round(x)) for x in self.dwell_channels}
         if covered:
@@ -627,14 +639,13 @@ class SDRBackend:
                 # uplink channels unwatched. It runs on alternate cycles so
                 # the uplink watch keeps priority.
                 self._alt_cycle=not self._alt_cycle
-                if self._site_queue:
-                    if self._alt_cycle:
-                        site_results=self._site_work(now)
-                        self._site_verify_at=now
-                elif now-self._site_verify_at>=max(30.,float(
-                        self.cfg.get('site_reverify_s',300.0))):
+                # Alternate cycles carry the band pass; a due re-proof gets a
+                # turn whenever it comes round. _site_work owns the timer, so
+                # a pass dwell can no longer postpone the next re-proof.
+                due=(now-self._site_verify_at
+                     >= max(0.,float(self.cfg.get('site_reverify_s',60.0))))
+                if (self._site_queue and self._alt_cycle) or due:
                     site_results=self._site_work(now)
-                    self._site_verify_at=now
             else:
                 site_results=self._site_work(now)
 

@@ -73,7 +73,41 @@ class SiteRegistry:
         self.cfg = cfg
         self.entries = {}
         self.loaded_from_disk = False
+        # Consecutive rounds in which a locked carrier was re-tested and none
+        # of them verified. This is the difference between "that carrier is
+        # idle" and "this receiver has stopped hearing anything", which no
+        # single-carrier measurement can tell apart.
+        self.lost_rounds = 0
         self._load()
+
+    def network_alive(self):
+        """Has anything verified recently, anywhere on the locked site?"""
+        return self.lost_rounds == 0
+
+    def note_round(self, any_locked_ok, now=None):
+        """Record the outcome of a round that re-tested locked carriers.
+
+        A base station's main carrier is continuous by definition, so a locked
+        site that produces nothing at all is not a quiet site -- it is a
+        receiver that has lost it. Without this, pulling the antenna off left
+        the display reporting a locked network for the best part of an hour,
+        because every channel then failed only on SNR and each carrier's
+        silence was individually excusable.
+        """
+        now = time.time() if now is None else float(now)
+        if any_locked_ok:
+            self.lost_rounds = 0
+            return False
+        self.lost_rounds += 1
+        if self.lost_rounds < max(1, int(self.cfg.get('site_lost_rounds', 3))):
+            return False
+        # The site is gone. Drop the locks rather than letting them age out.
+        for e in self.entries.values():
+            e['hits'] = 0
+            e['misses'] = 0
+        self.lost_rounds = 0
+        self.save()
+        return True
 
     # -- persistence -------------------------------------------------------
     def _path(self):
@@ -143,8 +177,12 @@ class SiteRegistry:
         ``silent`` marks a channel that simply had nothing on it this time.
         For a discontinuous traffic carrier that is the normal idle state, and
         counting it against a carrier that has already proved itself would
-        slowly unlock exactly the carriers a busy site puts calls on. Absence
-        of transmission is not evidence that a carrier is not real.
+        slowly unlock exactly the carriers a busy site puts calls on.
+
+        That excuse only holds while the receiver is demonstrably still
+        hearing the site. Once nothing verifies anywhere, silence stops being
+        evidence of an idle carrier and becomes evidence of a deaf receiver,
+        so the exemption is withdrawn -- see ``note_round``.
         """
         now = time.time() if now is None else float(now)
         f = int(round(float(freq_hz)))
@@ -157,22 +195,24 @@ class SiteRegistry:
             self.entries[f] = e
         need = max(2, int(self.cfg.get('site_lock_hits', 3)))
         if ok:
-            e['hits'] = min(int(e['hits']) + 1, need * 4)
+            # Capped just above the lock threshold. A deep reserve of hits
+            # only means a carrier that has genuinely gone takes proportionally
+            # longer to admit it.
+            e['hits'] = min(int(e['hits']) + 1, need + 1)
             e['misses'] = 0
             e['last_ok'] = now
             e['quality'] = float(e['quality'] * 0.6 + float(quality) * 0.4)
-        elif silent and int(e['hits']) > 0:
-            # Known carrier, nothing on air: no information either way.
+        elif silent and int(e['hits']) > 0 and self.network_alive():
+            # Known carrier, nothing on air, and the site is still audible
+            # elsewhere: no information either way.
             return e
         else:
             e['misses'] = int(e['misses']) + 1
             drop = max(1, int(self.cfg.get('site_unlock_misses', 4)))
             if e['misses'] >= drop:
-                # Decay rather than delete: a carrier that verified before is
-                # worth re-checking sooner than a fresh one.
-                e['hits'] = max(0, int(e['hits']) - 1)
+                e['hits'] = 0
                 e['misses'] = 0
-                if e['hits'] <= 0 and now - float(e['last_ok']) > max(
+                if now - float(e['last_ok']) > max(
                         60.0, float(self.cfg.get('site_forget_s', 1800.0))):
                     self.entries.pop(f, None)
                     return None

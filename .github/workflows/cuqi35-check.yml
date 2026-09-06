@@ -1,4 +1,4 @@
-name: RF Eye 0.9.3 appliance checks
+name: RF Eye 0.9.4 appliance checks
 
 on:
   push:
@@ -66,6 +66,11 @@ jobs:
           grep -q 'class UplinkAlarm' rfeye/tetra_detector.py
           grep -q 'def plan_dwell' rfeye/tetra_detector.py
           grep -q 'def _refill_site_queue' rfeye/sdr_backend.py
+          # A lock must keep proving itself: without this a deaf
+          # receiver kept reporting a locked network for an hour.
+          grep -q 'def note_round' rfeye/tetra_detector.py
+          grep -q 'def network_alive' rfeye/tetra_detector.py
+          grep -q 'self.sites.note_round' rfeye/sdr_backend.py
           grep -q 'rfeye-rf-series-v8' rfeye/compact_ui_controls.py
           # The USB recovery discipline of 0.9.1. Resetting on any error text
           # containing 'read failed' also reset when the dongle was simply
@@ -151,7 +156,9 @@ jobs:
           assert c['duplex_split_hz']==10000000.0
           assert c['site_lock_hits']==3
           assert c['site_unlock_misses']==4
-          assert c['site_reverify_s']==300.0
+          assert c['site_reverify_s']==60.0
+          assert c['site_lost_rounds']==3
+          assert c['site_lock_stale_s']==600.0
           assert c['site_state_persist'] is True
           assert c['survey_min_snr_db']==6.0
           assert c['survey_max_candidates']==12
