@@ -100,6 +100,12 @@ class FakeAir:
                 parts.append((sim.tetra_carrier(dur, sr, role="UPLINK",
                                                 seed=self.seed + 23,
                                                 freq_offset_hz=off), 1.0))
+            elif kind == "traffic_downlink":
+                # A secondary carrier: real TETRA, but discontinuous.
+                parts.append((sim.tetra_carrier(dur, sr, role="UPLINK",
+                                                seed=self.seed + 29,
+                                                slot_pattern=(0, 2),
+                                                freq_offset_hz=off), 1.0))
             elif kind == "gated_noise":
                 parts.append((sim.gated_noise(dur, sr, 22_000.0, 0.0142, 0.0567,
                                               off, self.seed + 31), 1.0))
@@ -232,8 +238,32 @@ def main():
           "queue %d -> %d" % (log[2]["site_queue_remaining"],
                               log[-1]["site_queue_remaining"]))
 
+    # 8 -- ETSI only requires the *main* carrier to be continuous. A site's
+    #      secondary traffic carriers are discontinuous, and once a call moves
+    #      to one, the handset transmits on that carrier's uplink partner. If
+    #      only continuous downlinks could lock, those calls would never be
+    #      watched at all.
+    MAIN = 391_212_500.0
+    TRAFFIC = 391_437_500.0
+    log = scenario("8. call moved to a discontinuous traffic carrier",
+                   FakeAir(downlinks=[MAIN],
+                           uplinks=[TRAFFIC - 10_000_000.0],
+                           interferers=[(TRAFFIC, "traffic_downlink")]),
+                   cycles=26)
+    locked_freqs = sorted({round(x["freq_hz"]) for s in log for x in s["site_peaks"]})
+    check("locks the discontinuous traffic carrier too",
+          round(TRAFFIC) in locked_freqs,
+          "locked: " + ", ".join("%.4f" % (f / 1e6) for f in locked_freqs))
+    check("alerts on the traffic carrier's uplink",
+          any(s["mobile_confirmed"] for s in log))
+    hit = next((s for s in log if s["mobile_confirmed"] and s["peaks"]), None)
+    check("alert names the traffic uplink channel",
+          bool(hit) and abs(hit["peaks"][0]["freq_hz"]
+                            - (TRAFFIC - 10_000_000.0)) < 1000.0,
+          ("%.4f MHz" % (hit["peaks"][0]["freq_hz"] / 1e6)) if hit else "no alert")
+
     # Dwell planning and raster maths, independent of any capture.
-    print("\n8. planner and raster")
+    print("\n9. planner and raster")
     centre, members = plan_dwell(UPLINKS, 288_000.0)
     check("one dwell covers a whole site's uplink list", len(members) == len(UPLINKS),
           f"{len(members)}/{len(UPLINKS)} channels")

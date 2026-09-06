@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.9.0",
+  "app_version": "0.9.1",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -29,7 +29,7 @@
   "mobile_percentile": 95.0,
   "muted": false,
   "phy_decimation": 8,
-  "phy_downlink_min_duty": 0.8,
+  "phy_downlink_min_duty": 0.15,
   "phy_dwell_log2": 18,
   "phy_max_centre_error_hz": 4000.0,
   "phy_max_flatness_db": 14.0,
@@ -99,5 +99,6 @@
   "uplink_alert_hold_s": 12.0,
   "uplink_confirm_dwells": 2,
   "uplink_confirm_visits": 4,
-  "uplink_state_max_age_s": 90.0
+  "uplink_state_max_age_s": 90.0,
+  "usb_reset_max_attempts": 3
 }

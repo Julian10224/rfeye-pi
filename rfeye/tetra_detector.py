@@ -137,8 +137,15 @@ class SiteRegistry:
             pass
 
     # -- updates -----------------------------------------------------------
-    def observe(self, freq_hz, ok, quality=0.0, now=None):
-        """Record one verification attempt on a downlink carrier."""
+    def observe(self, freq_hz, ok, quality=0.0, now=None, silent=False):
+        """Record one verification attempt on a downlink carrier.
+
+        ``silent`` marks a channel that simply had nothing on it this time.
+        For a discontinuous traffic carrier that is the normal idle state, and
+        counting it against a carrier that has already proved itself would
+        slowly unlock exactly the carriers a busy site puts calls on. Absence
+        of transmission is not evidence that a carrier is not real.
+        """
         now = time.time() if now is None else float(now)
         f = int(round(float(freq_hz)))
         e = self.entries.get(f)
@@ -154,6 +161,9 @@ class SiteRegistry:
             e['misses'] = 0
             e['last_ok'] = now
             e['quality'] = float(e['quality'] * 0.6 + float(quality) * 0.4)
+        elif silent and int(e['hits']) > 0:
+            # Known carrier, nothing on air: no information either way.
+            return e
         else:
             e['misses'] = int(e['misses']) + 1
             drop = max(1, int(self.cfg.get('site_unlock_misses', 4)))

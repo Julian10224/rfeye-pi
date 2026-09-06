@@ -1,4 +1,4 @@
-name: RF Eye 0.9.0 appliance checks
+name: RF Eye 0.9.1 appliance checks
 
 on:
   push:
@@ -28,8 +28,8 @@ jobs:
         run: PYTHONPATH=rfeye python3 scripts/detector-selftest.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.9.0"
-          grep -q '"app_version": "0.9.0"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.9.1"
+          grep -q '"app_version": "0.9.1"' rfeye/config.py
           # The release identity lives in VERSION, config.py, the reference
           # config, the manifest and the README. It has drifted before, and a
           # stale README version is what the settings screen quotes back at
@@ -102,7 +102,7 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.9.0'
+          assert c['app_version']=='0.9.1'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
@@ -124,7 +124,7 @@ jobs:
           assert c['phy_min_dqpsk_m']==0.20
           assert c['phy_min_dqpsk_phase_spread']==0.50
           assert c['phy_min_dqpsk_selectivity']==1.6
-          assert c['phy_downlink_min_duty']==0.80
+          assert c['phy_downlink_min_duty']==0.15
           assert c['phy_uplink_min_duty']==0.04
           assert c['phy_uplink_max_duty']==0.85
           assert c['phy_uplink_min_frame_ratio']==3.0
@@ -182,5 +182,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.9.0"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.9.1"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"

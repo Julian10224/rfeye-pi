@@ -1,6 +1,6 @@
-# RF Eye 0.9.0 for Raspberry Pi
+# RF Eye 0.9.1 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.0 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.1 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.0 appliance path:
+The installer reproduces the working 0.9.1 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.0
+## User interface in 0.9.1
 
 The compact profile contains:
 
@@ -204,6 +204,26 @@ gap in a contiguous run to hide in. The dwell planner therefore parks the
 tuner clear of the highest member of the group, which also bounds a dwell to
 the four channels that still fit inside the usable window.
 
+### Main carriers and traffic carriers
+
+ETSI EN 300 392-2 requires only the **main carrier** to be transmitted
+continuously; it is what mobiles synchronise to. A site's **secondary traffic
+carriers are discontinuous**, and timeshared control-channel modes exist as
+well.
+
+Up to 0.9.0 a downlink had to be transmitting at least 80% of the time to
+lock. That reliably found the main carrier, but nothing else -- and since the
+uplink watch list is derived from locked downlinks, every call that moved to a
+traffic carrier went unwatched. On a busy site that is where the traffic is.
+
+The duty floor is now 0.15, because in 390-395 MHz *only base stations
+transmit*: a carrier that has already passed the full waveform test there is a
+base station whatever its duty cycle. Duty is still measured, and a carrier
+above 80% is flagged as the continuous main carrier, but it is diagnostic
+rather than a gate. A known carrier that is simply idle during a re-check is
+recorded as "no information" instead of counting against it, so an idle
+traffic carrier does not slowly unlock itself.
+
 **Stage 2 -- uplink watch.** TETRA duplex spacing in this band is 10 MHz, so
 each verified downlink names exactly one uplink channel where handsets on that
 site transmit: a verified downlink at 391.2375 MHz means handsets transmit at
@@ -313,7 +333,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.0 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.1 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -342,7 +362,7 @@ Application-only OTA updates update `/opt/rfeye/rfeye`. Device Tree, systemd, Pl
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.0**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.1**.
 
 Build the OTA package with:
 
@@ -351,6 +371,32 @@ Build the OTA package with:
 ```
 
 The build normalizes archive metadata so unchanged source produces the same ZIP SHA-256 and compiles every shipped Python runtime module. GitHub Actions rebuilds the `main` manifest/ZIP after a release commit and runs syntax, detector, headless compact-App/UI, updater/rollback, startup-snapshot and deterministic-release checks.
+
+## Supply voltage
+
+A Raspberry Pi that browns out and an RTL-SDR that has failed look identical
+on screen, and they need completely different fixes. When the Pi reports
+under-voltage the display says **USB POWER TOO LOW** rather than
+`SDR NOT CONNECTED`, and the debug page carries a `Supply` row.
+
+This matters more than it sounds. A USB reset is the right response to a
+dongle that is attached but has stopped answering, and the wrong response to
+one that is browning out: forcing re-enumeration during a supply sag stops the
+device coming back at all. On the reference unit that turned a momentary dip
+into a dongle that stayed gone until the Pi was rebooted. RF Eye now resets
+only a device that is actually present on the USB bus, backs off between
+attempts and gives up after three, clearing the counter as soon as a scan
+succeeds.
+
+If the display shows this, check the supply before anything else:
+
+```bash
+vcgencmd get_throttled
+```
+
+`0x0` is healthy. Bit 0 set means under-voltage right now; bit 16 means it has
+happened since boot. An RTL-SDR draws around 300 mA, so a Pi 3 B+ needs a real
+5 V / 3 A supply with a short, thick cable, or the dongle on a powered hub.
 
 ## Diagnostics
 

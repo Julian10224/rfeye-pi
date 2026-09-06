@@ -36,6 +36,8 @@ only unnecessary but harmful: each one could also suppress a genuine
 detection.
 """
 import math, shutil, subprocess, threading, time, ctypes, ctypes.util
+from pathlib import Path
+
 import numpy as np
 
 import tetra_phy
@@ -154,6 +156,8 @@ class SDRBackend:
         self.noise_floor_db=-100.; self.last_update=0.; self.demo_active=False
         self._demo_forced=bool(cfg.get('demo_mode',False))
         self.last_good_scan=0.; self.scan_failures=0; self.last_usb_reset=0.
+        self._usb_resets=0; self._usb_backoff=0.
+        self._power_checked=0.; self._power_flag=''
         self.sdr=None; self.sdr_path='UNOPENED'
         self.last_cycle_ms=0.; self.last_survey_ms=0.; self.last_dwell_ms=0.
         self.last_verify_ms=0.; self.last_capture_ms=0.; self.last_scan_windows=0
@@ -254,13 +258,82 @@ class SDRBackend:
                 'site_scan_ms':float(self.last_survey_ms),
                 'scan_windows':int(self.last_scan_windows),
                 'sdr_path':str(self.sdr_path),
+                'power_warning':str(self._power_flag),
             }
 
     # -- SDR plumbing ------------------------------------------------------
-    def _recover_sdr_usb(self):
+    def _sdr_present(self):
+        """Is the RTL-SDR actually enumerated on the USB bus right now?"""
+        try:
+            for vid in Path('/sys/bus/usb/devices').glob('*/idVendor'):
+                if vid.read_text().strip().lower() != '0bda':
+                    continue
+                pid = vid.parent / 'idProduct'
+                if pid.exists() and pid.read_text().strip().lower() == '2838':
+                    return True
+        except Exception:
+            # If the USB tree cannot be read, do not let this block recovery.
+            return True
+        return False
+
+    def _power_warning(self):
+        """Report a Pi supply problem, cached because vcgencmd is not free.
+
+        This exists because a sagging 5 V rail and a broken SDR look identical
+        on screen but need completely different fixes. On the reference unit an
+        under-voltage dip dropped the dongle off the USB bus entirely, and
+        without this the display simply said the SDR was not connected.
+        """
         now=time.time()
-        if now-self.last_usb_reset<5: return False
-        self.last_usb_reset=now; self._close_direct_sdr()
+        if now-self._power_checked<10.0:
+            return self._power_flag
+        self._power_checked=now
+        self._power_flag=''
+        exe=shutil.which('vcgencmd')
+        if not exe:
+            return ''
+        try:
+            cp=subprocess.run([exe,'get_throttled'],capture_output=True,
+                              text=True,timeout=3)
+            bits=int(cp.stdout.strip().split('=')[-1],16)
+            if bits & 0x1:
+                self._power_flag='UNDER-VOLTAGE'
+            elif bits & 0x10000:
+                self._power_flag='UNDER-VOLTAGE EARLIER'
+        except Exception:
+            pass
+        return self._power_flag
+
+    def _recover_sdr_usb(self):
+        """Force-re-enumerate a wedged RTL-SDR -- and only a wedged one.
+
+        A USB reset is a blunt instrument, and using it as a general-purpose
+        error response makes things worse. Two rules follow from watching it
+        misfire on real hardware:
+
+        Never reset a device that is not on the bus. When ``rtlsdr_open``
+        fails there is nothing to reset, and hammering the port every few
+        seconds stops a device that is trying to re-enumerate from ever
+        finishing. That is how a momentary supply dip turned into a dongle
+        that stayed gone until the Pi was rebooted.
+
+        Back off, and give up. Repeated resets that do not help are not worth
+        the disruption they cause; the counter clears as soon as a scan
+        succeeds again.
+        """
+        now=time.time()
+        if now-self.last_usb_reset < max(5.0,self._usb_backoff):
+            return False
+        if not self._sdr_present():
+            # Absent, not wedged. Wait for it to come back on its own.
+            self.last_usb_reset=now
+            return False
+        if self._usb_resets >= max(1,int(self.cfg.get('usb_reset_max_attempts',3))):
+            return False
+        self.last_usb_reset=now
+        self._usb_resets+=1
+        self._usb_backoff=min(120.0,15.0*(2**(self._usb_resets-1)))
+        self._close_direct_sdr()
         exe=shutil.which('usbreset')
         if not exe: return False
         try:
@@ -513,7 +586,10 @@ class SDRBackend:
 
         results=self._verify(ordered,'DOWNLINK')
         for r in results:
-            self.sites.observe(r.freq_hz,r.ok,r.quality,now)
+            # A carrier that failed only because there was nothing to hear is
+            # idle, not disproved -- traffic carriers are idle most of the time.
+            silent=(not r.ok and r.failed()==['snr'])
+            self.sites.observe(r.freq_hz,r.ok,r.quality,now,silent=silent)
 
         covered={int(round(x)) for x in self.dwell_channels}
         if covered:
@@ -611,12 +687,22 @@ class SDRBackend:
                     self.noise_floor_db=float(np.percentile(sd,40))
                 self.last_update=now; self.status='LIVE'; self.error=''
                 self.demo_active=False; self.last_good_scan=now; self.scan_failures=0
+                self._usb_resets=0; self._usb_backoff=0.
                 self.last_cycle_ms=(time.perf_counter()-t0)*1000.
             return True
         except Exception as e:
             err=str(e)
-            if 'timeout' in err.lower() or 'read failed' in err.lower():
+            low=err.lower()
+            # Only a device that is present but has stopped answering is worth
+            # resetting. 'open failed' means it is not on the bus at all, and
+            # every _samples() failure is wrapped as 'read failed', so matching
+            # that text resets on absence too -- which is precisely what kept
+            # the dongle from coming back.
+            if ('timeout' in low or 'short read' in low) and 'open failed' not in low:
                 self._recover_sdr_usb()
+            power=self._power_warning()
+            if power:
+                err=power+': '+err
             with self.lock:
                 self.scan_failures+=1
                 recent=bool(self.last_good_scan and time.time()-self.last_good_scan<8)

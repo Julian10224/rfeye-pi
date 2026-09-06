@@ -31,6 +31,10 @@ def _network_line(snap, status):
     if status=="DEMO":
         return "SDR DEMO",BLUE_BRIGHT
     if status!="LIVE":
+        # A sagging 5 V rail and a broken dongle look identical on screen but
+        # need completely different fixes, so say which one it is.
+        if snap.get("power_warning"):
+            return "USB POWER TOO LOW",RED
         return "SDR NOT CONNECTED",RED
     state=str(snap.get("detector_state","SEARCHING"))
     if state=="ALERT":
@@ -69,7 +73,8 @@ def draw_main(app, snap):
             app._text(f'{shown/1e6:.3f}',x+40,322,app.font_s,(132,184,210),center=True)
             app._text("MHz",x+40,342,app.font_s,DIM,center=True)
     lv=float(snap.get("mobile_level",0.0))
-    if status not in ("LIVE","DEMO"): state,col="NO SDR",RED
+    if status not in ("LIVE","DEMO"):
+        state,col=("POWER",RED) if snap.get("power_warning") else ("NO SDR",RED)
     elif status=="LIVE" and not snap.get("network_locked") and lv<=0.15:
         state,col="NO NET",BLUE_BRIGHT
     elif lv>0.72: state,col="HIGH",RED

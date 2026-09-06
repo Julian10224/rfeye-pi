@@ -39,7 +39,7 @@ class FakeBackend:
             "site_state_loaded":True,"watch_freqs":[381237500.0],
             "dwell_centre_hz":381287500.0,"dwell_role":"UPLINK",
             "survey_shortlist":[],"phy":[],
-            "sdr_path":"TEST",
+            "sdr_path":"TEST","power_warning":"",
         }
 
 

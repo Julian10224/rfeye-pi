@@ -71,6 +71,14 @@ def positives():
     # Two slots per frame, e.g. a higher rate bearer.
     _run("uplink TETRA 2 slots 20 dB",
          _tetra("UPLINK", 20, seed=41, slot_pattern=(0, 2)), "UPLINK", True)
+    # A secondary traffic carrier is discontinuous: ETSI only requires the
+    # main carrier to be transmitted continuously. Demanding near-100% duty
+    # of a downlink would lock only the main carrier, and every call that
+    # moved to a traffic carrier would go unwatched.
+    for pattern, name in (((0, 2), "half"), ((1,), "quarter")):
+        _run(f"downlink TETRA traffic carrier, {name} duty",
+             _tetra("UPLINK", 22, seed=51, slot_pattern=pattern),
+             "DOWNLINK", True)
     # Uncorrected RTL-SDR crystal error: 2.5 kHz is roughly 6.6 ppm at 380 MHz.
     s = sim.tetra_carrier(DWELL_S, SR, role="UPLINK", seed=61,
                           freq_offset_hz=OFFSET + 2500.0)

@@ -493,6 +493,9 @@ class PhyResult:
     burst_ms_median: float = 0.0
     slot_quantisation: float = 0.0
     burst_count: int = 0
+    # True for a continuously transmitting main carrier, false for a
+    # discontinuous traffic carrier. Diagnostic only; both are real.
+    continuous: bool = False
     checks: dict = field(default_factory=dict)
 
     def as_dict(self):
@@ -518,7 +521,7 @@ LIMITS = {
     'phy_min_dqpsk_m': 0.20,
     'phy_min_dqpsk_phase_spread': 0.50,
     'phy_min_dqpsk_selectivity': 1.6,
-    'phy_downlink_min_duty': 0.80,
+    'phy_downlink_min_duty': 0.15,
     'phy_uplink_min_duty': 0.04,
     'phy_uplink_max_duty': 0.85,
     'phy_uplink_min_frame_ratio': 3.0,
@@ -589,7 +592,19 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
     res.burst_count = int(timing['burst_count'])
 
     if role == 'DOWNLINK':
-        checks['continuous'] = res.duty >= lim['phy_downlink_min_duty']
+        # Only base stations transmit in 390-395 MHz, so a carrier that has
+        # already passed the full TETRA waveform test here *is* a base
+        # station, whatever its duty cycle. The floor is therefore only a
+        # sanity check that something was actually on the air.
+        #
+        # ETSI EN 300 392-2 requires the main carrier to be transmitted
+        # continuously, but secondary traffic carriers are discontinuous, and
+        # timeshared control-channel modes exist too. Demanding near-100% duty
+        # here would have locked only the main carrier -- and since the uplink
+        # watch list is derived from locked downlinks, every call that moved
+        # to a traffic carrier would have gone unwatched.
+        checks['on_air'] = res.duty >= lim['phy_downlink_min_duty']
+        res.continuous = res.duty >= 0.80
     else:
         checks['burst_duty'] = (lim['phy_uplink_min_duty'] <= res.duty
                                 <= lim['phy_uplink_max_duty'])

@@ -106,7 +106,7 @@ DEFAULTS = {
     "phy_min_dqpsk_m": 0.20,
     "phy_min_dqpsk_phase_spread": 0.50,
     "phy_min_dqpsk_selectivity": 1.6,
-    "phy_downlink_min_duty": 0.80,
+    "phy_downlink_min_duty": 0.15,
     "phy_uplink_min_duty": 0.04,
     "phy_uplink_max_duty": 0.85,
     "phy_uplink_min_frame_ratio": 3.0,
@@ -136,6 +136,7 @@ DEFAULTS = {
     "tetra_channel_half_width_hz": 9000.0,
 
     "sdr_stop_join_s": 8.0,
+    "usb_reset_max_attempts": 3,
     "allow_cli_sdr_fallback": False,
     "keep_last_iq": True,
     "rf_record_iq": True,
@@ -169,7 +170,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.0",
+    "app_version": "0.9.1",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

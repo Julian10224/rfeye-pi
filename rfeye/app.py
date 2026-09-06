@@ -817,7 +817,12 @@ class App:
         if status == "DEMO":
             sdr_text, sdr_col = "SDR: DEMO MODE", BLUE_BRIGHT
         elif status != "LIVE":
-            sdr_text, sdr_col = "SDR: NOT CONNECTED", RED
+            # A sagging 5 V rail and a broken dongle look identical on screen
+            # but need completely different fixes, so say which one it is.
+            if snap.get("power_warning"):
+                sdr_text, sdr_col = "USB POWER TOO LOW", RED
+            else:
+                sdr_text, sdr_col = "SDR: NOT CONNECTED", RED
         elif snap.get("detector_state") == "ALERT":
             sdr_text, sdr_col = "C2000 ACTIVITY NEARBY", RED
         elif snap.get("network_locked"):
@@ -861,7 +866,8 @@ class App:
 
         max_lv = float(snap.get("mobile_level", 0.0))
         if status not in ("LIVE", "DEMO"):
-            state, col = "NOT CONNECTED", RED
+            state, col = (("POWER LOW", RED) if snap.get("power_warning")
+                          else ("NOT CONNECTED", RED))
         elif (status == "LIVE" and not snap.get("network_locked")
               and max_lv <= 0.15):
             state, col = "NO NETWORK", BLUE_BRIGHT
@@ -961,6 +967,7 @@ class App:
             ("Full cycle", f"{float(snap.get('cycle_ms',0)):7.0f} ms"),
             ("Dwell capture", f"{float(snap.get('dwell_ms',0)):7.0f} ms"),
             ("Verification", f"{float(snap.get('verify_ms',0)):7.0f} ms"),
+            ("Supply", str(snap.get('power_warning') or 'OK')),
             ("Backend", f"{snap.get('status','?')}  age {age_ms:.0f} ms"),
         ]
         y=112
