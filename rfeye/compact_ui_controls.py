@@ -38,6 +38,7 @@ def _record_payload_snapshot(app):
             "site_peaks","phy","network_locked","site_locked_count",
             "site_candidate_count","site_state_loaded","watch_freqs",
             "dwell_centre_hz","dwell_role","survey_shortlist",
+            "site_queue_remaining",
             "confirm_streak","clear_streak","cycle_ms","dwell_ms","verify_ms",
             "survey_ms","capture_ms","scan_windows","sdr_path")},
         "spectrum":{
@@ -265,7 +266,8 @@ def _record_rf_worker(app, duration):
                 "phy_uplink_min_bursts","duplex_split_hz","site_lock_hits",
                 "site_unlock_misses","site_reverify_s","survey_interval_s",
                 "survey_min_snr_db","survey_max_candidates",
-                "uplink_confirm_dwells","uplink_confirm_window_s",
+                "uplink_confirm_dwells","uplink_confirm_visits",
+                "uplink_state_max_age_s",
                 "uplink_alert_hold_s","mobile_band_start_hz","mobile_band_end_hz",
                 "site_band_start_hz","site_band_end_hz",
                 "tetra_channel_spacing_hz","tetra_raster_offset_hz")},

@@ -163,6 +163,7 @@ class SDRBackend:
         self.detector_state='SEARCHING'
         self.survey_shortlist=[]
         self._survey_at=0.; self._survey_idx=0
+        self._site_queue=[]; self._sweep_cursor=0.; self._alt_cycle=False
         self._site_verify_at=0.; self._watch_idx=0; self._display_cycle=0
         self.last_phy=[]
         self.dwell_centre_hz=0.; self.dwell_channels=[]
@@ -181,6 +182,7 @@ class SDRBackend:
                 self.demo_active=False; self.alarm.reset()
                 self.detector_state='SEARCHING'; self.last_phy=[]
                 self.survey_shortlist=[]; self._survey_at=0.
+                self._site_queue=[]; self._sweep_cursor=0.
                 self.status='SCANNING'; self.error=''; self.last_update=time.time()
 
     def start(self):
@@ -237,6 +239,7 @@ class SDRBackend:
                 'dwell_centre_hz':float(self.dwell_centre_hz),
                 'dwell_role':str(self.last_dwell_role),
                 'survey_shortlist':[float(f) for f in self.survey_shortlist],
+                'site_queue_remaining':len(self._site_queue),
                 'phy':[dict(p) for p in self.last_phy],
                 'confirm_streak':int(self.alarm.streak),
                 'clear_streak':0 if self.mobile_confirmed else 1,
@@ -335,32 +338,82 @@ class SDRBackend:
         return f[o],p[o]
 
     # -- stage 1: find downlink carriers worth verifying -------------------
-    def _survey_downlink(self):
-        """Shortlist 390-395 MHz raster channels carrying steady energy.
+    def _downlink_raster(self):
+        """Every ETSI raster channel in the downlink band, low to high."""
+        a=float(self.cfg.get('site_band_start_hz',390e6))
+        b=float(self.cfg.get('site_band_end_hz',395e6))
+        step=max(1.,float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
+        off=float(self.cfg.get('tetra_raster_offset_hz',12500.))
+        return [float(x) for x in np.arange(a+off,b,step)]
 
-        This is only a shortlist.  It is deliberately loose: its job is to keep
-        the expensive verification dwells pointed somewhere plausible, never to
-        decide anything.  Everything it proposes still has to pass the full
-        waveform test before it counts as a C2000 base station.
+    def _survey_downlink(self):
+        """Rank downlink raster channels by how much they look like a carrier.
+
+        Ranking by raw power alone does not survive contact with real
+        hardware: an RTL-SDR's internal spur comb is stronger than a distant
+        base station, so the strongest channels in this band are routinely
+        the receiver's own artefacts.  Measured on the reference unit, the
+        top ten channels sat on an 800 kHz grid -- a comb, not a network.
+
+        So the score also asks whether the energy is *shaped* like a 25 kHz
+        TETRA carrier: flat right across the channel.  A spur is a narrow
+        line and is punished for it.  This only reorders work, it can never
+        admit anything: every channel still has to pass the full waveform
+        test before it counts.
         """
         a=float(self.cfg.get('site_band_start_hz',390e6))
         b=float(self.cfg.get('site_band_end_hz',395e6))
         f,p=self._sweep(a,b)
         if not len(f): return []
-        spacing=float(self.cfg.get('tetra_channel_spacing_hz',25000.))
         half=float(self.cfg.get('tetra_channel_half_width_hz',9000.))
-        chans=np.arange(a+float(self.cfg.get('tetra_raster_offset_hz',12500.)),b,spacing)
-        levels=[]
-        for ch in chans:
+        rows=[]
+        for ch in self._downlink_raster():
             m=np.abs(f-ch)<=half
-            if int(np.count_nonzero(m))>=3:
-                levels.append((float(ch),float(np.median(p[m]))))
-        if not levels: return []
-        floor=float(np.percentile(np.array([v for _,v in levels]),30))
+            if int(np.count_nonzero(m))<3: continue
+            seg=p[m]
+            level=float(np.median(seg))
+            # A flat 25 kHz carrier barely differs from its own median; a
+            # narrow spur towers over it.
+            peak=float(np.max(seg))-level
+            rows.append((ch,level,peak))
+        if not rows: return []
+        floor=float(np.percentile(np.array([r[1] for r in rows]),30))
+        w=float(self.cfg.get('survey_flatness_weight',0.5))
+        tol=float(self.cfg.get('survey_flatness_tolerance_db',6.0))
         minsnr=float(self.cfg.get('survey_min_snr_db',6.0))
-        keep=[(c,v) for c,v in levels if v-floor>=minsnr]
-        keep.sort(key=lambda x:x[1],reverse=True)
-        return [c for c,_ in keep[:max(1,int(self.cfg.get('survey_max_candidates',12)))]]
+        scored=[]
+        for ch,level,peak in rows:
+            snr=level-floor
+            if snr<minsnr: continue
+            scored.append((ch,snr-w*max(0.,peak-tol)))
+        scored.sort(key=lambda x:x[1],reverse=True)
+        limit=max(1,int(self.cfg.get('survey_max_candidates',12)))
+        return [ch for ch,_ in scored[:limit]]
+
+    def _refill_site_queue(self,now):
+        """Rebuild the downlink verification queue for one full band pass.
+
+        The survey's favourites go first, then *every* remaining raster
+        channel.  That is the important part: the survey can reorder the work
+        but can no longer hide any of it.  On the reference unit the survey's
+        twelve slots were entirely filled by spur-comb teeth, which under the
+        old design meant a genuine but weaker C2000 carrier was never handed
+        to the verifier at all.  A full pass is about 25 dwells, roughly
+        35 seconds, and it is only run while no network is locked.
+        """
+        t0=time.perf_counter()
+        ranked=self._survey_downlink()
+        self.last_survey_ms=(time.perf_counter()-t0)*1000.
+        self.survey_shortlist=list(ranked)
+        seen={int(round(x)) for x in ranked}
+        rest=[x for x in self._downlink_raster() if int(round(x)) not in seen]
+        # Continue the systematic pass where the previous one stopped, so
+        # repeated passes do not keep re-checking the bottom of the band.
+        if self._sweep_cursor:
+            after=[x for x in rest if x>self._sweep_cursor]
+            rest=after+[x for x in rest if x<=self._sweep_cursor]
+        self._site_queue=list(ranked)+rest
+        self._survey_at=now
 
     # -- stage 2: verify a group of channels in one narrowband dwell -------
     def _verify(self,freqs,role):
@@ -421,44 +474,54 @@ class SDRBackend:
     def _site_work(self,now):
         """Acquire a C2000 network lock, or keep an existing one fresh."""
         band=float(self.cfg.get('site_band_start_hz',390e6))
-        # While nothing is locked the device has no way to detect anything at
-        # all, so it retries the survey noticeably sooner than it refreshes an
-        # established lock.
-        interval=(max(5.,float(self.cfg.get('survey_interval_s',60.0)))
-                  if self.sites.locked(now)
-                  else max(5.,float(self.cfg.get('survey_idle_interval_s',15.0))))
-        pending=self.sites.candidates(now)
-        if not self.survey_shortlist and not pending:
-            if not self._survey_at or now-self._survey_at>=interval:
-                t0=time.perf_counter()
-                self.survey_shortlist=self._survey_downlink()
-                self.last_survey_ms=(time.perf_counter()-t0)*1000.
-                self._survey_at=now
-
         locked=self.sites.locked(now)
-        targets=[c['freq_hz'] for c in pending]+list(self.survey_shortlist)
-        if locked:
-            # Re-prove locked carriers in rotation, so moving out of coverage
-            # eventually drops the lock instead of leaving a stale one.
-            targets=[locked[self._survey_idx%len(locked)]['freq_hz']]+targets
+
+        # Half-verified carriers come first: they already passed the waveform
+        # test at least once, so they are the cheapest route to a lock.
+        priority=[c['freq_hz'] for c in self.sites.candidates(now)]
+
+        if not self._site_queue:
+            # Only once the band pass is finished does re-proving a locked
+            # carrier get a turn. Doing it sooner starves the pass: the same
+            # locked carriers anchor every dwell and the rest of the band is
+            # never reached, so a site's other carriers stay undiscovered and
+            # their uplink channels stay unwatched.
+            if locked and now-self._site_verify_at>=max(30.,float(
+                    self.cfg.get('site_reverify_s',300.0))):
+                priority.insert(0,locked[self._survey_idx%len(locked)]['freq_hz'])
+                self._survey_idx+=1
+            if not priority:
+                if locked:
+                    return []
+                interval=max(5.,float(self.cfg.get('survey_idle_interval_s',15.0)))
+                if self._survey_at and now-self._survey_at<interval:
+                    return []
+                self._refill_site_queue(now)
+
+        # The queue rides along behind the priority list, so a dwell aimed at
+        # a candidate also sweeps up whichever queued neighbours fit the same
+        # capture for free.
+        targets=priority+list(self._site_queue)
         if not targets:
             return []
 
         seen=set(); ordered=[]
-        for f in targets:
-            k=int(round(self._raster(f,band)))
+        for x in targets:
+            k=int(round(self._raster(x,band)))
             if k not in seen:
                 seen.add(k); ordered.append(float(k))
-        start=self._survey_idx%len(ordered)
-        batch=ordered[start:]+ordered[:start]
-        self._survey_idx=(self._survey_idx+1)%len(ordered)
 
-        results=self._verify(batch,'DOWNLINK')
+        results=self._verify(ordered,'DOWNLINK')
         for r in results:
             self.sites.observe(r.freq_hz,r.ok,r.quality,now)
-        done={int(round(r.freq_hz)) for r in results}
-        self.survey_shortlist=[f for f in self.survey_shortlist
-                               if int(round(self._raster(f,band))) not in done]
+
+        covered={int(round(x)) for x in self.dwell_channels}
+        if covered:
+            self._sweep_cursor=max(float(x) for x in self.dwell_channels)
+        self._site_queue=[x for x in self._site_queue
+                          if int(round(x)) not in covered]
+        self.survey_shortlist=[x for x in self.survey_shortlist
+                               if int(round(x)) not in covered]
         self.sites.save()
         return results
 
@@ -482,9 +545,17 @@ class SDRBackend:
             self.dwell_channels=[]
             if self.sites.locked(now):
                 watch_results=self._watch_work(now)
-                # Site upkeep runs on its own slow schedule so it never gets in
-                # the way of the uplink watch.
-                if now-self._site_verify_at>=max(30.,float(
+                # A TETRA site runs several carriers and a handset can be on
+                # any of them, so an unfinished band pass is finished even
+                # after the first lock -- stopping early would leave real
+                # uplink channels unwatched. It runs on alternate cycles so
+                # the uplink watch keeps priority.
+                self._alt_cycle=not self._alt_cycle
+                if self._site_queue:
+                    if self._alt_cycle:
+                        site_results=self._site_work(now)
+                        self._site_verify_at=now
+                elif now-self._site_verify_at>=max(30.,float(
                         self.cfg.get('site_reverify_s',300.0))):
                     site_results=self._site_work(now)
                     self._site_verify_at=now
@@ -493,7 +564,8 @@ class SDRBackend:
 
             now=time.time()
             verified=[r for r in watch_results if r.ok]
-            confirmed,level,peaks=self.alarm.update(verified,now)
+            watched=[r.freq_hz for r in watch_results]
+            confirmed,level,peaks=self.alarm.update(verified,watched,now)
             locked=self.sites.locked(now)
 
             # Display spectrum. The 380-385 MHz view is what the user expects
@@ -513,7 +585,7 @@ class SDRBackend:
             # verify until the next survey is due. Without this the scan
             # thread spins at full speed doing no work, which is what the
             # first live run on real hardware showed it doing.
-            if not site_results and not watch_results:
+            if not site_results and not watch_results and not self._site_queue:
                 wait=max(0.25,min(2.0,float(self.cfg.get(
                     'survey_idle_interval_s',15.0))-(now-self._survey_at)))
                 time.sleep(wait)

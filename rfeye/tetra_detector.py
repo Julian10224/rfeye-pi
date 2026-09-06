@@ -201,50 +201,43 @@ def plan_dwell(freqs, sample_rate, max_offset_hz=100_000.0,
                dc_guard_hz=20_000.0, spacing_hz=CHANNEL_SPACING_HZ):
     """Choose a tuner centre covering as many of ``freqs`` as possible.
 
-    One 288 kHz dwell holds several 25 kHz channels, so a whole site's uplink
-    watch list is often checked in a single capture.
+    One 288 kHz dwell holds several 25 kHz channels, so a group of nearby
+    carriers is checked in a single capture.
 
-    The **first** entry of ``freqs`` anchors the window.  That is what lets a
-    caller rotate a long watch list and actually reach every channel: sorting
-    the input and always starting from the lowest frequency would silently
-    pin the window to one end of the band forever.
+    The tuner is parked ``dc_guard_hz`` clear of the *highest* member rather
+    than in the middle of the group.  The RTL-SDR's DC spike sits exactly at
+    the tuner centre, and channels are on a 25 kHz grid, so a centred tuner
+    lands on one of the very carriers being measured -- there is no gap in a
+    contiguous run to hide in.  Parking outside the run is the only placement
+    that keeps the spike off every channel, and it bounds the group to what
+    still fits inside ``max_offset_hz``.
 
-    The centre is also deliberately offset from every channel of interest.
-    The RTL-SDR's DC spike sits at the tuner centre and would otherwise land
-    straight on top of a carrier being measured.
+    The **first** entry of ``freqs`` anchors the group.  That is what lets a
+    caller work through a long list: sorting the input and always starting
+    from the lowest frequency would pin the window to one end of the band.
 
     Returns ``(centre_hz, [(freq_hz, offset_hz), ...])``.
     """
     seq = [float(f) for f in freqs]
     if not seq:
         return None, []
-    anchor = seq[0]
     ordered = sorted(set(seq))
-    i = ordered.index(anchor)
+    i = ordered.index(seq[0])
+    room = max(0.0, float(max_offset_hz) - float(dc_guard_hz))
     lo = hi = i
-    span = float(max_offset_hz) * 2.0
-    # Grow outwards from the anchor while everything still fits one window.
     while True:
         grew = False
-        if hi + 1 < len(ordered) and ordered[hi + 1] - ordered[lo] <= span:
+        if hi + 1 < len(ordered) and ordered[hi + 1] - ordered[lo] <= room:
             hi += 1
             grew = True
-        if lo - 1 >= 0 and ordered[hi] - ordered[lo - 1] <= span:
+        if lo - 1 >= 0 and ordered[hi] - ordered[lo - 1] <= room:
             lo -= 1
             grew = True
         if not grew:
             break
     group = ordered[lo:hi + 1]
-
-    centre = (group[0] + group[-1]) / 2.0
-    step = max(1.0, float(spacing_hz))
-    for k in range(0, 9):
-        cand = centre + (k + 1) * step
-        if all(abs(f - cand) >= dc_guard_hz for f in group):
-            centre = cand
-            break
-    keep = [(f, f - centre) for f in group if abs(f - centre) <= max_offset_hz]
-    return centre, keep
+    centre = group[-1] + float(dc_guard_hz)
+    return centre, [(f, f - centre) for f in group]
 
 
 class UplinkAlarm:
@@ -252,9 +245,16 @@ class UplinkAlarm:
 
     Every input here has already passed the full physical-layer verification,
     so this is not another chance to be convinced -- it only smooths the
-    output.  ``confirm_dwells`` guards against a single freak capture;
-    ``hold_s`` keeps the alert up through the natural gaps between TETRA
-    transmissions so the display does not flicker during a conversation.
+    output, and guards against a single freak capture.
+
+    Confirmation is counted in **visits to that channel**, not in wall-clock
+    seconds.  How often a given uplink channel comes round depends on how many
+    carriers the site runs and how many dwells they take, and a site with
+    several carriers can easily leave more than a few seconds between two
+    looks at the same one.  A seconds-based window silently became
+    unsatisfiable in exactly those cases -- the busiest sites, where a
+    detection matters most.  Counting visits makes the rule independent of
+    cycle duration, hardware speed and watch-list length.
     """
 
     def __init__(self, cfg):
@@ -274,35 +274,41 @@ class UplinkAlarm:
         self.peaks = []
         self.streak = 0
 
-    def update(self, verified, now=None):
-        """``verified`` is the list of PhyResults that passed as TETRA."""
+    def update(self, verified, watched=(), now=None):
+        """``verified`` are the PhyResults that passed; ``watched`` is every
+        channel actually examined in this dwell, hit or not."""
         now = time.time() if now is None else float(now)
-        window = max(1.0, float(self.cfg.get('uplink_confirm_window_s', 8.0)))
         need = max(1, int(self.cfg.get('uplink_confirm_dwells', 2)))
+        span = max(need, int(self.cfg.get('uplink_confirm_visits', 4)))
         hold = max(0.0, float(self.cfg.get('uplink_alert_hold_s', 12.0)))
-
-        for r in verified:
-            f = int(round(float(r.freq_hz)))
-            st = self.state.get(f)
-            if st is None or now - float(st.get('last', 0.0)) > window:
-                st = {'hits': 0, 'quality': 0.0}
-            st['hits'] = int(st['hits']) + 1
-            st['last'] = now
-            st['quality'] = max(float(r.quality),
-                                float(st['quality']) * 0.5 + float(r.quality) * 0.5)
-            self.state[f] = st
-
-        self.state = {f: s for f, s in self.state.items()
-                      if now - float(s.get('last', 0.0)) <= window}
+        max_age = max(10.0, float(self.cfg.get('uplink_state_max_age_s', 90.0)))
 
         hits = {int(round(float(r.freq_hz))): r for r in verified}
+        seen = {int(round(float(f))) for f in watched} | set(hits)
+        for f in seen:
+            st = self.state.get(f)
+            if st is None or now - float(st.get('last', now)) > max_age:
+                st = {'visits': 0, 'hits': [], 'quality': 0.0}
+            st['visits'] += 1
+            st['last'] = now
+            if f in hits:
+                st['hits'].append(st['visits'])
+                st['quality'] = max(float(hits[f].quality),
+                                    float(st['quality']) * 0.5
+                                    + float(hits[f].quality) * 0.5)
+            st['hits'] = [h for h in st['hits'] if st['visits'] - h < span]
+            self.state[f] = st
+
+        self.state = {f: st for f, st in self.state.items()
+                      if now - float(st.get('last', 0.0)) <= max_age}
+
         qualified = [r for f, r in hits.items()
-                     if int(self.state.get(f, {}).get('hits', 0)) >= need]
+                     if len(self.state.get(f, {}).get('hits', [])) >= need]
 
         if qualified:
             self.confirmed = True
             self.last_hit = now
-            self.streak = max(int(self.state[int(round(float(r.freq_hz)))]['hits'])
+            self.streak = max(len(self.state[int(round(float(r.freq_hz)))]['hits'])
                               for r in qualified)
             self.peaks = sorted(qualified, key=lambda r: r.quality, reverse=True)
             self.level = clamp(max(r.quality for r in qualified))
@@ -315,6 +321,6 @@ class UplinkAlarm:
             self.confirmed = False
             self.level = 0.0
             self.peaks = []
-            self.streak = max([int(s.get('hits', 0))
-                               for s in self.state.values()], default=0)
+            self.streak = max([len(st.get('hits', []))
+                               for st in self.state.values()], default=0)
         return self.confirmed, self.level, list(self.peaks)

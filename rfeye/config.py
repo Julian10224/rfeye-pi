@@ -77,6 +77,8 @@ DEFAULTS = {
     "survey_interval_s": 60.0,
     "survey_idle_interval_s": 15.0,
     "survey_min_snr_db": 6.0,
+    "survey_flatness_weight": 0.5,
+    "survey_flatness_tolerance_db": 6.0,
     "survey_max_candidates": 12,
     "display_sweep_interval": 4,
     "mobile_percentile": 95.0,
@@ -125,7 +127,8 @@ DEFAULTS = {
     # full waveform test, so these only stop the display flickering between
     # transmissions.
     "uplink_confirm_dwells": 2,
-    "uplink_confirm_window_s": 8.0,
+    "uplink_confirm_visits": 4,
+    "uplink_state_max_age_s": 90.0,
     "uplink_alert_hold_s": 12.0,
 
     "tetra_channel_spacing_hz": 25_000.0,
@@ -166,7 +169,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.8.0",
+    "app_version": "0.9.0",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -247,6 +250,7 @@ def load_config():
         "strong_hit_confidence", "candidate_min_confidence",
         "confidence_attack", "confidence_release",
         "confidence_confirm", "confidence_clear",
+        "uplink_confirm_window_s",
         "carrier_memory_s", "confirm_window_s", "alert_hold_s",
         "confirm_hits", "clear_hits",
     ):

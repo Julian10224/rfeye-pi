@@ -85,9 +85,13 @@ class FakeAir:
             if abs(off) > sr * 0.45:
                 continue
             if wide:
-                # Survey resolution only: a 20 kHz hump in the right place.
-                parts.append((sim.band_noise(dur, sr, 20_000.0, off,
-                                             self.seed + int(freq) % 977), 1.0))
+                # Survey resolution only. Spurs stay narrow and strong so the
+                # shape-aware ranking has something real to discriminate.
+                if kind == "spur":
+                    parts.append((sim.cw_tone(dur, sr, off), 3.0))
+                else:
+                    parts.append((sim.band_noise(dur, sr, 20_000.0, off,
+                                                 self.seed + int(freq) % 977), 1.0))
             elif kind == "downlink":
                 parts.append((sim.tetra_carrier(dur, sr, role="DOWNLINK",
                                                 seed=self.seed + 11,
@@ -101,6 +105,9 @@ class FakeAir:
                                               off, self.seed + 31), 1.0))
             elif kind == "cw":
                 parts.append((sim.cw_tone(dur, sr, off), 1.0))
+            elif kind == "spur":
+                # Narrow and strong: what an RTL-SDR comb tooth looks like.
+                parts.append((sim.cw_tone(dur, sr, off), 3.0))
             elif kind == "wide":
                 parts.append((sim.band_noise(dur, sr, 80_000.0, off,
                                              self.seed + 41), 1.0))
@@ -127,7 +134,7 @@ def run(backend, cycles):
         log.append(s)
         note(f"cycle {i:2d} state={s['detector_state']:<9} "
              f"locked={s['site_locked_count']} alert={s['mobile_confirmed']} "
-             f"cand={s['site_candidate_count']}"
+             f"cand={s['site_candidate_count']} queue={s['site_queue_remaining']}"
              + (f" err={s['error'][:50]}" if s["error"] else ""))
         if not ok:
             note("  scan cycle reported failure")
@@ -198,8 +205,35 @@ def main():
     check("does not alert on interference",
           not any(s["mobile_confirmed"] for s in log))
 
+    # 6 -- the reference unit's real situation: an RTL-SDR spur comb on an
+    #      800 kHz grid, stronger than the base station, so the survey's
+    #      shortlist fills up with artefacts. The band pass must still reach
+    #      the genuine carrier and lock it.
+    comb = [(390_012_500.0 + k * 800_000.0, "spur") for k in range(6)]
+    comb += [(390_012_500.0 + k * 800_000.0 + 25_000.0, "spur") for k in range(6)]
+    log = scenario("6. C2000 site buried under an RTL-SDR spur comb",
+                   FakeAir(downlinks=DOWNLINKS, interferers=comb), cycles=40)
+    check("locks the real carrier despite the comb",
+          any(s["site_locked_count"] for s in log),
+          "max locked = %d" % max(s["site_locked_count"] for s in log))
+    check("never locks a comb tooth",
+          all(any(abs(x["freq_hz"] - d) < 1.0 for d in DOWNLINKS)
+              for s in log for x in s["site_peaks"]),
+          "locked: " + ", ".join(sorted({"%.4f" % (x["freq_hz"] / 1e6)
+                                         for s in log for x in s["site_peaks"]})))
+
+    # 7 -- a full band pass must be bounded, not endless.
+    log = scenario("7. band pass completes without a network present",
+                   FakeAir(interferers=[(391_012_500.0, "spur")]), cycles=30)
+    check("never alerts while sweeping an empty band",
+          not any(s["mobile_confirmed"] for s in log))
+    check("band pass makes progress every cycle",
+          log[-1]["site_queue_remaining"] < log[2]["site_queue_remaining"],
+          "queue %d -> %d" % (log[2]["site_queue_remaining"],
+                              log[-1]["site_queue_remaining"]))
+
     # Dwell planning and raster maths, independent of any capture.
-    print("\n6. planner and raster")
+    print("\n8. planner and raster")
     centre, members = plan_dwell(UPLINKS, 288_000.0)
     check("one dwell covers a whole site's uplink list", len(members) == len(UPLINKS),
           f"{len(members)}/{len(UPLINKS)} channels")

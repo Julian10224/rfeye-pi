@@ -1,4 +1,4 @@
-name: RF Eye 0.8.0 appliance checks
+name: RF Eye 0.9.0 appliance checks
 
 on:
   push:
@@ -28,8 +28,16 @@ jobs:
         run: PYTHONPATH=rfeye python3 scripts/detector-selftest.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.8.0"
-          grep -q '"app_version": "0.8.0"' rfeye/config.py
+          test "$(tr -d '[:space:]' < VERSION)" = "0.9.0"
+          grep -q '"app_version": "0.9.0"' rfeye/config.py
+          # The release identity lives in VERSION, config.py, the reference
+          # config, the manifest and the README. It has drifted before, and a
+          # stale README version is what the settings screen quotes back at
+          # the user, so every copy is checked here.
+          V="$(tr -d '[:space:]' < VERSION)"
+          grep -q "^# RF Eye ${V} for Raspberry Pi\$" README.md
+          grep -q "complete \*\*RF Eye ${V} reference appliance\*\*" README.md
+          grep -q "identify this release as \*\*${V}\*\*" README.md
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
           grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
@@ -94,7 +102,7 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.8.0'
+          assert c['app_version']=='0.9.0'
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
@@ -130,6 +138,8 @@ jobs:
           assert c['survey_min_snr_db']==6.0
           assert c['survey_max_candidates']==12
           assert c['uplink_confirm_dwells']==2
+          assert c['uplink_confirm_visits']==4
+          assert c['survey_flatness_weight']==0.5
           assert c['uplink_alert_hold_s']==12.0
           assert c['tetra_channel_spacing_hz']==25000.0
           assert c['tetra_raster_offset_hz']==12500.0
@@ -147,6 +157,7 @@ jobs:
                        'require_duplex_pair','site_pair_min_hits',
                        'mobile_capture_ms','site_capture_ms','fft_blocks',
                        'confirm_hits','threshold_db','buzzer_duration_ms',
+                       'uplink_confirm_window_s',
                        'buzzer_high_hz','buzzer_low_hz'):
               assert dead not in c, dead
           assert 'password' not in ''.join(c).lower()
@@ -171,5 +182,5 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.8.0"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.9.0"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"
