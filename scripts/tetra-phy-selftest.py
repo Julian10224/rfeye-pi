@@ -79,12 +79,17 @@ def positives():
         _run(f"downlink TETRA traffic carrier, {name} duty",
              _tetra("UPLINK", 22, seed=51, slot_pattern=pattern),
              "DOWNLINK", True)
-    # Uncorrected RTL-SDR crystal error: 2.5 kHz is roughly 6.6 ppm at 380 MHz.
-    s = sim.tetra_carrier(DWELL_S, SR, role="UPLINK", seed=61,
-                          freq_offset_hz=OFFSET + 2500.0)
-    _run("uplink TETRA +2.5 kHz tuner error",
-         sim.make_capture([(s, 1.0)], DWELL_S, SR, snr_db=20, seed=161),
-         "UPLINK", True)
+    # Uncorrected crystal error. A plain RTL-SDR is commonly 20-30 ppm out,
+    # which at 390 MHz is 8-12 kHz -- far enough to push a carrier to the edge
+    # of its own channel. analyse() re-centres on the measured carrier, so
+    # what has to hold is that the whole realistic range still verifies.
+    for hz in (2500.0, 8000.0, 12000.0):
+        s = sim.tetra_carrier(DWELL_S, SR, role="UPLINK", seed=61,
+                              freq_offset_hz=OFFSET + hz)
+        _run(f"uplink TETRA {hz/1000:.1f} kHz tuner error "
+             f"({hz/390e6*1e6:.0f} ppm at 390 MHz)",
+             sim.make_capture([(s, 1.0)], DWELL_S, SR, snr_db=20, seed=161),
+             "UPLINK", True)
     # A busy site: neighbouring 25 kHz carriers must not break the target.
     tgt = sim.tetra_carrier(DWELL_S, SR, role="UPLINK", seed=71, freq_offset_hz=OFFSET)
     n1 = sim.tetra_carrier(DWELL_S, SR, role="DOWNLINK", seed=72, freq_offset_hz=OFFSET + 25000.0)
@@ -164,6 +169,22 @@ def negatives():
          sim.make_capture([(sim.impulse_noise(DWELL_S, SR, 140.0, 6e-5,
                                               OFFSET, 214), 1.0)],
                           DWELL_S, SR, snr_db=28, seed=214), "UPLINK", False)
+
+    # Past the guard the carrier no longer fits the extracted channel, and
+    # guessing at it would mean reporting a frequency that is simply wrong.
+    s = sim.tetra_carrier(DWELL_S, SR, role="DOWNLINK", seed=63,
+                          freq_offset_hz=OFFSET + 16000.0)
+    _run("TETRA 16 kHz off (41 ppm, past the re-centring guard)",
+         sim.make_capture([(s, 1.0)], DWELL_S, SR, snr_db=22, seed=163),
+         "DOWNLINK", False)
+
+    # Re-centring must not walk onto the neighbour: an empty raster channel
+    # beside a strong carrier must stay empty, not inherit it.
+    n1 = sim.tetra_carrier(DWELL_S, SR, role="DOWNLINK", seed=64,
+                           freq_offset_hz=OFFSET + 25000.0)
+    _run("empty channel next to a strong neighbour",
+         sim.make_capture([(n1, 1.0)], DWELL_S, SR, snr_db=28, seed=164),
+         "DOWNLINK", False)
 
     # Too weak to verify.  Refusing to guess is the correct behaviour.
     _run("uplink TETRA 4 dB (below verification floor)",

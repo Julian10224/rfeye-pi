@@ -72,9 +72,42 @@ the dongle reports exactly 288000 S/s, and sweeping the assumed symbol rate
 over +/-200 ppm peaks at or within 10 ppm of 18000. The degradation is
 channel and receiver impairment, not a clock error.
 
+## Tuner error tolerance
+
+The limits are only reachable if the carrier lands inside the extracted
+channel, which depends on the receiver's crystal, not the signal. An
+uncalibrated RTL-SDR is commonly 20-30 ppm out; at 390 MHz that is 8-12 kHz,
+enough to push a carrier to the edge of its own 25 kHz channel and collapse
+the bandwidth and edge-valley measurements even though the modulation is
+untouched.
+
+`analyse()` therefore re-centres on the measured carrier before judging its
+shape. Measured against simulated TETRA at 22 dB SNR:
+
+| tuner error | ppm at 390 MHz | verdict | edge valley after re-centring |
+| --- | --- | --- | --- |
+| 0 Hz | 0 | accept | 23.9 dB |
+| 4 kHz | 10 | accept | 23.9 dB |
+| 8 kHz | 21 | accept | 23.4 dB |
+| 12 kHz | 31 | accept | 13.1 dB |
+| 16 kHz | 41 | reject | carrier has left the channel |
+
+`phy_max_centre_error_hz` is 8000: it bounds how far a carrier may be from its
+nominal raster frequency before it is treated as a different carrier rather
+than a mistuned one. It is not a quality limit. 8 kHz covers every
+uncalibrated crystal while staying far short of the 25 kHz neighbour — an
+empty channel beside a strong carrier is verified as empty, not as its
+neighbour.
+
+The reference unit's RTL-SDR Blog V4 has a 1 ppm TCXO and measured +105 to
++345 Hz on good carriers, so none of this is exercised there. It matters for
+plain dongles on other units.
+
 ## Caveats
 
-This is one site, one location, one receiver, one moment. It is enough to show
+This is one site, one location, one receiver, one moment. The tuner-error
+figures above are simulated, not measured on a mistuned dongle: they establish
+where the geometry breaks, not how a real crystal drifts with temperature. It is enough to show
 that the simulator over-estimated selectivity and by roughly how much; it is
 not enough to characterise the limits across the country. Re-run the
 measurement above at any new site and add the numbers here.

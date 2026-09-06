@@ -1,4 +1,4 @@
-name: RF Eye 0.9.2 appliance checks
+name: RF Eye 0.9.3 appliance checks
 
 on:
   push:
@@ -124,7 +124,7 @@ jobs:
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['detector_profile_version']==8
+          assert c['detector_profile_version']==9
           # Detector profile v8 acceptance limits. A fresh install must ship
           # the calibrated values from scripts/tetra-phy-selftest.py, so a
           # silent drift here is a build failure rather than a field surprise.
@@ -138,7 +138,7 @@ jobs:
           assert c['phy_max_occupied_bw_hz']==30000.0
           assert c['phy_min_boundary_reject_db']==6.0
           assert c['phy_max_flatness_db']==14.0
-          assert c['phy_max_centre_error_hz']==4000.0
+          assert c['phy_max_centre_error_hz']==8000.0
           assert c['phy_min_dqpsk_m']==0.20
           assert c['phy_min_dqpsk_phase_spread']==0.50
           assert c['phy_min_dqpsk_selectivity']==1.35

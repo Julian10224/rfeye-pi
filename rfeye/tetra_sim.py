@@ -17,8 +17,39 @@ import math
 
 import numpy as np
 
-from tetra_phy import (SYMBOL_RATE_HZ, SYMBOLS_PER_SLOT, SLOTS_PER_FRAME,
-                       FRAMES_PER_MULTIFRAME, RRC_ROLLOFF, rrc_taps)
+import tetra_phy
+from tetra_phy import rrc_taps
+
+# The air-interface numbers are written out here rather than imported, so the
+# generator and the detector do not simply agree with each other by
+# construction. They are the ETSI EN 300 392-2 V+D values; the assertion below
+# fails the build if the detector ever drifts away from them, which is the
+# failure mode importing would have hidden.
+SYMBOL_RATE_HZ = 18000.0            # 36 kbit/s gross, 2 bits per symbol
+SYMBOLS_PER_SLOT = 255
+SLOTS_PER_FRAME = 4
+FRAMES_PER_MULTIFRAME = 18
+RRC_ROLLOFF = 0.35
+
+_ETSI = (
+    ("SYMBOL_RATE_HZ", SYMBOL_RATE_HZ),
+    ("SYMBOLS_PER_SLOT", SYMBOLS_PER_SLOT),
+    ("SLOTS_PER_FRAME", SLOTS_PER_FRAME),
+    ("FRAMES_PER_MULTIFRAME", FRAMES_PER_MULTIFRAME),
+    ("RRC_ROLLOFF", RRC_ROLLOFF),
+)
+_MISMATCH = [(name, getattr(tetra_phy, name), etsi)
+             for name, etsi in _ETSI
+             if getattr(tetra_phy, name) != etsi]
+if _MISMATCH:
+    raise AssertionError(
+        "detector air-interface constants no longer match ETSI: "
+        + ", ".join("%s (detector %r, ETSI %r)" % m for m in _MISMATCH))
+
+# The transmit pulse shape is deliberately the *same* root-raised-cosine as
+# the receiver's matched filter -- that is what ETSI specifies and what a real
+# receiver does, so sharing it is correct rather than circular. What would be
+# circular is sharing the constants above, hence the check.
 
 # pi/4-DQPSK differential phase alphabet.
 _PHASE_STEPS = np.array([math.pi / 4, 3 * math.pi / 4,

@@ -58,7 +58,66 @@ from config import load_config
 appmod.GPIOBuzzer=FakeBuzzer
 
 
+def _check_config_migration():
+    """A saved config must never freeze the calibrated detector limits.
+
+    Persisting them looked harmless and was not: a unit first installed on
+    0.9.0 kept that release's acceptance limits through 0.9.1 and 0.9.2,
+    because every later release also reported detector profile 8 and the
+    reset never fired. The source said 0.15 while the device ran 0.80.
+    """
+    import importlib, json, tempfile
+    import config as cfgmod
+
+    original = os.environ.get("RFEYE_CONFIG")
+    try:
+        for name, saved in (
+            ("pre-v8 unit", {"detector_profile_version": 7,
+                             "novelty_min_departure": 9.9, "muted": True}),
+            ("0.9.0 fossil", {"detector_profile_version": 8,
+                              "phy_downlink_min_duty": 0.8,
+                              "phy_min_dqpsk_selectivity": 1.6,
+                              "brightness": 0.42}),
+            ("fresh install", {}),
+        ):
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "config.json")
+                with open(path, "w") as fh:
+                    json.dump(saved, fh)
+                os.environ["RFEYE_CONFIG"] = path
+                importlib.reload(cfgmod)
+                cfg = cfgmod.load_config()
+                for key, want in cfgmod.DEFAULTS.items():
+                    if cfgmod.is_detector_key(key):
+                        assert cfg[key] == want, (name, key, cfg[key], want)
+                if "muted" in saved:
+                    assert cfg["muted"] is True, name
+                if "brightness" in saved:
+                    assert cfg["brightness"] == 0.42, name
+                # Saving must not write the defaults back as if chosen.
+                cfgmod.save_config(cfg)
+                with open(path) as fh:
+                    on_disk = json.load(fh)
+                frozen = [k for k in on_disk
+                          if cfgmod.is_detector_key(k)
+                          and on_disk[k] == cfgmod.DEFAULTS.get(k)]
+                assert not frozen, (name, frozen)
+                # A deliberate override still has to survive.
+                cfg["phy_min_dqpsk_m"] = 0.31
+                cfgmod.save_config(cfg)
+                with open(path) as fh:
+                    assert json.load(fh)["phy_min_dqpsk_m"] == 0.31, name
+    finally:
+        if original is None:
+            os.environ.pop("RFEYE_CONFIG", None)
+        else:
+            os.environ["RFEYE_CONFIG"] = original
+        importlib.reload(cfgmod)
+
+
 def main():
+    _check_config_migration()
+
     assert appmod._split_nmcli_terse("*:Home:88:WPA2",4)==["*","Home","88","WPA2"]
     assert appmod._split_nmcli_terse(r":Cafe\:Guest:72:WPA2",4)==["","Cafe:Guest","72","WPA2"]
     assert appmod._split_nmcli_terse(r":Back\\Slash:55:WPA3",4)==["","Back\\Slash","55","WPA3"]

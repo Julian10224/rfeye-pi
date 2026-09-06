@@ -58,7 +58,7 @@ except Exception:
     pass
 
 DEFAULTS = {
-    "detector_profile_version": 8,
+    "detector_profile_version": 9,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -102,7 +102,7 @@ DEFAULTS = {
     "phy_max_occupied_bw_hz": 30000.0,
     "phy_min_boundary_reject_db": 6.0,
     "phy_max_flatness_db": 14.0,
-    "phy_max_centre_error_hz": 4000.0,
+    "phy_max_centre_error_hz": 8000.0,
     "phy_min_dqpsk_m": 0.20,
     "phy_min_dqpsk_phase_spread": 0.50,
     "phy_min_dqpsk_selectivity": 1.35,
@@ -170,10 +170,37 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.2",
+    "app_version": "0.9.3",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
+
+
+# Keys that are calibrated physics, not user preferences. The acceptance
+# limits come from ETSI constants and from measurements against real C2000
+# carriers; a saved copy of them is not a setting the user chose, it is a
+# snapshot of whatever release happened to write the file first.
+#
+# Persisting them by default froze them: a unit installed on 0.9.0 kept
+# phy_downlink_min_duty = 0.80 and phy_min_dqpsk_selectivity = 1.6 through
+# 0.9.1 and 0.9.2, so both of those releases' corrections were inert on it
+# while the source code said otherwise. They are therefore only written when
+# they actually differ from the shipped default -- a deliberate field
+# override survives, an accidental fossil does not.
+_DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_")
+_DETECTOR_KEYS = (
+    "sample_rate", "fft_size", "duplex_split_hz",
+    "mobile_band_start_hz", "mobile_band_end_hz",
+    "display_sweep_interval", "mobile_percentile",
+    "tetra_channel_spacing_hz", "tetra_raster_offset_hz",
+    "tetra_channel_half_width_hz", "allow_cli_sdr_fallback",
+    "usb_reset_max_attempts", "phy_timing_phases",
+)
+
+
+def is_detector_key(key):
+    """True for a calibrated detector constant rather than a user setting."""
+    return key.startswith(_DETECTOR_PREFIXES) or key in _DETECTOR_KEYS
 
 
 def _config_path():
@@ -209,17 +236,18 @@ def load_config():
     # controlled a gate that no longer exists, so a unit upgrading from an
     # older profile must not carry its saved values forward -- they would
     # either do nothing or, where a name was reused, mean something else.
-    if int(saved.get("detector_profile_version", 0) or 0) < 8:
+    #
+    # Profile 9 additionally clears detector constants that earlier releases
+    # persisted verbatim. Without this a unit first installed on 0.9.0 keeps
+    # that release's acceptance limits for ever, because every later release
+    # also reports profile 8 and the reset above never fires. save_config()
+    # no longer writes these keys unless they differ from the default, so this
+    # particular fossil cannot form again.
+    if int(saved.get("detector_profile_version", 0) or 0) < 9:
         for key in list(DEFAULTS):
-            if key.startswith(("phy_", "site_", "survey_", "uplink_")):
+            if is_detector_key(key):
                 cfg[key] = DEFAULTS[key]
-        for key in ("sample_rate", "fft_size", "duplex_split_hz",
-                    "mobile_band_start_hz", "mobile_band_end_hz",
-                    "display_sweep_interval", "mobile_percentile",
-                    "tetra_channel_spacing_hz", "tetra_raster_offset_hz",
-                    "tetra_channel_half_width_hz", "allow_cli_sdr_fallback"):
-            cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 8
+    cfg["detector_profile_version"] = 9
     for obsolete in (
         # pre-v7 leftovers
         "threshold_db", "threshold_min_db", "threshold_max_db",
@@ -262,7 +290,13 @@ def load_config():
 def save_config(cfg):
     p = _config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(cfg, indent=2) + "\n"
+    # Write detector constants only where a value genuinely differs from the
+    # shipped default. Anything equal to the default is left out so the next
+    # release's calibration is picked up instead of being overridden by a
+    # stale copy of its own former self.
+    out = {k: v for k, v in cfg.items()
+           if not (is_detector_key(k) and k in DEFAULTS and v == DEFAULTS[k])}
+    text = json.dumps(out, indent=2) + "\n"
     try:
         if p.exists() and p.read_text() == text:
             return

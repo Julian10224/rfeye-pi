@@ -484,6 +484,9 @@ class PhyResult:
     boundary_reject_db: float = 0.0
     flatness_db: float = 0.0
     centre_error_hz: float = 0.0
+    # How far the carrier sat from its nominal raster frequency before
+    # re-centring: the receiver's tuner error, not a property of the signal.
+    tuner_error_hz: float = 0.0
     dqpsk_m: float = 0.0
     dqpsk_phase_spread: float = 0.0
     dqpsk_decoy_max: float = 0.0
@@ -513,6 +516,16 @@ class PhyResult:
 # negative cases that caused real field false alarms -- and, where measurement
 # disagreed with simulation, from real C2000 carriers.
 #
+# ``phy_max_centre_error_hz`` bounds how far the tuner may be off before a
+# carrier is assumed to be a different carrier rather than a mistuned one.  It
+# is not a quality limit: ``analyse`` re-centres on the measured carrier, so
+# the modulation survives a large error, and the binding constraint is only
+# whether the carrier still fits the extracted channel.  Measured against
+# simulated TETRA at 22 dB SNR, re-centring accepts a tuner error up to about
+# 31 ppm at 390 MHz (12 kHz) and correctly rejects 41 ppm, where the carrier
+# leaves the channel.  8 kHz covers every uncalibrated RTL-SDR crystal while
+# staying far short of the 25 kHz neighbour.
+#
 # ``phy_min_dqpsk_selectivity`` is the one the simulator got wrong.  Clean
 # simulated TETRA reaches 3.2-3.4 because AWGN barely concentrates the fourth
 # moment at the decoy rates.  Six real C2000 downlink carriers, measured at
@@ -528,7 +541,7 @@ LIMITS = {
     'phy_max_occupied_bw_hz': 30000.0,
     'phy_min_boundary_reject_db': 6.0,
     'phy_max_flatness_db': 14.0,
-    'phy_max_centre_error_hz': 4000.0,
+    'phy_max_centre_error_hz': 8000.0,
     'phy_min_dqpsk_m': 0.20,
     'phy_min_dqpsk_phase_spread': 0.50,
     'phy_min_dqpsk_selectivity': 1.35,
@@ -568,6 +581,26 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
 
     freqs, psd = channelizer.psd()
     shape = channel_shape(freqs, psd, centre_hz=freq_offset_hz)
+
+    # An uncalibrated tuner puts the carrier somewhere near, but not on, the
+    # nominal raster frequency. Measuring the shape around the nominal centre
+    # then penalises the signal for the receiver's own error: at 390 MHz a
+    # 13 ppm crystal shifts the carrier 5 kHz, which pushes it toward the
+    # channel edge and collapses the edge-valley and bandwidth numbers even
+    # though the modulation is still perfectly recognisable.
+    #
+    # So re-measure around where the carrier actually is. The correction is
+    # bounded by phy_max_centre_error_hz -- beyond that, what was found is
+    # more likely a different carrier than a mistuned one. Carriers sit on a
+    # 25 kHz grid, so a bounded correction cannot slide onto the neighbour.
+    offset = float(freq_offset_hz)
+    guard = float(lim['phy_max_centre_error_hz'])
+    err = float(shape['centre_error_hz'])
+    res.tuner_error_hz = err
+    if abs(err) > 200.0 and abs(err) <= guard:
+        offset = freq_offset_hz + err
+        shape = channel_shape(freqs, psd, centre_hz=offset)
+
     res.snr_db = shape['snr_db']
     res.noise_db = shape['noise_db']
     res.occupied_bw_hz = shape['occupied_bw_hz']
@@ -581,12 +614,12 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
                       <= lim['phy_max_occupied_bw_hz']),
         'boundary': res.boundary_reject_db >= lim['phy_min_boundary_reject_db'],
         'flatness': res.flatness_db <= lim['phy_max_flatness_db'],
-        'centre': abs(res.centre_error_hz) <= lim['phy_max_centre_error_hz'],
+        'centre': abs(res.tuner_error_hz) <= lim['phy_max_centre_error_hz'],
     }
     if not full and not all(checks.values()):
         return _finish(res, checks, lim)
 
-    bb, rate = channelizer.extract(freq_offset_hz, decim)
+    bb, rate = channelizer.extract(offset, decim)
     # Strip the residual tuner error so the matched filter and symbol timing
     # see a centred carrier. |bb| is unchanged, so the envelope stays aligned.
     if abs(res.centre_error_hz) > 1.0:
