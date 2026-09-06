@@ -25,13 +25,32 @@ def draw_gear(app,cx,cy,size=42):
     icon=pygame.transform.smoothscale(icon,(int(size),int(size)))
     app.ui.blit(icon,icon.get_rect(center=(int(cx),int(cy))))
 
+
+def _network_line(snap, status):
+    """Headline status: what the detector is actually able to do right now."""
+    if status=="DEMO":
+        return "SDR DEMO",BLUE_BRIGHT
+    if status!="LIVE":
+        return "SDR NOT CONNECTED",RED
+    state=str(snap.get("detector_state","SEARCHING"))
+    if state=="ALERT":
+        return "C2000 ACTIVITY NEARBY",RED
+    if snap.get("network_locked"):
+        n=int(snap.get("site_locked_count",0) or 0)
+        return f"C2000 NETWORK LOCKED ({n})",GREEN
+    return "SEARCHING FOR C2000",YELLOW
+
+
 def draw_main(app, snap):
     import pygame
     app.ui.fill(BG)
     app._text("RF EYE",160,22,app.font_l,BLUE_BRIGHT,center=True)
     status=snap["status"]; scol=GREEN if status=="LIVE" else BLUE if status=="DEMO" else RED
     pygame.draw.circle(app.ui,scol,(294,22),5); app._gear(34,49,30)
-    stxt,scol=("SDR CONNECTED",GREEN) if status=="LIVE" else (("SDR DEMO",BLUE_BRIGHT) if status=="DEMO" else ("SDR NOT CONNECTED",RED))
+    # The C2000 network state matters more than the USB state: without a
+    # verified base station nearby the detector cannot report anything, and
+    # the user needs to see that rather than read silence as "all clear".
+    stxt,scol=_network_line(snap,status)
     app._text(stxt,160,52,app.font_s,scol,center=True)
     peaks=list(snap["peaks"][:3])
     while len(peaks)<3: peaks.append({"level":0.0,"freq_hz":0.0})
@@ -51,6 +70,8 @@ def draw_main(app, snap):
             app._text("MHz",x+40,342,app.font_s,DIM,center=True)
     lv=float(snap.get("mobile_level",0.0))
     if status not in ("LIVE","DEMO"): state,col="NO SDR",RED
+    elif status=="LIVE" and not snap.get("network_locked") and lv<=0.15:
+        state,col="NO NET",BLUE_BRIGHT
     elif lv>0.72: state,col="HIGH",RED
     elif lv>0.43: state,col="MEDIUM",YELLOW
     elif lv>0.15: state,col="LOW",GREEN
@@ -103,7 +124,17 @@ def draw_debug(app,snap):
     app._text("LIVE PERFORMANCE",50,38,app.font_s,DIM)
     age_ms=max(0.0,(time.time()-float(snap.get("last_update",0.0)))*1000.0) if snap.get("last_update") else 0.0
     frame_ms=max(0.001,float(getattr(app,"debug_frame_ms",0.0) or 0.001))
-    rows=[("UI refresh",f"{frame_ms:.1f} ms / {1000.0/frame_ms:.1f} FPS"),("Data age",f"{age_ms:.0f} ms"),("Full cycle",f"{float(snap.get('cycle_ms',0)):.0f} ms"),("Mobile sweep",f"{float(snap.get('mobile_scan_ms',0)):.0f} ms"),("Site sweep",f"{float(snap.get('site_scan_ms',0)):.0f} ms"),("Last capture",f"{float(snap.get('capture_ms',0)):.0f} ms"),("Tune windows",str(int(snap.get("scan_windows",0)))),("SDR path",str(snap.get("sdr_path","?"))),("Backend",str(snap.get("status","?")))]
+    phy=list(snap.get("phy") or [])
+    best=max(phy,key=lambda q:float(q.get("dqpsk_m",0)),default=None)
+    rows=[("UI refresh",f"{frame_ms:.1f} ms / {1000.0/frame_ms:.1f} FPS"),
+          ("Detector",str(snap.get("detector_state","?"))),
+          ("Sites locked",f"{int(snap.get('site_locked_count',0))} / cand {int(snap.get('site_candidate_count',0))}"),
+          ("Watching",f"{len(snap.get('watch_freqs') or [])} ch {str(snap.get('dwell_role','')).lower()}"),
+          ("Best DQPSK",("%.3f sel %.1f"%(float(best.get("dqpsk_m",0)),float(best.get("dqpsk_selectivity",0)))) if best else "-"),
+          ("Verdict",(str(best.get("reason","?"))[:20]) if best else "-"),
+          ("Cycle / dwell",f"{float(snap.get('cycle_ms',0)):.0f} / {float(snap.get('dwell_ms',0)):.0f} ms"),
+          ("Verify",f"{float(snap.get('verify_ms',0)):.0f} ms  age {age_ms:.0f} ms"),
+          ("Backend",f"{snap.get('status','?')} {str(snap.get('sdr_path','?'))[:9]}")]
     y=66
     for label,value in rows:
         pygame.draw.rect(app.ui,(9,13,18),(8,y,304,34),border_radius=7); app._text(label,16,y+5,app.font_s,DIM)
@@ -137,7 +168,7 @@ def draw_recordings(app):
             app._text(date,18,y+7,app.font_s,WHITE)
             app._text(tm,18,y+25,app.font_s,(150,201,226))
             mode=str(e.get("mode",""))
-            col=GREEN if mode.startswith("EXACT") else YELLOW
+            col=GREEN if mode.startswith("PHY v8") else YELLOW
             surf=app.font_s.render(mode,True,col); app.ui.blit(surf,(302-surf.get_width(),y+7))
             info=f'{int(e.get("samples",0))} samples'
             surf=app.font_s.render(info,True,DIM); app.ui.blit(surf,(302-surf.get_width(),y+25))
@@ -155,14 +186,15 @@ def draw_recording_detail(app):
     app._text("‹",18,26,app.font_xl,BLUE_BRIGHT,center=True)
     app._text("RECORDING",48,12,app.font_l,WHITE)
     app._text(str(e.get("label","Unknown"))[:19],50,39,app.font_s,DIM)
-    mode=str(e.get("mode","LEGACY APPROX"))
-    col=GREEN if mode=="EXACT v5" else YELLOW
+    mode=str(e.get("mode","PRE-v8 ARCHIVE"))
+    col=GREEN if mode.startswith("PHY v8") else YELLOW
     app._text(mode,160,94,app.font_m,col,center=True)
     app._text(f'{int(e.get("samples",0))} samples',160,126,app.font_s,WHITE,center=True)
     dur=float(e.get("duration",0.0) or 0.0)
     app._text(f'{dur:.0f} s recorded',160,149,app.font_s,DIM,center=True)
-    if not mode.startswith("EXACT"):
-        app._text("Old recording: replay is approximate",160,172,app.font_s,YELLOW,center=True)
+    if not mode.startswith("PHY v8"):
+        app._text("Recorded before profile v8:",160,172,app.font_s,YELLOW,center=True)
+        app._text("shown as archived, not re-analysed",160,192,app.font_s,YELLOW,center=True)
     pygame.draw.rect(app.ui,(12,91,132),(12,188,296,98),border_radius=16)
     app._text("PLAY",160,224,app.font_l,WHITE,center=True)
     app._text("Replay detector + sound",160,257,app.font_s,WHITE,center=True)

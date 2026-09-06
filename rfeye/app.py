@@ -811,16 +811,20 @@ class App:
         status_col = GREEN if status == "LIVE" else BLUE if status == "DEMO" else RED
         pygame.draw.circle(self.ui, status_col, (432, 44), 7)
 
-        # Clear RTL-SDR hardware/status indication on the main screen.
-        if status == "LIVE":
-            sdr_text = "SDR: CONNECTED"
-            sdr_col = GREEN
-        elif status == "DEMO":
-            sdr_text = "SDR: DEMO MODE"
-            sdr_col = BLUE_BRIGHT
+        # The C2000 network state matters more than the USB state. Without a
+        # verified base station nearby the detector cannot report anything,
+        # and the user must see that rather than read silence as "all clear".
+        if status == "DEMO":
+            sdr_text, sdr_col = "SDR: DEMO MODE", BLUE_BRIGHT
+        elif status != "LIVE":
+            sdr_text, sdr_col = "SDR: NOT CONNECTED", RED
+        elif snap.get("detector_state") == "ALERT":
+            sdr_text, sdr_col = "C2000 ACTIVITY NEARBY", RED
+        elif snap.get("network_locked"):
+            n = int(snap.get("site_locked_count", 0) or 0)
+            sdr_text, sdr_col = f"C2000 NETWORK LOCKED ({n})", GREEN
         else:
-            sdr_text = "SDR: NOT CONNECTED"
-            sdr_col = RED
+            sdr_text, sdr_col = "SEARCHING FOR C2000 NETWORK", YELLOW
         self._text(sdr_text, 240, 88, self.font_s, sdr_col, center=True)
 
         # Settings button in the physical top-right corner after rotation.
@@ -858,6 +862,9 @@ class App:
         max_lv = float(snap.get("mobile_level", 0.0))
         if status not in ("LIVE", "DEMO"):
             state, col = "NOT CONNECTED", RED
+        elif (status == "LIVE" and not snap.get("network_locked")
+              and max_lv <= 0.15):
+            state, col = "NO NETWORK", BLUE_BRIGHT
         elif max_lv > 0.72:
             state, col = "HIGH", RED
         elif max_lv > 0.43:
@@ -938,16 +945,23 @@ class App:
         age_ms = max(0.0, (time.time() - float(snap.get("last_update", 0.0))) * 1000.0) if snap.get("last_update") else 0.0
         frame_ms = max(0.001, float(self.debug_frame_ms))
         actual_fps = 1000.0 / frame_ms
+        phy = list(snap.get("phy") or [])
+        best = max(phy, key=lambda q: float(q.get("dqpsk_m", 0)), default=None)
         rows = [
             ("UI refresh", f"{frame_ms:5.1f} ms  {actual_fps:4.1f} FPS"),
-            ("Data age", f"{age_ms:7.0f} ms"),
+            ("Detector state", str(snap.get('detector_state','?'))),
+            ("Sites locked", f"{int(snap.get('site_locked_count',0))}"
+                             f"  (cand {int(snap.get('site_candidate_count',0))})"),
+            ("Watching", f"{len(snap.get('watch_freqs') or [])} ch"
+                         f" {str(snap.get('dwell_role','')).lower()}"),
+            ("Best DQPSK @18k", (f"{float(best.get('dqpsk_m',0)):.3f}"
+                                 f"  x{float(best.get('dqpsk_selectivity',0)):.1f}")
+                                if best else "-"),
+            ("Last verdict", (str(best.get('reason','?'))[:22]) if best else "-"),
             ("Full cycle", f"{float(snap.get('cycle_ms',0)):7.0f} ms"),
-            ("Mobile sweep", f"{float(snap.get('mobile_scan_ms',0)):7.0f} ms"),
-            ("Site sweep", f"{float(snap.get('site_scan_ms',0)):7.0f} ms"),
-            ("Last capture", f"{float(snap.get('capture_ms',0)):7.0f} ms"),
-            ("Tune windows", str(int(snap.get('scan_windows',0)))),
-            ("SDR path", str(snap.get('sdr_path','?'))),
-            ("Backend", str(snap.get('status','?'))),
+            ("Dwell capture", f"{float(snap.get('dwell_ms',0)):7.0f} ms"),
+            ("Verification", f"{float(snap.get('verify_ms',0)):7.0f} ms"),
+            ("Backend", f"{snap.get('status','?')}  age {age_ms:.0f} ms"),
         ]
         y=112
         for label,value in rows:

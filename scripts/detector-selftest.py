@@ -1,218 +1,226 @@
 #!/usr/bin/env python3
-"""Hardware-free regression checks for the RF Eye C2000/TETRA detector."""
-from __future__ import annotations
+"""End-to-end RF Eye detector test against a simulated radio environment.
 
-import copy
+``tetra-phy-selftest.py`` proves the waveform tests in isolation.  This one
+proves the whole product decision: the survey, the network lock, the duplex
+partner maths, the dwell planner and the alarm hysteresis, driven by a fake
+air interface instead of an RTL-SDR.
+
+The scenarios below are the ones that matter in the field, and numbers 4 and 5
+are the exact failure modes of detector profile v7:
+
+  1. Empty band                 -> never locks, never alerts
+  2. C2000 site, nobody talking -> locks the network, stays silent
+  3. C2000 site, handset keyed  -> locks, then alerts
+  4. TETRA-shaped burst, no net -> never alerts (no base station to belong to)
+  5. Interference on the exact
+     uplink partner channel     -> locked network, still silent
+
+    python3 scripts/detector-selftest.py
+    python3 scripts/detector-selftest.py --verbose
+"""
+import argparse
 import os
+import sys
 import tempfile
 
-import numpy as np
-import sdr_backend as sdr_module
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rfeye"))
 
-os.environ.setdefault("RFEYE_ARTIFACT_BASELINE", tempfile.mktemp(prefix="rfeye-selftest-", suffix=".json"))
+import numpy as np                                              # noqa: E402
 
-from config import DEFAULTS
-from sdr_backend import SDRBackend
+import tetra_sim as sim                                         # noqa: E402
+from config import DEFAULTS                                     # noqa: E402
+from sdr_backend import SDRBackend                              # noqa: E402
+from tetra_detector import plan_dwell, raster_snap              # noqa: E402
 
+DOWNLINKS = [391_212_500.0, 391_237_500.0, 391_262_500.0]
+UPLINKS = [f - 10_000_000.0 for f in DOWNLINKS]
 
-def backend():
-    cfg=copy.deepcopy(DEFAULTS)
-    cfg["detector_profile_version"]=7
-    cfg["artifact_baseline_persist"]=False
-    return SDRBackend(cfg)
-
-
-def candidate(freq=383_437_500.0, dep=1.5, conf=.80, pair=.90,
-              paired_now=True, pair_age=0.0, pair_hits=2):
-    return {
-        "freq_hz":float(freq),
-        "temporal_departure":float(dep),
-        "confidence":float(conf),
-        "pair_quality":float(pair),
-        "paired_now":bool(paired_now),
-        "pair_age_s":float(pair_age),
-        "pair_hits":int(pair_hits),
-        "burst_quality":.85,
-        "duty_quality":.80,
-        "rf_quality":.85,
-        "signal_strength":.80,
-        "level":.80,
-    }
+FAILURES = []
+VERBOSE = False
 
 
-def stable_peak(freq):
-    return {
-        "freq_hz":float(freq),
-        "power_db":20.0,
-        "duty":.25,
-        "burst_span_db":12.0,
-        "rf_snr_db":15.0,
-    }
+def note(msg):
+    if VERBOSE:
+        print("    " + msg)
 
 
-def pipeline_backend(mobile_sequences):
-    """Return a backend whose full _scan_cycle runs on synthetic candidates."""
-    b=backend()
-    b.cfg["site_scan_interval"]=1
-    seq=iter(mobile_sequences)
-    current=[None]
-    site=[{"freq_hz":393_437_500.0,"site_quality":1.0,
-           "signal_strength":1.0,"level":1.0}]
-    def scan(_a,_b,label):
-        if label=="MOBILE":
-            try: current[0]=next(seq)
-            except StopIteration: current[0]=[]
-            return [dict(q) for q in current[0]],np.array([380e6,385e6]),np.array([-100.,-90.]),-100.
-        return [dict(q) for q in site],np.array([390e6,395e6]),np.array([-100.,-90.]),-100.
-    b._scan_band=scan
-    b._reject_static_artifacts=lambda peaks: peaks
-    b._apply_broadband_guard=lambda peaks,_limit: peaks
+def check(name, ok, detail=""):
+    if not ok:
+        FAILURES.append(f"{name}: {detail}")
+    print(f"  [{'ok ' if ok else 'FAIL'}] {name}" + (f"  {detail}" if detail else ""))
+
+
+class FakeAir:
+    """A synthetic radio environment standing in for the RTL-SDR.
+
+    Wideband survey requests get cheap band-limited humps: the survey only has
+    to notice that something is there.  Narrowband dwell requests get real
+    generated TETRA, because that is what is actually under test.
+    """
+
+    def __init__(self, downlinks=(), uplinks=(), interferers=(), snr_db=24.0):
+        self.downlinks = list(downlinks)
+        self.uplinks = list(uplinks)
+        self.interferers = list(interferers)     # (freq_hz, kind)
+        self.snr_db = float(snr_db)
+        self.seed = 0
+
+    def _emitters(self):
+        for f in self.downlinks:
+            yield f, "downlink"
+        for f in self.uplinks:
+            yield f, "uplink"
+        for f, kind in self.interferers:
+            yield f, kind
+
+    def samples(self, centre, sr, count):
+        self.seed += 1
+        n = int(count)
+        dur = n / float(sr)
+        wide = sr > 500_000
+        parts = []
+        for freq, kind in self._emitters():
+            off = float(freq) - float(centre)
+            if abs(off) > sr * 0.45:
+                continue
+            if wide:
+                # Survey resolution only: a 20 kHz hump in the right place.
+                parts.append((sim.band_noise(dur, sr, 20_000.0, off,
+                                             self.seed + int(freq) % 977), 1.0))
+            elif kind == "downlink":
+                parts.append((sim.tetra_carrier(dur, sr, role="DOWNLINK",
+                                                seed=self.seed + 11,
+                                                freq_offset_hz=off), 1.0))
+            elif kind == "uplink":
+                parts.append((sim.tetra_carrier(dur, sr, role="UPLINK",
+                                                seed=self.seed + 23,
+                                                freq_offset_hz=off), 1.0))
+            elif kind == "gated_noise":
+                parts.append((sim.gated_noise(dur, sr, 22_000.0, 0.0142, 0.0567,
+                                              off, self.seed + 31), 1.0))
+            elif kind == "cw":
+                parts.append((sim.cw_tone(dur, sr, off), 1.0))
+            elif kind == "wide":
+                parts.append((sim.band_noise(dur, sr, 80_000.0, off,
+                                             self.seed + 41), 1.0))
+        return sim.make_capture(parts, dur, sr, snr_db=self.snr_db,
+                                seed=self.seed + 500)[:n]
+
+
+def make_backend(air, statefile, **overrides):
+    cfg = dict(DEFAULTS)
+    cfg.update(overrides)
+    os.environ["RFEYE_SITE_STATE"] = statefile
+    b = SDRBackend(cfg)
+    b.running = True
+    b._samples = lambda centre, sr, count: air.samples(centre, sr, count)
+    b.sdr_path = "SIMULATED"
     return b
 
 
-def main():
-    b=backend()
+def run(backend, cycles):
+    log = []
+    for i in range(int(cycles)):
+        ok = backend._scan_cycle()
+        s = backend.snapshot()
+        log.append(s)
+        note(f"cycle {i:2d} state={s['detector_state']:<9} "
+             f"locked={s['site_locked_count']} alert={s['mobile_confirmed']} "
+             f"cand={s['site_candidate_count']}"
+             + (f" err={s['error'][:50]}" if s["error"] else ""))
+        if not ok:
+            note("  scan cycle reported failure")
+    return log
 
-    # ETSI/C2000 +12.5 kHz offset raster: adjacent carriers must never merge.
-    freqs=[380_012_500,380_037_500,380_062_500,380_087_500,384_987_500]
-    keys=[b._carrier_key(f) for f in freqs]
-    assert keys==freqs
-    assert len(set(keys))==len(keys)
-    assert all(k % 25_000 == 12_500 for k in keys)
 
-    # The artifact map must also keep adjacent TETRA carriers separate.
-    b=backend()
-    for _ in range(5):
-        b._reject_static_artifacts([stable_peak(380_037_500),stable_peak(380_062_500)])
-    assert set(b._artifact_baseline)=={380_037_500,380_062_500}
-    b.last_comb_rejected=False
-    assert b._reject_static_artifacts([stable_peak(380_037_500)])==[]
-    assert b.last_static_rejected is True
-    assert b.last_comb_rejected is False
-
-    # Learn the measured Pi/RTL-SDR 400 kHz comb from the artifact map.
-    b=backend()
-    comb=[]
-    for center in (380_812_500,381_612_500,382_412_500,384_012_500):
-        comb.extend((center-25_000,center,center+25_000))
-    b._artifact_baseline={f:{"power":20.0,"duty":.25,"span":12.0,
-                             "rf_snr":15.0,"hits":5} for f in comb}
-    assert b._update_artifact_comb_profile()
-    assert b._artifact_comb_support>=8 and b._artifact_comb_teeth>=4
-    assert b._comb_distance(383_437_500)>float(b.cfg["artifact_comb_half_width_hz"])
-
-    # Coherent motion on two different comb teeth is hardware interference:
-    # reject the comb members but preserve an isolated off-comb C2000 carrier.
-    rows=[candidate(freq=380_812_500,dep=2.2),
-          candidate(freq=381_612_500,dep=2.0),
-          candidate(freq=383_437_500,dep=2.5)]
-    b.last_static_rejected=False
-    out=b._reject_coherent_comb(rows)
-    assert [int(q["freq_hz"]) for q in out]==[383_437_500]
-    assert b.last_coherent_comb_rejected==2
-    assert b.last_comb_event_teeth>=2
-    assert b.last_comb_rejected is True
-    assert b.last_static_rejected is False
-
-    # One comb tooth alone is not blacklisted; only coherent periodic motion is.
-    out=b._reject_coherent_comb([candidate(freq=380_812_500,dep=2.5)])
-    assert len(out)==1 and int(out[0]["freq_hz"])==380_812_500
-
-    # Memory-only duplex context needs multiple site refresh hits.
-    b=backend()
-    site=[{"freq_hz":393_437_500.0,"site_quality":1.0,"level":1.0}]
-    b._remember_sites(site,100.0)
-    q,now,age,hits=b._pair_info(393_437_500,site,100.0)
-    assert now and q>.95 and age==0 and hits>=1
-    q,now,age,hits=b._pair_info(393_437_500,[],101.0)
-    assert not now and q==0.0  # one remembered observation is insufficient
-    b._remember_sites(site,102.0)
-    q,now,age,hits=b._pair_info(393_437_500,[],103.0)
-    assert not now and q>.70 and age<=1.01 and hits>=2
-    q,now,age,hits=b._pair_info(393_437_500,[],108.0)
-    assert q==0.0
-
-    # Moderate evidence needs two hits on the same carrier.
-    b=backend()
-    _,ok=b._hysteresis([candidate(dep=1.5)],100.0)
-    assert not ok
-    _,ok=b._hysteresis([candidate(dep=1.5)],101.0)
-    assert ok
-
-    # Adjacent carriers cannot combine their hit counts.
-    b=backend()
-    _,ok=b._hysteresis([candidate(freq=380_037_500,dep=1.5)],100.0)
-    assert not ok
-    _,ok=b._hysteresis([candidate(freq=380_062_500,dep=1.5)],101.0)
-    assert not ok
-
-    # A strong novelty event may confirm immediately only with fresh pair data.
-    b=backend()
-    _,ok=b._hysteresis([candidate(dep=2.5)],100.0)
-    assert ok
-
-    b=backend()
-    _,ok=b._hysteresis([candidate(dep=2.5,pair=.55,paired_now=True)],100.0)
-    assert not ok  # current but weak pair may not single-shot confirm
-
-    b=backend()
-    _,ok=b._hysteresis([candidate(dep=2.5,paired_now=False,pair_age=3.0,pair_hits=2)],100.0)
-    assert not ok
-
-    b=backend()
-    _,ok=b._hysteresis([candidate(dep=2.5,paired_now=False,pair_age=1.0,pair_hits=2)],100.0)
-    assert ok
-
-    # Novelty contributes materially to confidence.
-    b=backend()
-    base=candidate(dep=1.25); strong=candidate(dep=2.0)
-    c0=b._confidence(base,.9); c1=b._confidence(strong,.9)
-    assert c1>c0+.15
-
-    # Full scan-cycle regression: a perfectly paired but stationary candidate
-    # must be rejected before it can preload hysteresis.
-    b=pipeline_backend([[candidate(dep=.4)]])
-    assert b._scan_cycle()
-    s=b.snapshot()
-    assert not s["mobile_peaks"] and not s["peaks"]
-    assert s["novelty_rejected_count"]==1
-
-    # Moderate novel evidence requires two valid cycles on the same carrier.
-    b=pipeline_backend([[candidate(dep=1.5)],[candidate(dep=1.5)]])
-    assert b._scan_cycle()
-    assert b.snapshot()["mobile_peaks"] and not b.snapshot()["peaks"]
-    assert b._scan_cycle()
-    assert b.snapshot()["peaks"]
-
-    # Very strong novelty + strong current pair can alert in one cycle.
-    b=pipeline_backend([[candidate(dep=2.5)]])
-    assert b._scan_cycle()
-    assert b.snapshot()["peaks"]
-
-    # The rtl_sdr CLI fallback must never accept a partial one-block capture
-    # when multiple FFT blocks were requested.
-    b=backend()
-    b._direct_samples=lambda *_args,**_kwargs: (_ for _ in ()).throw(RuntimeError("direct failed"))
-    old_which=sdr_module.shutil.which
-    old_popen=sdr_module.subprocess.Popen
-    class ShortProc:
-        def __init__(self,*args,**kwargs): self.pid=12345; self.returncode=0
-        def communicate(self,timeout=None): return (bytes(16),b"")
-    sdr_module.shutil.which=lambda name: "/fake/rtl_sdr" if name=="rtl_sdr" else old_which(name)
-    sdr_module.subprocess.Popen=ShortProc
-    try:
+def scenario(name, air, cycles=14, **overrides):
+    print(f"\n{name}")
+    with tempfile.TemporaryDirectory() as d:
+        b = make_backend(air, os.path.join(d, "sites.json"), **overrides)
         try:
-            b._capture(382e6,2048000,8,4,True)
-        except RuntimeError as exc:
-            assert "short capture 16/64 bytes" in str(exc)
-        else:
-            raise AssertionError("partial CLI capture was accepted")
-    finally:
-        sdr_module.shutil.which=old_which
-        sdr_module.subprocess.Popen=old_popen
-
-    print("RF Eye detector profile v7 self-test: OK")
+            return run(b, cycles)
+        finally:
+            b.running = False
 
 
-if __name__=="__main__":
-    main()
+def main():
+    global VERBOSE
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+    VERBOSE = args.verbose
+
+    # 1 -- nothing on air but noise and clutter.
+    log = scenario("1. empty band with clutter",
+                   FakeAir(interferers=[(381_237_500.0, "wide"),
+                                        (382_512_500.0, "cw")]))
+    check("never locks a network", not any(s["site_locked_count"] for s in log),
+          f"max locked = {max(s['site_locked_count'] for s in log)}")
+    check("never alerts", not any(s["mobile_confirmed"] for s in log))
+
+    # 2 -- a real C2000 site, but no handset transmitting nearby.
+    log = scenario("2. C2000 site present, uplink silent",
+                   FakeAir(downlinks=DOWNLINKS))
+    check("locks the C2000 network", any(s["site_locked_count"] for s in log),
+          f"max locked = {max(s['site_locked_count'] for s in log)}")
+    check("stays silent with no uplink traffic",
+          not any(s["mobile_confirmed"] for s in log))
+
+    # 3 -- the case the product exists for.
+    log = scenario("3. C2000 site with a handset transmitting",
+                   FakeAir(downlinks=DOWNLINKS, uplinks=UPLINKS[:1]), cycles=18)
+    check("locks the C2000 network", any(s["site_locked_count"] for s in log))
+    check("alerts on the verified uplink", any(s["mobile_confirmed"] for s in log))
+    hits = [s for s in log if s["mobile_confirmed"] and s["peaks"]]
+    if hits:
+        f = hits[0]["peaks"][0]["freq_hz"]
+        check("alert names the right uplink channel", abs(f - UPLINKS[0]) < 1000.0,
+              f"{f/1e6:.4f} MHz vs expected {UPLINKS[0]/1e6:.4f} MHz")
+        note(f"first alert: {hits[0]['peaks'][0]}")
+    else:
+        check("alert names the right uplink channel", False, "no alert produced")
+
+    # 4 -- a TETRA-shaped transmission with no base station behind it. Real
+    #      C2000 handsets never exist without a site, so this must stay silent.
+    log = scenario("4. uplink-shaped signal with no C2000 network",
+                   FakeAir(uplinks=UPLINKS[:1]))
+    check("never alerts without a locked network",
+          not any(s["mobile_confirmed"] for s in log))
+
+    # 5 -- the profile v7 killer: interference sitting on exactly the channel
+    #      being watched, with a TETRA-like bandwidth and duty cycle.
+    log = scenario("5. interference on the exact uplink partner channel",
+                   FakeAir(downlinks=DOWNLINKS,
+                           interferers=[(UPLINKS[0], "gated_noise"),
+                                        (UPLINKS[1], "wide")]), cycles=18)
+    check("still locks the C2000 network", any(s["site_locked_count"] for s in log))
+    check("does not alert on interference",
+          not any(s["mobile_confirmed"] for s in log))
+
+    # Dwell planning and raster maths, independent of any capture.
+    print("\n6. planner and raster")
+    centre, members = plan_dwell(UPLINKS, 288_000.0)
+    check("one dwell covers a whole site's uplink list", len(members) == len(UPLINKS),
+          f"{len(members)}/{len(UPLINKS)} channels")
+    check("tuner centre avoids every watched channel",
+          all(abs(f - centre) >= 20_000.0 for f, _ in members),
+          f"centre {centre/1e6:.4f} MHz")
+    check("offsets stay inside the usable window",
+          all(abs(o) <= 100_000.0 for _, o in members))
+    snapped = raster_snap(381_240_000.0, 380_000_000.0)
+    check("raster snaps to the +12.5 kHz TETRA grid",
+          abs(snapped - 381_237_500.0) < 1.0, f"{snapped:.0f} Hz")
+
+    print()
+    if FAILURES:
+        print(f"{len(FAILURES)} failures")
+        for f in FAILURES:
+            print("  FAIL " + f)
+        return 1
+    print("detector-selftest OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

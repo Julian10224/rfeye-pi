@@ -58,7 +58,7 @@ except Exception:
     pass
 
 DEFAULTS = {
-    "detector_profile_version": 7,
+    "detector_profile_version": 8,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -67,83 +67,84 @@ DEFAULTS = {
     "fullscreen": True,
     "scan_start_hz": 380_000_000,
     "scan_end_hz": 395_000_000,
-    "sample_rate": 2_048_000,
     "sdr_device_index": 0,
-    "allow_cli_sdr_fallback": True,
+
+    # Wideband survey. Only ever used to shortlist downlink carriers worth
+    # verifying, and to draw the spectrum page. It decides nothing.
+    "sample_rate": 2_048_000,
     "fft_size": 1024,
-    "fft_blocks": 8,
-    "mobile_capture_ms": 64.0,
-    "site_capture_ms": 36.0,
-    "site_scan_interval": 3,
-    "sdr_stop_join_s": 8.0,
-    "carrier_memory_s": 2.5,
-    "confirm_window_s": 2.2,
-    "alert_hold_s": 3.0,
-    "strong_hit_confidence": 0.78,
-    "artifact_calibration_sweeps": 5,
-    "artifact_min_baseline_hits": 4,
-    "artifact_rf_snr_delta_db": 5.0,
-    "artifact_duty_delta": 0.12,
-    "artifact_span_delta_db": 3.5,
-    "artifact_max_rf_snr_std_db": 2.0,
-    "artifact_max_duty_std": 0.08,
-    "artifact_max_span_std_db": 2.5,
-    "artifact_baseline_persist": True,
-    "artifact_baseline_max_age_days": 30.0,
-    "artifact_comb_period_hz": 400_000.0,
-    "artifact_comb_half_width_hz": 50_000.0,
-    "artifact_comb_min_baseline_support": 8,
-    "artifact_comb_min_baseline_teeth": 4,
-    "artifact_comb_min_baseline_fraction": 0.45,
-    "artifact_comb_event_min_departure": 1.25,
-    "artifact_comb_event_min_teeth": 2,
-    "temporal_baseline_alpha": 0.08,
-    "temporal_state_max_age_s": 30.0,
-    "temporal_rf_snr_scale_db": 4.0,
-    "temporal_duty_scale": 0.10,
-    "temporal_span_scale_db": 3.0,
-    "broadband_temporal_min_departure": 1.25,
-    "broadband_dynamic_keep_max": 6,
+    "survey_capture_ms": 48.0,
+    "survey_interval_s": 60.0,
+    "survey_idle_interval_s": 15.0,
+    "survey_min_snr_db": 6.0,
+    "survey_max_candidates": 12,
+    "display_sweep_interval": 4,
     "mobile_percentile": 95.0,
+
+    # Narrowband verification dwell. 288 kS/s is 28.8 MHz / 100 exactly, and
+    # exactly 16x the 18000 baud TETRA symbol rate, so channel decimation is
+    # exact and the symbol clock needs no resampling. 2^18 samples is 0.910 s,
+    # about 16 TDMA frames, enough to measure the 17.647 Hz frame line.
+    "phy_sample_rate": 288_000,
+    "phy_dwell_log2": 18,
+    "phy_decimation": 8,
+    "phy_max_offset_hz": 100_000.0,
+    "phy_timing_phases": 8,
+
+    # TETRA acceptance limits. These mirror tetra_phy.LIMITS and are the
+    # values calibrated by scripts/tetra-phy-selftest.py. Loosening any of
+    # them trades false alarms back in; they are exposed so a unit can be
+    # tuned in the field without editing code, not because they are guesses.
+    "phy_min_snr_db": 8.0,
+    "phy_min_occupied_bw_hz": 14000.0,
+    "phy_max_occupied_bw_hz": 30000.0,
+    "phy_min_boundary_reject_db": 6.0,
+    "phy_max_flatness_db": 14.0,
+    "phy_max_centre_error_hz": 4000.0,
+    "phy_min_dqpsk_m": 0.20,
+    "phy_min_dqpsk_phase_spread": 0.50,
+    "phy_min_dqpsk_selectivity": 1.6,
+    "phy_downlink_min_duty": 0.80,
+    "phy_uplink_min_duty": 0.04,
+    "phy_uplink_max_duty": 0.85,
+    "phy_uplink_min_frame_ratio": 3.0,
+    "phy_uplink_min_slot_quantisation": 0.45,
+    "phy_uplink_min_bursts": 3,
+
+    # C2000 network lock. Slow to acquire, slower to lose.
+    "duplex_split_hz": 10_000_000.0,
+    "site_lock_hits": 3,
+    "site_unlock_misses": 4,
+    "site_lock_stale_s": 3600.0,
+    "site_lock_max_age_days": 21.0,
+    "site_forget_s": 1800.0,
+    "site_reverify_s": 300.0,
+    "site_state_persist": True,
+
+    # Uplink alarm smoothing. Everything reaching this has already passed the
+    # full waveform test, so these only stop the display flickering between
+    # transmissions.
+    "uplink_confirm_dwells": 2,
+    "uplink_confirm_window_s": 8.0,
+    "uplink_alert_hold_s": 12.0,
+
     "tetra_channel_spacing_hz": 25_000.0,
     "tetra_raster_offset_hz": 12_500.0,
     "tetra_channel_half_width_hz": 9000.0,
-    "burst_gate_db": 6.0,
-    "min_burst_duty": 0.035,
-    "max_burst_duty": 0.65,
-    "preferred_burst_duty_min": 0.06,
-    "preferred_burst_duty_max": 0.45,
-    "mobile_min_rf_snr_db": 5.0,
-    "site_min_snr_db": 5.0,
-    "site_burst_snr_db": 8.0,
-    "site_pair_memory_s": 5.0,
-    "site_pair_min_hits": 2,
-    "site_max_candidates": 64,
-    "duplex_pair_tolerance_hz": 1000.0,
-    "duplex_pair_min_quality": 0.40,
-    "novelty_min_departure": 1.25,
-    "novelty_strong_departure": 2.0,
-    "strong_pair_max_age_s": 2.5,
-    "strong_pair_min_quality": 0.75,
-    "require_duplex_pair": True,
-    "require_current_duplex_pair": False,
-    "max_mobile_candidates_per_sweep": 12,
-    "candidate_min_confidence": 0.52,
-    "confidence_attack": 0.58,
-    "confidence_release": 0.20,
-    "confidence_confirm": 0.62,
-    "confidence_clear": 0.30,
-    "ui_fps": 20,
-    "gain": "auto",
-    "ppm": 0,
-    "rf_record_duration_s": 15.0,
-    "confirm_hits": 2,
-    "clear_hits": 2,
+
+    "sdr_stop_join_s": 8.0,
+    "allow_cli_sdr_fallback": False,
+    "keep_last_iq": True,
+    "rf_record_iq": True,
     "mobile_band_start_hz": 380_000_000,
     "mobile_band_end_hz": 385_000_000,
     "site_band_start_hz": 390_000_000,
     "site_band_end_hz": 395_000_000,
     "max_signals": 3,
+    "rf_record_duration_s": 15.0,
+    "ui_fps": 20,
+    "gain": "auto",
+    "ppm": 0,
     "muted": False,
     "startup_chime": True,
     "demo_mode": False,
@@ -165,7 +166,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.7.37",
+    "app_version": "0.8.0",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -199,40 +200,55 @@ def load_config():
     cfg["audio_mode"] = "adaptive"
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
-    # Detector profile v7 keeps the corrected +12.5 kHz TETRA raster and
-    # v6 novelty/duplex gates, then adds a learned coherent-comb rejector for
-    # the Pi/RTL-SDR hardware pattern seen during real driving tests.
-    if int(saved.get("detector_profile_version", 0) or 0) < 7:
-        for key in (
-            "mobile_capture_ms", "site_capture_ms", "site_scan_interval",
-            "carrier_memory_s", "confirm_window_s", "alert_hold_s",
-            "strong_hit_confidence", "artifact_calibration_sweeps",
-            "artifact_min_baseline_hits", "artifact_rf_snr_delta_db",
-            "artifact_duty_delta", "artifact_span_delta_db",
-            "artifact_max_rf_snr_std_db", "artifact_max_duty_std",
-            "artifact_max_span_std_db", "artifact_baseline_persist",
-            "artifact_baseline_max_age_days",
-            "artifact_comb_period_hz", "artifact_comb_half_width_hz",
-            "artifact_comb_min_baseline_support", "artifact_comb_min_baseline_teeth",
-            "artifact_comb_min_baseline_fraction", "artifact_comb_event_min_departure",
-            "artifact_comb_event_min_teeth",
-            "temporal_baseline_alpha", "temporal_state_max_age_s",
-            "temporal_rf_snr_scale_db", "temporal_duty_scale",
-            "temporal_span_scale_db", "broadband_temporal_min_departure",
-            "broadband_dynamic_keep_max",
-            "tetra_channel_spacing_hz", "tetra_raster_offset_hz",
-            "site_pair_memory_s", "site_pair_min_hits", "site_max_candidates",
-            "duplex_pair_min_quality", "novelty_min_departure",
-            "novelty_strong_departure", "strong_pair_max_age_s",
-            "strong_pair_min_quality", "candidate_min_confidence",
-            "require_current_duplex_pair",
-        ):
+    # Detector profile v8 replaces energy-statistics detection with real
+    # ETSI EN 300 392-2 waveform verification. Every v6/v7 tuning key below
+    # controlled a gate that no longer exists, so a unit upgrading from an
+    # older profile must not carry its saved values forward -- they would
+    # either do nothing or, where a name was reused, mean something else.
+    if int(saved.get("detector_profile_version", 0) or 0) < 8:
+        for key in list(DEFAULTS):
+            if key.startswith(("phy_", "site_", "survey_", "uplink_")):
+                cfg[key] = DEFAULTS[key]
+        for key in ("sample_rate", "fft_size", "duplex_split_hz",
+                    "mobile_band_start_hz", "mobile_band_end_hz",
+                    "display_sweep_interval", "mobile_percentile",
+                    "tetra_channel_spacing_hz", "tetra_raster_offset_hz",
+                    "tetra_channel_half_width_hz", "allow_cli_sdr_fallback"):
             cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 7
+    cfg["detector_profile_version"] = 8
     for obsolete in (
+        # pre-v7 leftovers
         "threshold_db", "threshold_min_db", "threshold_max_db",
         "threshold_step_db", "threshold_soft_margin_db", "min_burst_span_db",
         "buzzer_duration_ms", "buzzer_high_hz", "buzzer_low_hz",
+        # v6/v7 energy-statistics detector, removed in v8
+        "artifact_calibration_sweeps", "artifact_min_baseline_hits",
+        "artifact_rf_snr_delta_db", "artifact_duty_delta",
+        "artifact_span_delta_db", "artifact_max_rf_snr_std_db",
+        "artifact_max_duty_std", "artifact_max_span_std_db",
+        "artifact_baseline_persist", "artifact_baseline_max_age_days",
+        "artifact_comb_period_hz", "artifact_comb_half_width_hz",
+        "artifact_comb_min_baseline_support", "artifact_comb_min_baseline_teeth",
+        "artifact_comb_min_baseline_fraction", "artifact_comb_event_min_departure",
+        "artifact_comb_event_min_teeth",
+        "temporal_baseline_alpha", "temporal_state_max_age_s",
+        "temporal_rf_snr_scale_db", "temporal_duty_scale",
+        "temporal_span_scale_db", "broadband_temporal_min_departure",
+        "broadband_dynamic_keep_max", "novelty_min_departure",
+        "novelty_strong_departure", "max_mobile_candidates_per_sweep",
+        "mobile_capture_ms", "site_capture_ms", "site_scan_interval",
+        "fft_blocks", "burst_gate_db", "min_burst_duty", "max_burst_duty",
+        "preferred_burst_duty_min", "preferred_burst_duty_max",
+        "mobile_min_rf_snr_db", "site_min_snr_db", "site_burst_snr_db",
+        "site_pair_memory_s", "site_pair_min_hits", "site_max_candidates",
+        "duplex_pair_tolerance_hz", "duplex_pair_min_quality",
+        "require_duplex_pair", "require_current_duplex_pair",
+        "strong_pair_max_age_s", "strong_pair_min_quality",
+        "strong_hit_confidence", "candidate_min_confidence",
+        "confidence_attack", "confidence_release",
+        "confidence_confirm", "confidence_clear",
+        "carrier_memory_s", "confirm_window_s", "alert_hold_s",
+        "confirm_hits", "clear_hits",
     ):
         cfg.pop(obsolete, None)
     return cfg

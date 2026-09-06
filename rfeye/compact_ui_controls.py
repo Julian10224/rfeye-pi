@@ -5,6 +5,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
+
 
 
 def _save(app):
@@ -31,18 +33,13 @@ def _record_payload_snapshot(app):
         "captured_at":datetime.now().astimezone().isoformat(timespec="milliseconds"),
         "source_last_update":float(snap.get("last_update",0.0) or 0.0),
         "detector":{k:_plain(snap.get(k)) for k in (
-            "status","activity_confidence","mobile_confirmed","noise",
-            "mobile_level","site_level","peaks","mobile_peaks","site_peaks",
-            "broadband_rejected","static_rejected","comb_rejected","artifact_calibrating",
-            "artifact_sweep","artifact_baseline_count","artifact_baseline_loaded",
-            "artifact_tainted_count","raw_mobile_candidate_count",
-            "post_artifact_candidate_count","post_comb_candidate_count",
-            "coherent_comb_rejected_count","comb_event_teeth",
-            "comb_profile_support","comb_profile_teeth","comb_profile_phase_hz",
-            "broadband_kept_count",
-            "novelty_rejected_count","pair_rejected_count","confidence_rejected_count",
-            "debug_mobile_candidates","confirm_streak","clear_streak",
-            "cycle_ms","mobile_scan_ms","site_scan_ms","capture_ms","scan_windows","sdr_path")},
+            "status","detector_state","activity_confidence","mobile_confirmed",
+            "noise","mobile_level","site_level","peaks","mobile_peaks",
+            "site_peaks","phy","network_locked","site_locked_count",
+            "site_candidate_count","site_state_loaded","watch_freqs",
+            "dwell_centre_hz","dwell_role","survey_shortlist",
+            "confirm_streak","clear_streak","cycle_ms","dwell_ms","verify_ms",
+            "survey_ms","capture_ms","scan_windows","sdr_path")},
         "spectrum":{
             "freq_hz":_plain(snap.get("freqs",[])),
             "power_db":_plain(snap.get("spectrum",[])),
@@ -203,15 +200,46 @@ def _delete_selected_recording(app):
         return False
 
 
+def _dump_iq_sidecar(app, stem):
+    """Write the raw dwell that produced an alert, next to the recording.
+
+    A profile v7 recording could tell you that the device fired but never what
+    the signal actually was, so a false alarm could not be investigated after
+    the fact. Keeping the IQ means any alert can be re-verified offline with
+    scripts/analyse-capture.py, including against changed settings.
+    """
+    try:
+        backend=getattr(app,"backend",None)
+        iq=getattr(backend,"last_iq",None)
+        meta=dict(getattr(backend,"last_iq_meta",{}) or {})
+        if iq is None or not len(iq):
+            return None
+        out=_capture_dir(); out.mkdir(parents=True,exist_ok=True)
+        raw=out/(stem+".iq8")
+        # The same unsigned 8-bit interleaved I/Q the RTL-SDR delivers, so the
+        # file is directly usable by other SDR tools too.
+        buf=np.empty(len(iq)*2,dtype=np.uint8)
+        buf[0::2]=np.clip(np.round(np.real(iq))+127.5,0,255).astype(np.uint8)
+        buf[1::2]=np.clip(np.round(np.imag(iq))+127.5,0,255).astype(np.uint8)
+        raw.write_bytes(buf.tobytes())
+        meta.update(format="u8iq",path=raw.name,bytes=int(buf.nbytes))
+        (out/(stem+".iq8.json")).write_text(json.dumps(meta,indent=2,sort_keys=True))
+        return meta
+    except Exception:
+        return None
+
+
 def _record_rf_worker(app, duration):
     started=datetime.now().astimezone(); end_mono=time.monotonic()+duration
-    samples=[]; last_update=None
+    samples=[]; last_update=None; alerted=False
     try:
         while time.monotonic() < end_mono:
             item=_record_payload_snapshot(app)
             stamp=item.get("source_last_update",0.0)
             if stamp != last_update:
                 samples.append(item); last_update=stamp
+                if (item.get("detector") or {}).get("mobile_confirmed"):
+                    alerted=True
             time.sleep(0.12)
         item=_record_payload_snapshot(app)
         stamp=item.get("source_last_update",0.0)
@@ -219,31 +247,28 @@ def _record_rf_worker(app, duration):
             samples.append(item)
         ended=datetime.now().astimezone(); cfg=app.cfg
         data={
-            "schema":"rfeye-rf-series-v7",
+            "schema":"rfeye-rf-series-v8",
             "recorded_from":started.isoformat(timespec="milliseconds"),
             "recorded_to":ended.isoformat(timespec="milliseconds"),
             "requested_duration_s":float(duration),
             "sample_count":len(samples),
             "capture_settings":{k:_plain(cfg.get(k)) for k in (
-                "sample_rate","fft_size","mobile_capture_ms","site_capture_ms","site_scan_interval",
-                "gain","ppm","detector_profile_version","mobile_band_start_hz","mobile_band_end_hz",
-                "site_band_start_hz","site_band_end_hz","artifact_calibration_sweeps","artifact_min_baseline_hits",
-                "artifact_rf_snr_delta_db","artifact_duty_delta","artifact_span_delta_db",
-                "artifact_max_rf_snr_std_db","artifact_max_duty_std","artifact_max_span_std_db",
-                "artifact_baseline_persist","artifact_baseline_max_age_days",
-                "artifact_comb_period_hz","artifact_comb_half_width_hz",
-                "artifact_comb_min_baseline_support","artifact_comb_min_baseline_teeth",
-                "artifact_comb_min_baseline_fraction","artifact_comb_event_min_departure",
-                "artifact_comb_event_min_teeth",
-                "temporal_baseline_alpha","temporal_state_max_age_s",
-                "temporal_rf_snr_scale_db","temporal_duty_scale","temporal_span_scale_db",
-                "broadband_temporal_min_departure","broadband_dynamic_keep_max",
-                "tetra_channel_spacing_hz","tetra_raster_offset_hz",
-                "site_pair_memory_s","site_pair_min_hits","site_max_candidates",
-                "duplex_pair_min_quality","require_duplex_pair","require_current_duplex_pair",
-                "novelty_min_departure","novelty_strong_departure",
-                "strong_pair_max_age_s","strong_pair_min_quality",
-                "candidate_min_confidence","strong_hit_confidence","confirm_hits","clear_hits")},
+                "detector_profile_version","sample_rate","fft_size","gain","ppm",
+                "phy_sample_rate","phy_dwell_log2","phy_decimation",
+                "phy_max_offset_hz","phy_min_snr_db","phy_min_occupied_bw_hz",
+                "phy_max_occupied_bw_hz","phy_min_boundary_reject_db",
+                "phy_max_flatness_db","phy_max_centre_error_hz",
+                "phy_min_dqpsk_m","phy_min_dqpsk_phase_spread",
+                "phy_min_dqpsk_selectivity","phy_downlink_min_duty",
+                "phy_uplink_min_duty","phy_uplink_max_duty",
+                "phy_uplink_min_frame_ratio","phy_uplink_min_slot_quantisation",
+                "phy_uplink_min_bursts","duplex_split_hz","site_lock_hits",
+                "site_unlock_misses","site_reverify_s","survey_interval_s",
+                "survey_min_snr_db","survey_max_candidates",
+                "uplink_confirm_dwells","uplink_confirm_window_s",
+                "uplink_alert_hold_s","mobile_band_start_hz","mobile_band_end_hz",
+                "site_band_start_hz","site_band_end_hz",
+                "tetra_channel_spacing_hz","tetra_raster_offset_hz")},
             "samples":samples,
         }
         out=_capture_dir()
@@ -253,6 +278,10 @@ def _record_rf_worker(app, duration):
         suffix=2
         while path.exists():
             path=out/(f"{stem}_{suffix}.json"); suffix+=1
+        if alerted and bool(cfg.get("rf_record_iq",True)):
+            iq_meta=_dump_iq_sidecar(app,path.stem)
+            if iq_meta:
+                data["iq_sidecar"]=iq_meta
         path.write_text(json.dumps(data,indent=2,allow_nan=False)+"\n")
         app.last_rf_record_path=str(path)
         app.rf_record_message=f"SAVED {len(samples)}"

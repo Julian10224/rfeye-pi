@@ -1,4 +1,4 @@
-# RF Eye 0.7.37 for Raspberry Pi
+# RF Eye 0.8.0 for Raspberry Pi
 
 This repository contains the complete **RF Eye 0.7.37 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
@@ -52,7 +52,7 @@ The installer reproduces the working 0.7.37 appliance path:
 - NetworkManager remains enabled and associates in parallel with local display startup
 - OTA updates permanently use the `main` manifest
 
-A fresh installation also receives `config/reference-config-cuqi35.json` as its initial **non-secret** RF Eye settings. It captures the working display/touch profile plus the automatic detector-v3 timing and baseline parameters. Detection sensitivity is automatic; there is no user dB threshold. Existing installations keep their own unrelated user settings during reinstall/update while obsolete sensitivity keys are migrated away.
+A fresh installation also receives `config/reference-config-cuqi35.json` as its initial **non-secret** RF Eye settings. It captures the working display/touch profile plus the detector profile v8 acceptance limits. Detection sensitivity is automatic; there is no user dB threshold. Upgrading to v8 resets every detector key, because each v6/v7 tuning value controlled a gate that no longer exists; unrelated user settings are preserved.
 
 Wi-Fi credentials and other account/machine secrets are **not** stored in this repository.
 
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.7.37
+## User interface in 0.8.0
 
 The compact profile contains:
 
@@ -117,19 +117,113 @@ Settings -> Debug -> Touch calibration
 
 The five-point affine calibration is saved immediately in the local RF Eye config.
 
-## RF activity scanner
+## C2000 detection (detector profile v8)
 
-The SDR backend keeps a persistent `librtlsdr` handle open where possible and uses vectorized FFT-based scanning over the configured bands. Detector profile v7 retains the corrected C2000/TETRA 25 kHz raster with the required +12.5 kHz offset (380.0125 MHz + N×25 kHz), so adjacent carriers never share artifact or hysteresis state. The mobile/uplink band is revisited at roughly one-second cadence on the reference Pi; downlink context is refreshed every three mobile sweeps and retained only briefly. Soft burst/SNR scoring remains automatic, while a per-channel temporal reference with common-mode AGC correction supplies the novelty gate.
+RF Eye detects that an emergency-services radio is transmitting near the
+receiver. It does this by verifying the actual ETSI EN 300 392-2 TETRA
+waveform, not by watching for energy in a frequency range.
 
-On the first calibration for a detector profile, five normal sweeps observe the local Pi/RTL-SDR RF environment. A frequency is added to the stationary clutter map only when it is present in enough sweeps and remains stable in relative RF-SNR, burst duty and burst span. A carrier whose metrics become variable during those sweeps is marked transient and may escape the startup filter immediately instead of being learned as background.
+### Why this was rebuilt
 
-The resulting hardware baseline is stored locally under the user's RF Eye state directory and reused on later restarts (subject to detector profile/band/sample-rate validation and a maximum age). Profile v6 invalidated older v5 baselines because the previous absolute 25 kHz rounding could merge adjacent +12.5 kHz-offset carriers. Profile v7 keeps the same corrected baseline representation and can safely adopt a v6 baseline once during OTA migration, immediately persisting it as v7.
+Detector profiles up to v7 decided from wideband energy statistics: channel
+power, duty cycle, burst span, and how much those had moved since the previous
+sweep. None of that is specific to TETRA, so no threshold on those features
+could separate a police handset from any other bursty RF. Field recordings
+made the failure explicit:
 
-Starting with RF Eye 0.7.32, an unusually busy sweep no longer deletes the entire candidate set. The broadband guard instead keeps only carriers whose RF-SNR, duty or burst span changed materially relative to their own slow temporal reference. Profile v6 added the final novelty/duplex gate: a candidate cannot confirm unless temporal departure is at least 1.25; memory-only +10 MHz context expires after 5 seconds and requires at least two site observations; ordinary candidates need two valid hits on the same true TETRA carrier.
+- the duplex-pair gate passed **100%** of the 390-395 MHz channels it scored,
+  so "paired with a downlink" meant nothing;
+- the temporal novelty gate rejected **zero** candidates during busy sweeps;
+- alerts landed on three neighbouring 25 kHz raster points at once, which a
+  single TETRA carrier physically cannot do.
 
-Driving recordings from profile v6 exposed a separate hardware failure mode. The reference Pi/RTL-SDR produced a strong periodic artifact family at approximately 400 kHz spacing, often with ±25 kHz sidebands. Because 10 MHz is exactly 25 × 400 kHz, the same local hardware comb appeared at the nominal duplex partner frequencies and could therefore validate itself as a false C2000 pair. Profile v7 learns the dominant comb phase from the unit's own artifact baseline. The comb guard activates only when that baseline has strong periodic support and rejects comb-family candidates only when at least two different 400 kHz teeth change coherently in the same sweep. A single isolated carrier on the same frequency grid is not blacklisted and remains eligible for normal C2000 processing.
+Each release added another subtractive workaround -- a clutter baseline, a
+coherent-comb rejector, a broadband guard -- and each one could also suppress
+a real detection. v8 removes all of them and tests the signal instead.
 
-The display reports RF activity/status only; it does not identify a transmitter or determine an exact physical distance.
+### What is actually verified
+
+Three independent physical-layer properties, in `rfeye/tetra_phy.py`:
+
+| Test | What it proves | What it defeats |
+| --- | --- | --- |
+| pi/4-DQPSK at exactly 18000 baud | the modulation is TETRA | nearly everything else |
+| Four-phase differential spread | four real constellation points, not one | CW spurs, narrowband FSK |
+| Symbol-rate selectivity vs decoy rates | 18 kbaud specifically, not "some digital signal" | other DQPSK systems |
+| 25 kHz RRC(0.35) shape, channel-edge valley | one 25 kHz carrier, not a wide hump | broadband clutter |
+| 14.1667 ms TDMA slots, 17.647 Hz frame line | TETRA burst structure | arbitrary gated signals |
+
+The fourth-moment test is frequency-offset invariant, so it works straight off
+an uncalibrated RTL-SDR with tens of ppm of crystal error. Each score is
+measured against deliberately mismatched decoy hypotheses -- a wrong symbol
+rate, a wrong frame rate -- so the headline numbers are ratios rather than
+absolute levels, and need no recalibration per unit, antenna or location.
+
+### Two stages: lock the network, then watch it
+
+**Stage 1 -- network lock.** C2000 base stations transmit continuously in
+390-395 MHz, so they can be verified thoroughly and repeatedly. A carrier must
+pass the full waveform test on several separate dwells before it counts. The
+result is stored in `~/.local/state/rfeye/c2000-sites.json` and survives
+restarts.
+
+**If no base station verifies, the device stays silent and says so.** Without
+C2000 coverage there is nothing to be near, so any alert would be wrong. The
+main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
+all-clear.
+
+**Stage 2 -- uplink watch.** TETRA duplex spacing in this band is 10 MHz, so
+each verified downlink names exactly one uplink channel where handsets on that
+site transmit: a verified downlink at 391.2375 MHz means handsets transmit at
+381.2375 MHz. The uplink search is therefore a short watch list rather than a
+blind sweep of 200 channels, and one 288 kS/s dwell covers a whole site's
+worth of channels at once.
+
+An alert means: a handset physically near this receiver is transmitting on a
+carrier belonging to a base station this device independently verified.
+
+### What it cannot tell you
+
+C2000 carries police, ambulance, fire and the KMar on one shared network,
+encrypted with TEA2. Nothing in the RF layer identifies the service, the unit
+or the user, and RF Eye makes no attempt to decode traffic -- it measures
+modulation structure only. A confirmed alert means *an emergency services
+radio is transmitting nearby*, not specifically *police*. The display reports
+RF activity and status only; it does not identify a transmitter or determine
+a physical distance.
+
+### Sampling and timing
+
+The verification dwell runs at 288 kS/s: exactly 28.8 MHz / 100, and exactly
+16x the 18000 baud symbol rate, so channel decimation and the symbol clock are
+both exact with no resampling. Each dwell is 2^18 samples (0.910 s, about 16
+TDMA frames). The tuner is deliberately offset from every channel under test
+so the RTL-SDR DC spike never lands on a carrier being measured.
+
+On the reference Pi 3 B+ a quiet cycle costs about 1.2 s and a cycle carrying
+a real transmission about 1.7 s. Tests run cheapest first and stop at the
+first hard failure, so eight empty channels cost the same as one.
+
+### Verifying the detector yourself
+
+Both suites run without an SDR, an antenna or a real transmission:
+
+```bash
+python3 scripts/tetra-phy-selftest.py --table
+```
+
+```bash
+python3 scripts/detector-selftest.py --verbose
+```
+
+`tetra-phy-selftest.py` generates known-truth TETRA at several SNRs plus every
+interferer shape that has caused a false alarm, then asserts the verdicts.
+`--table` prints every measured score; that table is how the acceptance limits
+in `tetra_phy.LIMITS` were chosen. `detector-selftest.py` drives the whole
+backend against a simulated air interface, including the two cases that
+mattered most in the field: a TETRA-shaped burst with no network behind it,
+and interference sitting on exactly the uplink channel being watched. Both
+must stay silent.
 
 ## RF recording
 
@@ -143,7 +237,29 @@ Captured JSON files are stored locally under:
 
 They are not committed to GitHub automatically. New files use the human-readable local start time as their filename, for example `2026-09-04_20-26-35.json`. Opening the Recordings browser also migrates older `rf-series-...` names from the embedded `recorded_from` timestamp without changing recording contents.
 
-Recording schema v7 additionally stores the learned comb profile support/phase, number of coherent comb teeth in each sweep and how many candidates the comb guard removed, alongside the v6 novelty-, duplex-pair- and confidence diagnostics. The Recordings browser replays files through the current downstream detector and normal buzzer rhythm. v7 files are labelled **EXACT v7**; existing v6/v5 files remain exact downstream replays because they already contain the required pre-pair candidate data. Older v3/v4 files remain **LEGACY APPROX** because the historical broadband bug discarded block-level candidate fields that cannot be reconstructed exactly. Delete is protected by a separate YES/NO confirmation page.
+Recording schema v8 stores the physical-layer verdict for every channel that
+was examined -- the pi/4-DQPSK score, the symbol-rate selectivity, the TDMA
+timing and which individual check failed -- so a replay shows the real
+reasoning rather than a re-derived score.
+
+**When a recording captures an alert, the raw dwell is written beside it** as
+an `.iq8` sidecar (plain unsigned 8-bit interleaved I/Q, the same format
+`rtl_sdr` writes) with a small JSON header. This is the evidence trail that
+recordings of derived statistics could never provide: any alert can be settled
+from the signal itself.
+
+```bash
+python3 scripts/analyse-capture.py ~/.local/share/rfeye/captures/*.iq8
+```
+
+That re-runs the identical verification and prints every measured quantity
+with each check marked pass or fail, so a borderline result shows precisely
+what was borderline.
+
+Pre-v8 recordings contain only the old energy statistics. Nothing in them can
+be re-analysed with the v8 waveform tests, so they are shown read-only and
+labelled **PRE-v8 ARCHIVE**; v8 files are labelled **PHY v8**. Delete is
+protected by a separate YES/NO confirmation page.
 
 Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF Eye 0.7.34, the scan worker owns the persistent librtlsdr handle and closes it only after synchronous capture work has finished. The UI/service thread never closes the handle underneath an active `rtlsdr_read_sync()` call.
 
@@ -225,6 +341,12 @@ config/labwc/rc.xml            touch/output mapping
 config/kanshi-config           native SPI profile
 config/reference-config-cuqi35.json
 config/plymouth/rfeye/         boot splash theme
+rfeye/tetra_phy.py             ETSI TETRA waveform verification (no hardware)
+rfeye/tetra_detector.py        network lock, duplex maths, alarm hysteresis
+rfeye/tetra_sim.py             synthetic TETRA and interferers for testing
+scripts/tetra-phy-selftest.py  waveform test suite, known-truth signals
+scripts/detector-selftest.py   end-to-end test against a simulated air interface
+scripts/analyse-capture.py     re-verify a saved .iq8 capture offline
 update/manifest.json           OTA metadata for main
 update/rfeye-update.zip        deterministic OTA package
 ```
