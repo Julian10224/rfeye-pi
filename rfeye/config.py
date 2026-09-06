@@ -105,7 +105,7 @@ DEFAULTS = {
     "phy_max_centre_error_hz": 4000.0,
     "phy_min_dqpsk_m": 0.20,
     "phy_min_dqpsk_phase_spread": 0.50,
-    "phy_min_dqpsk_selectivity": 1.6,
+    "phy_min_dqpsk_selectivity": 1.35,
     "phy_downlink_min_duty": 0.15,
     "phy_uplink_min_duty": 0.04,
     "phy_uplink_max_duty": 0.85,
@@ -170,7 +170,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.1",
+    "app_version": "0.9.2",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

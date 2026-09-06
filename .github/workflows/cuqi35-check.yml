@@ -1,4 +1,4 @@
-name: RF Eye 0.9.1 appliance checks
+name: RF Eye 0.9.2 appliance checks
 
 on:
   push:
@@ -141,7 +141,7 @@ jobs:
           assert c['phy_max_centre_error_hz']==4000.0
           assert c['phy_min_dqpsk_m']==0.20
           assert c['phy_min_dqpsk_phase_spread']==0.50
-          assert c['phy_min_dqpsk_selectivity']==1.6
+          assert c['phy_min_dqpsk_selectivity']==1.35
           assert c['phy_downlink_min_duty']==0.15
           assert c['phy_uplink_min_duty']==0.04
           assert c['phy_uplink_max_duty']==0.85

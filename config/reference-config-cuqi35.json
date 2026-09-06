@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.9.1",
+  "app_version": "0.9.2",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -38,7 +38,7 @@
   "phy_min_boundary_reject_db": 6.0,
   "phy_min_dqpsk_m": 0.2,
   "phy_min_dqpsk_phase_spread": 0.5,
-  "phy_min_dqpsk_selectivity": 1.6,
+  "phy_min_dqpsk_selectivity": 1.35,
   "phy_min_occupied_bw_hz": 14000.0,
   "phy_min_snr_db": 8.0,
   "phy_sample_rate": 288000,

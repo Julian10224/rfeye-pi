@@ -508,9 +508,20 @@ class PhyResult:
 
 
 # Acceptance limits.  Every one is also a backend config key of the same name,
-# so a unit can be retuned without editing code; these defaults are the values
-# calibrated by scripts/tetra-phy-selftest.py against simulated TETRA at known
-# SNRs and against the negative cases that caused real field false alarms.
+# so a unit can be retuned without editing code.  They come from
+# scripts/tetra-phy-selftest.py against simulated TETRA at known SNRs and the
+# negative cases that caused real field false alarms -- and, where measurement
+# disagreed with simulation, from real C2000 carriers.
+#
+# ``phy_min_dqpsk_selectivity`` is the one the simulator got wrong.  Clean
+# simulated TETRA reaches 3.2-3.4 because AWGN barely concentrates the fourth
+# moment at the decoy rates.  Six real C2000 downlink carriers, measured at
+# 12-29 dB SNR, scored 1.63 to 2.90: a real signal keeps enough correlation at
+# a wrong symbol rate to lift the decoy floor to ~0.2.  The old 1.6 limit
+# therefore sat 2% below a strong genuine carrier.  Non-TETRA pi/4-DQPSK at
+# 15300, 16000 and 21700 baud scores 0.3-1.1, so 1.35 sits between what is
+# really TETRA and what is really not, with margin on both sides.  See
+# docs/FIELD-CALIBRATION.md.
 LIMITS = {
     'phy_min_snr_db': 8.0,
     'phy_min_occupied_bw_hz': 14000.0,
@@ -520,7 +531,7 @@ LIMITS = {
     'phy_max_centre_error_hz': 4000.0,
     'phy_min_dqpsk_m': 0.20,
     'phy_min_dqpsk_phase_spread': 0.50,
-    'phy_min_dqpsk_selectivity': 1.6,
+    'phy_min_dqpsk_selectivity': 1.35,
     'phy_downlink_min_duty': 0.15,
     'phy_uplink_min_duty': 0.04,
     'phy_uplink_max_duty': 0.85,
