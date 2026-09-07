@@ -1,4 +1,4 @@
-name: RF Eye 0.9.5 appliance checks
+name: RF Eye 0.9.6 appliance checks
 
 on:
   push:
@@ -38,6 +38,13 @@ jobs:
           grep -q "complete \*\*RF Eye ${V} reference appliance\*\*" README.md
           grep -q "identify this release as \*\*${V}\*\*" README.md
           grep -q 'self.uw,self.uh,self.pw,self.ph=320,480,480,320' rfeye/compact_display_patch.py
+          # 0.9.6: which panel layout to draw may not depend on the service
+          # environment alone. That variable is written by install-cuqi35.sh,
+          # which an application-only OTA cannot touch, so a unit predating it
+          # kept sending the 480x800 layout to a 480x320 panel.
+          grep -q 'def wants_compact_profile' rfeye/compact_display_patch.py
+          grep -q 'def _config_display_profile' rfeye/compact_display_patch.py
+          grep -q 'if not wants_compact_profile(): return' rfeye/compact_display_patch.py
           grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py

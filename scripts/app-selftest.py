@@ -121,6 +121,52 @@ def _check_config_migration():
         importlib.reload(cfgmod)
 
 
+def _check_display_profile_fallback():
+    """An updated unit must still be able to pick its own panel layout.
+
+    ``RFEYE_DISPLAY_PROFILE`` comes from the systemd user unit, and an
+    application-only OTA update is not allowed to rewrite that unit. A unit
+    installed before the variable existed therefore kept drawing the 480x800
+    layout on a 480x320 panel -- the top-left corner of a much larger screen,
+    which reads as a black display and cannot be recovered from the touchscreen.
+    """
+    import json as _json
+    import compact_display_patch as cdp
+
+    keep_profile = os.environ.get("RFEYE_DISPLAY_PROFILE")
+    keep_config = os.environ.get("RFEYE_CONFIG")
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "config.json")
+        os.environ["RFEYE_CONFIG"] = path
+        try:
+            # An explicit environment value still decides, in both directions.
+            os.environ["RFEYE_DISPLAY_PROFILE"] = "cuqi35"
+            Path(path).write_text(_json.dumps({"display_profile": "elecrow"}))
+            assert cdp.wants_compact_profile() is True
+            os.environ["RFEYE_DISPLAY_PROFILE"] = "elecrow"
+            Path(path).write_text(_json.dumps({"display_profile": "cuqi35"}))
+            assert cdp.wants_compact_profile() is False
+
+            # With nothing in the environment the saved config decides.
+            os.environ.pop("RFEYE_DISPLAY_PROFILE", None)
+            assert cdp.wants_compact_profile() is True
+            Path(path).write_text(_json.dumps({"display_profile": "elecrow"}))
+            assert cdp.wants_compact_profile() is False
+
+            # No config at all must not raise and must not claim the panel.
+            os.remove(path)
+            assert cdp.wants_compact_profile() is False
+            Path(path).write_text("{ not json")
+            assert cdp.wants_compact_profile() is False
+        finally:
+            os.environ.pop("RFEYE_DISPLAY_PROFILE", None)
+            if keep_profile is not None:
+                os.environ["RFEYE_DISPLAY_PROFILE"] = keep_profile
+            os.environ.pop("RFEYE_CONFIG", None)
+            if keep_config is not None:
+                os.environ["RFEYE_CONFIG"] = keep_config
+
+
 def _check_power_flags():
     """Only a live under-voltage is a warning; the since-boot bit is history.
 
@@ -260,6 +306,7 @@ def main():
     assert a.power_notice_open is False, "at most one notice per session"
     assert a._power_notice_tap(btn.centerx,btn.centery) is False
     _check_power_flags()
+    _check_display_profile_fallback()
 
     a.running=False
     a.backend.stop()

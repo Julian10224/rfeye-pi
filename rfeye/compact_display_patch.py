@@ -1,6 +1,7 @@
 """Native 320x480 portrait profile for the CUQI 3.5-inch 480x320 panel."""
 from __future__ import annotations
-import builtins, os
+import builtins, json, os
+from pathlib import Path
 
 
 def _patch_app_class(cls):
@@ -68,8 +69,45 @@ def _patch_app_class(cls):
     return cls
 
 
+def _config_display_profile():
+    """Read display_profile out of the saved config, mirroring config.py."""
+    env=os.getenv("RFEYE_CONFIG")
+    if env:
+        path=Path(env)
+    elif os.geteuid()==0:
+        path=Path("/var/lib/rfeye/config.json")
+    else:
+        path=Path.home()/".config"/"rfeye"/"config.json"
+    try:
+        return str(json.loads(path.read_text()).get("display_profile","")).strip().lower()
+    except Exception:
+        return ""
+
+
+def wants_compact_profile():
+    """Which panel layout to draw: service environment first, config second.
+
+    ``RFEYE_DISPLAY_PROFILE`` is exported by the systemd user unit, and that
+    unit is written by ``install-cuqi35.sh`` -- root-owned, and deliberately
+    outside what an application-only OTA update is allowed to touch. A unit
+    installed before that variable existed therefore keeps sending the 480x800
+    layout to a 480x320 panel, which puts the top-left corner of a much larger
+    screen on the display and leaves the rest of it black. Nothing in the
+    runtime could notice, because the runtime was only ever told through that
+    one variable.
+
+    The saved config already records which panel this is, so use it when the
+    environment says nothing. An explicit environment value still wins, so a
+    correctly installed unit behaves exactly as it did before.
+    """
+    env=os.getenv("RFEYE_DISPLAY_PROFILE","").strip().lower()
+    if env:
+        return env=="cuqi35"
+    return _config_display_profile()=="cuqi35"
+
+
 def install_app_patch():
-    if os.getenv("RFEYE_DISPLAY_PROFILE","").lower()!="cuqi35": return
+    if not wants_compact_profile(): return
     original=builtins.__build_class__
     if getattr(original,"_rfeye_compact_display_patch",False): return
     def wrapper(func,name,*bases,**kwargs):
