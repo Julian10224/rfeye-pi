@@ -121,6 +121,54 @@ def _check_config_migration():
         importlib.reload(cfgmod)
 
 
+def _check_frame_guard(a):
+    """A frame that raises must not be able to take the appliance down.
+
+    Before this, one exception anywhere in a draw path ended the process;
+    systemd restarted it half a second later and a fault that repeated every
+    frame became a restart loop showing nothing but the compositor's black
+    background. Untestable and unreadable at exactly the moment it matters,
+    so the fault now stays on screen and in crash.log.
+    """
+    keep_home = os.environ.get("HOME")
+    keep_page = a.page
+    real_draw = a.__class__._draw_main
+
+    def explode(self, snap):
+        raise RuntimeError("simulated draw failure")
+
+    home = os.path.join(_tmp.name, "guard-home")
+    os.makedirs(home, exist_ok=True)
+    os.environ["HOME"] = home
+    a.page = "main"
+    a.frame_error_count = 0
+    a.frame_error_logged = ""
+    try:
+        a.__class__._draw_main = explode
+        for _ in range(3):
+            a._guarded_frame()          # must not raise
+        assert a.frame_error_count == 3, a.frame_error_count
+        assert "simulated draw failure" in str(a.frame_error), a.frame_error
+        log = Path(home) / ".local" / "state" / "rfeye" / "crash.log"
+        assert log.is_file(), "the fault must survive the drive, not just the frame"
+        body = log.read_text()
+        assert "simulated draw failure" in body
+        # The traceback text mentions RuntimeError twice, so count entries
+        # by their header instead: a fault that repeats every frame must not
+        # write a log line every frame.
+        assert body.count("page=main") == 1, "one entry per distinct fault"
+    finally:
+        a.__class__._draw_main = real_draw
+        os.environ.pop("HOME", None)
+        if keep_home is not None:
+            os.environ["HOME"] = keep_home
+
+    # And it clears itself as soon as drawing works again.
+    a._guarded_frame()
+    assert a.frame_error is None
+    a.page = keep_page
+
+
 def _check_display_profile_fallback():
     """An updated unit must still be able to pick its own panel layout.
 
@@ -307,6 +355,7 @@ def main():
     assert a._power_notice_tap(btn.centerx,btn.centery) is False
     _check_power_flags()
     _check_display_profile_fallback()
+    _check_frame_guard(a)
 
     a.running=False
     a.backend.stop()

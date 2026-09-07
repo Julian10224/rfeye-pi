@@ -4,6 +4,7 @@ import os
 import time
 import threading
 import subprocess
+import traceback
 from pathlib import Path
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
@@ -112,6 +113,10 @@ class App:
         self.power_notice_open = False
         self.power_notice_done = False
         self.power_notice_lines = []
+        # A frame that raises must not be able to take the appliance down.
+        self.frame_error = None
+        self.frame_error_logged = ""
+        self.frame_error_count = 0
         self.debug_frame_ms = 0.0
         self.debug_last_frame = time.perf_counter()
         self.ready_chime_done = False
@@ -177,59 +182,133 @@ class App:
         clock = pygame.time.Clock()
 
         while self.running:
-            now_frame = time.perf_counter()
-            self.debug_frame_ms = (now_frame - self.debug_last_frame) * 1000.0
-            self.debug_last_frame = now_frame
-            self._events()
-            if self.last_mouse_motion and time.time() - self.last_mouse_motion > self.mouse_hide_delay:
-                pygame.mouse.set_visible(False)
-                self.last_mouse_motion = 0.0
-            snap = self.backend.snapshot()
-            sound_snap = snap
-            if self.page == "recording_replay":
-                replay_snap = getattr(self, "recording_replay_snapshot", None)
-                if replay_snap and bool(getattr(self, "recording_replay_running", False)):
-                    sound_snap = replay_snap
-                elif replay_snap:
-                    sound_snap = dict(replay_snap)
-                    sound_snap["peaks"] = []
-            self._sound_logic(sound_snap)
-
-            if self.page == "main":
-                self._draw_main(snap)
-            elif self.page == "settings":
-                self._draw_settings()
-            elif self.page == "wifi":
-                self._draw_wifi()
-            elif self.page == "debug":
-                self._draw_debug(snap)
-            elif self.page == "calibration":
-                self._draw_calibration()
-            elif self.page == "record_confirm":
-                self._draw_record_confirm()
-            elif self.page == "recordings":
-                self._draw_recordings()
-            elif self.page == "recording_detail":
-                self._draw_recording_detail()
-            elif self.page == "recording_delete_confirm":
-                self._draw_recording_delete_confirm()
-            elif self.page == "recording_replay":
-                self._draw_recording_replay()
-            else:
-                self._draw_spectrum(snap)
-
-            self._power_notice_update(snap)
-            if self.power_notice_open:
-                self._draw_power_notice()
-
-            self._apply_brightness()
-            self._present_rotated()
-            pygame.display.flip()
+            self._guarded_frame()
             clock.tick(fps)
 
         self.backend.stop()
         self.buzzer.close()
         pygame.quit()
+
+    def _guarded_frame(self):
+        """Draw one frame; report a failure instead of dying of it.
+
+        An exception used to leave ``run`` and end the process. systemd
+        restarts half a second later, so a fault that repeats every frame
+        became a restart loop, and all the panel showed was the compositor's
+        background: a black screen carrying no information and offering no
+        way back in from the touchscreen. Whatever else is broken, the
+        appliance has to stay up and say what happened.
+        """
+        try:
+            self._frame()
+        except Exception as exc:
+            self._note_frame_error(exc)
+            try:
+                self._draw_frame_error()
+                self._present_rotated()
+                pygame.display.flip()
+            except Exception:
+                pass
+
+    def _frame(self):
+        """One UI frame. Anything raised here is caught by ``_guarded_frame``."""
+        self.frame_error = None
+        now_frame = time.perf_counter()
+        self.debug_frame_ms = (now_frame - self.debug_last_frame) * 1000.0
+        self.debug_last_frame = now_frame
+        self._events()
+        if self.last_mouse_motion and time.time() - self.last_mouse_motion > self.mouse_hide_delay:
+            pygame.mouse.set_visible(False)
+            self.last_mouse_motion = 0.0
+        snap = self.backend.snapshot()
+        sound_snap = snap
+        if self.page == "recording_replay":
+            replay_snap = getattr(self, "recording_replay_snapshot", None)
+            if replay_snap and bool(getattr(self, "recording_replay_running", False)):
+                sound_snap = replay_snap
+            elif replay_snap:
+                sound_snap = dict(replay_snap)
+                sound_snap["peaks"] = []
+        self._sound_logic(sound_snap)
+
+        if self.page == "main":
+            self._draw_main(snap)
+        elif self.page == "settings":
+            self._draw_settings()
+        elif self.page == "wifi":
+            self._draw_wifi()
+        elif self.page == "debug":
+            self._draw_debug(snap)
+        elif self.page == "calibration":
+            self._draw_calibration()
+        elif self.page == "record_confirm":
+            self._draw_record_confirm()
+        elif self.page == "recordings":
+            self._draw_recordings()
+        elif self.page == "recording_detail":
+            self._draw_recording_detail()
+        elif self.page == "recording_delete_confirm":
+            self._draw_recording_delete_confirm()
+        elif self.page == "recording_replay":
+            self._draw_recording_replay()
+        else:
+            self._draw_spectrum(snap)
+
+        self._power_notice_update(snap)
+        if self.power_notice_open:
+            self._draw_power_notice()
+
+        self._apply_brightness()
+        self._present_rotated()
+        pygame.display.flip()
+
+    # -- fault reporting ---------------------------------------------------
+    def _note_frame_error(self, exc):
+        """Record a failing frame once per distinct fault.
+
+        Written to disk as well as the screen: the unit that needs this most
+        is one in a car with nobody watching it, and a fault that has already
+        scrolled past is exactly the one worth having afterwards.
+        """
+        detail = traceback.format_exc()
+        self.frame_error = "%s: %s" % (type(exc).__name__, exc)
+        self.frame_error_count += 1
+        if self.frame_error_logged != self.frame_error:
+            self.frame_error_logged = self.frame_error
+            print(detail, flush=True)
+            try:
+                path = Path.home() / ".local" / "state" / "rfeye" / "crash.log"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path.exists() and path.stat().st_size > 262144:
+                    keep = path.read_text().splitlines()[-400:]
+                    path.write_text(chr(10).join(keep) + chr(10))
+                header = "%s v%s page=%s" % (
+                    time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    self.cfg.get("app_version", "?"), self.page)
+                with path.open("a") as fh:
+                    fh.write(header + chr(10) + detail + chr(10))
+            except Exception:
+                pass
+
+    def _draw_frame_error(self):
+        """Say what went wrong, on the panel, in the space available."""
+        self.ui.fill((10, 3, 3))
+        pygame.draw.rect(self.ui, RED, (2, 2, self.uw - 4, self.uh - 4), 2)
+        cx = self.uw // 2
+        self._text("RF EYE FAULT", cx, int(self.uh * 0.14), self.font_m, RED,
+                   center=True)
+        self._text("v%s  page %s  x%d" % (self.cfg.get("app_version", "?"),
+                                          self.page, self.frame_error_count),
+                   cx, int(self.uh * 0.21), self.font_s, DIM, center=True)
+        y = int(self.uh * 0.32)
+        limit = max(18, int(self.uw / 7))
+        text = str(self.frame_error or "unknown")
+        while text and y < self.uh - 60:
+            self._text(text[:limit], cx, y, self.font_s, WHITE, center=True)
+            text = text[limit:]
+            y += 18
+        self._text("details in crash.log", cx, self.uh - 34, self.font_s, DIM,
+                   center=True)
 
     def _present_rotated(self):
         rot = self.cfg.get("rotation", "cw")

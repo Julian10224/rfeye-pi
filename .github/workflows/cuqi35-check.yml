@@ -1,4 +1,4 @@
-name: RF Eye 0.9.6 appliance checks
+name: RF Eye 0.9.7 appliance checks
 
 on:
   push:
@@ -45,6 +45,16 @@ jobs:
           grep -q 'def wants_compact_profile' rfeye/compact_display_patch.py
           grep -q 'def _config_display_profile' rfeye/compact_display_patch.py
           grep -q 'if not wants_compact_profile(): return' rfeye/compact_display_patch.py
+          # 0.9.7: one exception in a draw path used to end the process.
+          # systemd restarts it half a second later, so a fault repeating
+          # every frame became a restart loop showing only the compositor's
+          # black background -- no message, and no way in from the touch
+          # screen. The appliance has to stay up and say what happened.
+          grep -q 'def _guarded_frame' rfeye/app.py
+          grep -q 'def _note_frame_error' rfeye/app.py
+          grep -q 'def _draw_frame_error' rfeye/app.py
+          grep -q 'self._guarded_frame()' rfeye/app.py
+          grep -q 'crash.log' rfeye/app.py
           grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py
