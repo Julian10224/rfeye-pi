@@ -1,4 +1,4 @@
-name: RF Eye 0.9.4 appliance checks
+name: RF Eye 0.9.5 appliance checks
 
 on:
   push:
@@ -28,13 +28,12 @@ jobs:
         run: PYTHONPATH=rfeye python3 scripts/detector-selftest.py
       - name: Verify release identity and compact UI
         run: |
-          test "$(tr -d '[:space:]' < VERSION)" = "0.9.1"
-          grep -q '"app_version": "0.9.1"' rfeye/config.py
+          V="$(tr -d '[:space:]' < VERSION)"
+          grep -q "\"app_version\": \"${V}\"" rfeye/config.py
           # The release identity lives in VERSION, config.py, the reference
           # config, the manifest and the README. It has drifted before, and a
           # stale README version is what the settings screen quotes back at
           # the user, so every copy is checked here.
-          V="$(tr -d '[:space:]' < VERSION)"
           grep -q "^# RF Eye ${V} for Raspberry Pi\$" README.md
           grep -q "complete \*\*RF Eye ${V} reference appliance\*\*" README.md
           grep -q "identify this release as \*\*${V}\*\*" README.md
@@ -79,7 +78,25 @@ jobs:
           grep -q 'def _sdr_present' rfeye/sdr_backend.py
           grep -q 'def _power_warning' rfeye/sdr_backend.py
           grep -q "'open failed' not in low" rfeye/sdr_backend.py
-          grep -q 'USB POWER TOO LOW' rfeye/compact_ui_draw.py rfeye/app.py
+          # 0.9.5: the supply warning is a one-shot notice over a running
+          # scan, not a screen state. Bit 16 of get_throttled latches at the
+          # first dip and never clears, so treating it as a warning pinned
+          # "USB POWER TOO LOW" on the display for the rest of the session.
+          grep -q 'USB POWER TOO LOW' rfeye/app.py
+          grep -q 'SDR LOST - USB POWER LOW' rfeye/compact_ui_draw.py rfeye/app.py
+          grep -q 'def _power_notice_tap' rfeye/app.py
+          grep -q 'def _draw_power_notice' rfeye/app.py
+          grep -q 'BEGREPEN' rfeye/app.py
+          grep -q '_power_notice_tap' rfeye/compact_ui_controls.py
+          grep -q '_power_history' rfeye/sdr_backend.py
+          ! grep -q "elif bits & 0x10000" rfeye/sdr_backend.py
+          # Time to lock is decided by queue order, and the reason a pass
+          # found nothing has to be recoverable after the drive, not only
+          # while someone is watching the screen.
+          grep -q '_survey_scores' rfeye/sdr_backend.py
+          grep -q 'def _log_pass' rfeye/sdr_backend.py
+          grep -q 'def _note_pass_best' rfeye/sdr_backend.py
+          grep -q 'search_best' rfeye/sdr_backend.py rfeye/compact_ui_draw.py
           # The v6/v7 energy-statistics machinery was removed because each
           # piece could suppress a real detection. Fail if any of it returns.
           ! grep -q '_annotate_mobile_temporal' rfeye/sdr_backend.py
@@ -125,7 +142,7 @@ jobs:
           python3 - <<'PY'
           import json
           c=json.load(open('config/reference-config-cuqi35.json'))
-          assert c['app_version']=='0.9.1'
+          assert c['app_version']==open('VERSION').read().strip()
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
@@ -207,5 +224,6 @@ jobs:
           ./scripts/build-release.sh
           H2="$(sha256sum update/rfeye-update.zip | awk '{print $1}')"
           test "$H1" = "$H2"
-          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "0.9.1"
+          V="$(tr -d '[:space:]' < VERSION)"
+          test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["version"])')" = "$V"
           test "$(python3 -c 'import json; print(json.load(open("update/manifest.json"))["sha256"])')" = "$H2"

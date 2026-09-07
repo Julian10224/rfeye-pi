@@ -105,6 +105,13 @@ class App:
         self.page = "main"
         self.running = True
         self.last_beep = 0.0
+        # One supply warning per session, shown over whatever page is up and
+        # dismissed with a button. Scanning runs in its own thread and is not
+        # touched by any of this -- the notice reports the problem, it does
+        # not stop the search.
+        self.power_notice_open = False
+        self.power_notice_done = False
+        self.power_notice_lines = []
         self.debug_frame_ms = 0.0
         self.debug_last_frame = time.perf_counter()
         self.ready_chime_done = False
@@ -211,6 +218,10 @@ class App:
             else:
                 self._draw_spectrum(snap)
 
+            self._power_notice_update(snap)
+            if self.power_notice_open:
+                self._draw_power_notice()
+
             self._apply_brightness()
             self._present_rotated()
             pygame.display.flip()
@@ -285,7 +296,66 @@ class App:
                 ux, uy = self._physical_to_ui(px, py)
                 self._tap(ux, uy)
 
+    # -- supply notice -----------------------------------------------------
+    def _power_notice_update(self, snap):
+        """Raise the notice the first time the 5 V rail actually sags."""
+        if self.power_notice_done or self.power_notice_open:
+            return
+        if not snap.get("power_warning"):
+            return
+        detail = str(snap.get("power_detail") or "").strip()
+        self.power_notice_lines = [
+            "5V rail below 4.63 V",
+            detail or "measured by the Pi firmware",
+            "Scanning continues in the background",
+        ]
+        self.power_notice_open = True
+
+    def _power_notice_rect(self):
+        w = int(self.uw * 0.88)
+        h = max(150, int(self.uh * 0.30))
+        return pygame.Rect((self.uw - w) // 2, (self.uh - h) // 2, w, h)
+
+    def _power_notice_button(self):
+        box = self._power_notice_rect()
+        bw = int(box.width * 0.52)
+        bh = max(34, int(box.height * 0.24))
+        return pygame.Rect(box.centerx - bw // 2,
+                           box.bottom - bh - max(10, int(box.height * 0.09)),
+                           bw, bh)
+
+    def _draw_power_notice(self):
+        shade = pygame.Surface((self.uw, self.uh), pygame.SRCALPHA)
+        shade.fill((0, 0, 0, 170))
+        self.ui.blit(shade, (0, 0))
+        box = self._power_notice_rect()
+        pygame.draw.rect(self.ui, (16, 18, 23), box, border_radius=12)
+        pygame.draw.rect(self.ui, RED, box, 2, border_radius=12)
+        self._text("USB POWER TOO LOW", box.centerx,
+                   box.top + max(18, int(box.height * 0.14)),
+                   self.font_m, RED, center=True)
+        y = box.top + max(44, int(box.height * 0.33))
+        for line in self.power_notice_lines[:3]:
+            self._text(line, box.centerx, y, self.font_s, WHITE, center=True)
+            y += 19
+        btn = self._power_notice_button()
+        pygame.draw.rect(self.ui, (0, 96, 142), btn, border_radius=9)
+        pygame.draw.rect(self.ui, BLUE_BRIGHT, btn, 1, border_radius=9)
+        self._text("BEGREPEN", btn.centerx, btn.centery, self.font_m, WHITE,
+                   center=True)
+
+    def _power_notice_tap(self, x, y):
+        """Swallow the tap while the notice is up; return True if handled."""
+        if not self.power_notice_open:
+            return False
+        if self._power_notice_button().collidepoint(int(x), int(y)):
+            self.power_notice_open = False
+            self.power_notice_done = True
+        return True
+
     def _tap(self, x, y):
+        if self._power_notice_tap(x, y):
+            return
         if self.page == "main":
             if x <= 82 and y <= 82:
                 self.page = "settings"
@@ -820,7 +890,7 @@ class App:
             # A sagging 5 V rail and a broken dongle look identical on screen
             # but need completely different fixes, so say which one it is.
             if snap.get("power_warning"):
-                sdr_text, sdr_col = "USB POWER TOO LOW", RED
+                sdr_text, sdr_col = "SDR LOST - USB POWER LOW", RED
             else:
                 sdr_text, sdr_col = "SDR: NOT CONNECTED", RED
         elif snap.get("detector_state") == "ALERT":
@@ -967,7 +1037,10 @@ class App:
             ("Full cycle", f"{float(snap.get('cycle_ms',0)):7.0f} ms"),
             ("Dwell capture", f"{float(snap.get('dwell_ms',0)):7.0f} ms"),
             ("Verification", f"{float(snap.get('verify_ms',0)):7.0f} ms"),
-            ("Supply", str(snap.get('power_warning') or 'OK')),
+            ("Supply", str(snap.get('power_warning')
+                            or snap.get('power_history') or 'OK')),
+            ("Supply detail", str(snap.get('power_detail') or '-')[:24]),
+            ("Best channel", _search_best_text(snap)),
             ("Backend", f"{snap.get('status','?')}  age {age_ms:.0f} ms"),
         ]
         y=112
@@ -1027,6 +1100,16 @@ class App:
             overlay = pygame.Surface((self.uw, self.uh), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, alpha))
             self.ui.blit(overlay, (0, 0))
+
+def _search_best_text(snap):
+    """One line saying what the current band pass has actually found."""
+    best = snap.get("search_best") or {}
+    if not best:
+        return "-"
+    verdict = "TETRA" if best.get("ok") else str(best.get("fail") or "?")
+    return "%.4f %+.0fdB %s" % (float(best.get("freq_hz", 0.0)) / 1e6,
+                                float(best.get("snr_db", 0.0)), verdict)
+
 
 def main():
     ap = argparse.ArgumentParser()

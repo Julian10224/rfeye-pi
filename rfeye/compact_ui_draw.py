@@ -32,9 +32,11 @@ def _network_line(snap, status):
         return "SDR DEMO",BLUE_BRIGHT
     if status!="LIVE":
         # A sagging 5 V rail and a broken dongle look identical on screen but
-        # need completely different fixes, so say which one it is.
+        # need completely different fixes, so say which one it is. This is the
+        # live under-voltage bit only: the sticky "happened once since boot"
+        # bit used to sit here and left the message up for ever.
         if snap.get("power_warning"):
-            return "USB POWER TOO LOW",RED
+            return "SDR LOST - USB POWER LOW",RED
         return "SDR NOT CONNECTED",RED
     state=str(snap.get("detector_state","SEARCHING"))
     if state=="ALERT":
@@ -131,23 +133,31 @@ def draw_debug(app,snap):
     frame_ms=max(0.001,float(getattr(app,"debug_frame_ms",0.0) or 0.001))
     phy=list(snap.get("phy") or [])
     best=max(phy,key=lambda q:float(q.get("dqpsk_m",0)),default=None)
+    sb=snap.get("search_best") or {}
     rows=[("UI refresh",f"{frame_ms:.1f} ms / {1000.0/frame_ms:.1f} FPS"),
           ("Detector",str(snap.get("detector_state","?"))),
           ("Sites locked",f"{int(snap.get('site_locked_count',0))} / cand {int(snap.get('site_candidate_count',0))}"),
           ("Watching",f"{len(snap.get('watch_freqs') or [])} ch {str(snap.get('dwell_role','')).lower()}"),
           ("Best DQPSK",("%.3f sel %.1f"%(float(best.get("dqpsk_m",0)),float(best.get("dqpsk_selectivity",0)))) if best else "-"),
           ("Verdict",(str(best.get("reason","?"))[:20]) if best else "-"),
+          # What this pass actually found, and the check it fell over on.
+          # Half an hour of "SEARCHING" says nothing on its own; this says
+          # whether the band is empty or a limit is refusing a real carrier.
+          ("Best channel",("%.4f MHz"%(float(sb.get("freq_hz",0.0))/1e6)) if sb else "-"),
+          ("  its verdict",(("%+.1f dB %s"%(float(sb.get("snr_db",0.0)),
+              "TETRA" if sb.get("ok") else str(sb.get("fail") or "?"))) if sb else "-")),
           ("Cycle / dwell",f"{float(snap.get('cycle_ms',0)):.0f} / {float(snap.get('dwell_ms',0)):.0f} ms"),
           ("Verify",f"{float(snap.get('verify_ms',0)):.0f} ms  age {age_ms:.0f} ms"),
+          ("Supply",str(snap.get("power_warning") or snap.get("power_history") or "OK")),
           ("Backend",f"{snap.get('status','?')} {str(snap.get('sdr_path','?'))[:9]}")]
-    y=66
+    y=64
     for label,value in rows:
-        pygame.draw.rect(app.ui,(9,13,18),(8,y,304,34),border_radius=7); app._text(label,16,y+5,app.font_s,DIM)
-        shown=value if len(value)<=20 else value[:19]+"…"; col=GREEN if label=="Backend" and value=="LIVE" else BLUE_BRIGHT
-        surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(304-surf.get_width(),y+17)); y+=38
-    pygame.draw.rect(app.ui,(12,24,32),(8,412,304,34),border_radius=8)
-    app._text("Touch calibration",18,421,app.font_s,WHITE)
-    surf=app.font_s.render("CALIBRATE",True,BLUE_BRIGHT); app.ui.blit(surf,(302-surf.get_width(),421))
+        pygame.draw.rect(app.ui,(9,13,18),(8,y,304,27),border_radius=6); app._text(label,16,y+6,app.font_s,DIM)
+        shown=value if len(value)<=22 else value[:21]+"…"; col=GREEN if label=="Backend" and value=="LIVE" else BLUE_BRIGHT
+        surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(304-surf.get_width(),y+6)); y+=29
+    pygame.draw.rect(app.ui,(12,24,32),(8,416,304,30),border_radius=8)
+    app._text("Touch calibration",18,423,app.font_s,WHITE)
+    surf=app.font_s.render("CALIBRATE",True,BLUE_BRIGHT); app.ui.blit(surf,(302-surf.get_width(),423))
     app._text("tap top/bottom to return",160,465,app.font_s,DIM,center=True)
 
 def draw_recordings(app):

@@ -1,6 +1,6 @@
-# RF Eye 0.9.4 for Raspberry Pi
+# RF Eye 0.9.5 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.4 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.5 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.4 appliance path:
+The installer reproduces the working 0.9.5 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.4
+## User interface in 0.9.5
 
 The compact profile contains:
 
@@ -186,7 +186,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.0)
+### How the band is searched (0.9.5)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -204,12 +204,22 @@ score subtracts that peakiness, so carriers outrank artefacts. This only
 reorders work -- it can never admit anything, because every channel still has
 to pass the full waveform test.
 
-**The survey is no longer the only path.** Its favourites go to the front of a
-queue that also contains *every* remaining raster channel in the band, so the
-survey can reorder the work but cannot hide any of it. A full pass is about
-50 dwells, roughly 70 seconds, and it keeps running after the first lock: a
-TETRA site operates several carriers and a handset can be on any of them, so
-stopping at the first would leave real uplink channels unwatched.
+**The survey is no longer the only path.** Every channel it can score goes to
+the front of the queue, best-looking first, followed by *every* remaining
+raster channel in the band. The survey can reorder the work but cannot hide
+any of it. A full pass is about 50 dwells, roughly 70 seconds, and it keeps
+running after the first lock: a TETRA site operates several carriers and a
+handset can be on any of them, so stopping at the first would leave real
+uplink channels unwatched.
+
+**Queue order is the time-to-lock budget.** One dwell covers four channels and
+costs about 1.1 s, so the position of a real carrier in a 200-channel queue is
+the difference between locking in five seconds and locking in seventy. Up to
+0.9.4 only the survey's top twelve were promoted and the other 188 followed in
+frequency order, which is uncorrelated with signal strength; since 0.9.5 the
+whole ranking is used. A carrier that passes the waveform test is re-tested on
+every following cycle, so the three hits a lock needs cost three cycles, not
+three band passes.
 
 **Where the tuner is parked matters.** The RTL-SDR's DC spike sits exactly at
 the tuner centre, and channels lie on a continuous 25 kHz grid, so a tuner
@@ -254,6 +264,30 @@ runs, and on a busy site a seconds-based window can expire between two looks
 at the same channel -- silently making confirmation unreachable exactly where
 detection matters most. Counting visits makes the rule independent of cycle
 duration, hardware speed and watch-list length.
+
+### Why a search found nothing
+
+"SEARCHING" for half an hour is indistinguishable, from the outside, between
+no C2000 in range, an antenna that fell off, and one acceptance limit set too
+tight. Since 0.9.5 the debug page carries the best channel of the current band
+pass with its SNR and the check it failed on, and every completed pass appends
+one line to `~/.local/state/rfeye/search.log`:
+
+```text
+2026-09-07T20:44:11 pass=3 69s best=391.1875MHz snr=10.6 fail:bandwidth locked=0 cand=0
+```
+
+`fail:bandwidth` with the occupied width pinned at the 40 kHz cap means the
+spectrum never dropped 10 dB anywhere inside the channel -- that is flat noise,
+not a carrier the limits refused. Cross-check with a tool that shares no code
+with this one:
+
+```bash
+rtl_power -f 390M:395M:12.5k -g 37.2 -i 20 -1 /tmp/band.csv
+```
+
+If the strongest channels there sit on an 810 kHz grid, that is the dongle's
+own spur comb and there is genuinely nothing to lock.
 
 ### What it cannot tell you
 
@@ -357,7 +391,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.4 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.5 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -386,7 +420,7 @@ Application-only OTA updates update `/opt/rfeye/rfeye`. Device Tree, systemd, Pl
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.4**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.5**.
 
 Build the OTA package with:
 
@@ -400,8 +434,19 @@ The build normalizes archive metadata so unchanged source produces the same ZIP 
 
 A Raspberry Pi that browns out and an RTL-SDR that has failed look identical
 on screen, and they need completely different fixes. When the Pi reports
-under-voltage the display says **USB POWER TOO LOW** rather than
-`SDR NOT CONNECTED`, and the debug page carries a `Supply` row.
+under-voltage RF Eye raises a **USB POWER TOO LOW** notice once per session,
+carrying the measured core voltage and the raw `get_throttled` word, dismissed
+with a **BEGREPEN** button. It is drawn over whatever page is up and the scan
+thread never sees it: searching, locking and alerting all continue behind it.
+If the dongle has actually dropped off the bus the headline says
+`SDR LOST - USB POWER LOW` instead of `SDR NOT CONNECTED`, and the debug page
+carries `Supply` and `Supply detail` rows.
+
+Only bit 0 of `get_throttled` -- the rail is low *right now* -- raises the
+notice. Bit 16 latches at the first dip and never clears, so up to 0.9.4 a
+single brown-out during power-up left the warning on screen for the rest of
+the session over the top of a perfectly healthy scan; it is now reported as
+history on the debug page and nowhere else.
 
 This matters more than it sounds. A USB reset is the right response to a
 dongle that is attached but has stopped answering, and the wrong response to

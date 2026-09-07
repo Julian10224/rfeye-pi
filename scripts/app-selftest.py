@@ -39,7 +39,10 @@ class FakeBackend:
             "site_state_loaded":True,"watch_freqs":[381237500.0],
             "dwell_centre_hz":381287500.0,"dwell_role":"UPLINK",
             "survey_shortlist":[],"phy":[],
-            "sdr_path":"TEST","power_warning":"",
+            "search_best":{"freq_hz":391237500.0,"snr_db":10.6,"ok":False,
+                           "fail":"bandwidth,boundary"},
+            "sdr_path":"TEST","power_warning":"","power_history":"",
+            "power_detail":"",
         }
 
 
@@ -50,6 +53,9 @@ class FakeBuzzer:
     def beep_pattern(self,*args,**kwargs): pass
 
 
+# Kept before the stub goes in: the supply-flag test needs the real backend,
+# and everything else in this file needs it out of the way.
+_REAL_BACKEND=sdr_backend.SDRBackend
 sdr_backend.SDRBackend=FakeBackend
 buzzer.GPIOBuzzer=FakeBuzzer
 
@@ -113,6 +119,45 @@ def _check_config_migration():
         else:
             os.environ["RFEYE_CONFIG"] = original
         importlib.reload(cfgmod)
+
+
+def _check_power_flags():
+    """Only a live under-voltage is a warning; the since-boot bit is history.
+
+    Bit 16 of ``get_throttled`` latches at the first dip and never clears, so
+    treating it as a warning meant one brown-out at power-up put "USB POWER
+    TOO LOW" on the display for the rest of the session.
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    class _CP:
+        def __init__(self, out): self.stdout = out
+
+    def make(word):
+        def run(cmd, **kw):
+            if cmd[1] == "get_throttled":
+                return _CP("throttled=%s\n" % word)
+            return _CP("volt=1.2563V\n")
+        return run
+
+    real_which, real_run = sdr_backend.shutil.which, sdr_backend.subprocess.run
+    sdr_backend.shutil.which = lambda name: "/usr/bin/vcgencmd"
+    try:
+        b = _REAL_BACKEND(dict(appmod.load_config()))
+        for word, flag, history in (("0x0", "", ""),
+                                    ("0x50000", "", "UNDER-VOLTAGE EARLIER"),
+                                    ("0x50005", "UNDER-VOLTAGE", "UNDER-VOLTAGE EARLIER"),
+                                    ("0x1", "UNDER-VOLTAGE", "")):
+            sdr_backend.subprocess.run = make(word)
+            b._power_checked = 0.0
+            assert b._power_warning() == flag, (word, b._power_flag)
+            assert b._power_history == history, (word, b._power_history)
+            assert (word in b._power_detail) if word != "0x0" else True
+            assert b.snapshot()["power_warning"] == flag
+    finally:
+        sdr_backend.shutil.which = real_which
+        sdr_backend.subprocess.run = real_run
 
 
 def main():
@@ -193,6 +238,28 @@ def main():
     assert a.recording_replay_error=="newer state"
     _recording_replay_worker(a,str(Path(_tmp.name)/"missing-replay.json"),1)
     assert a.recording_replay_error=="newer state"
+
+    # The supply notice is a one-shot overlay, not a mode. It has to arm on a
+    # live under-voltage, swallow every tap while it is up, disappear on its
+    # own button and never come back in the same session -- and none of that
+    # may touch the scan thread, which is the whole point of the change.
+    assert a.power_notice_open is False and a.power_notice_done is False
+    a._power_notice_update({"power_history":"UNDER-VOLTAGE EARLIER"})
+    assert a.power_notice_open is False, "sticky since-boot bit must not raise it"
+    a._power_notice_update({"power_warning":"UNDER-VOLTAGE",
+                            "power_detail":"core 1.2563V, throttled 0x50005"})
+    assert a.power_notice_open is True
+    assert any("0x50005" in line for line in a.power_notice_lines)
+    btn=a._power_notice_button()
+    a.page="main"
+    assert a._power_notice_tap(2,2) is True, "taps outside the button are swallowed"
+    assert a.power_notice_open is True and a.page=="main"
+    assert a._power_notice_tap(btn.centerx,btn.centery) is True
+    assert a.power_notice_open is False and a.power_notice_done is True
+    a._power_notice_update({"power_warning":"UNDER-VOLTAGE"})
+    assert a.power_notice_open is False, "at most one notice per session"
+    assert a._power_notice_tap(btn.centerx,btn.centery) is False
+    _check_power_flags()
 
     a.running=False
     a.backend.stop()

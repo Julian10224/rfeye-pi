@@ -158,6 +158,7 @@ class SDRBackend:
         self.last_good_scan=0.; self.scan_failures=0; self.last_usb_reset=0.
         self._usb_resets=0; self._usb_backoff=0.
         self._power_checked=0.; self._power_flag=''
+        self._power_history=''; self._power_detail=''
         self.sdr=None; self.sdr_path='UNOPENED'
         self.last_cycle_ms=0.; self.last_survey_ms=0.; self.last_dwell_ms=0.
         self.last_verify_ms=0.; self.last_capture_ms=0.; self.last_scan_windows=0
@@ -168,6 +169,8 @@ class SDRBackend:
         self.survey_shortlist=[]
         self._survey_at=0.; self._survey_idx=0
         self._site_queue=[]; self._sweep_cursor=0.; self._alt_cycle=False
+        self._survey_scores=[]
+        self._pass_best=None; self._pass_started=0.; self._pass_index=0
         self._site_verify_at=0.; self._watch_idx=0; self._display_cycle=0
         self.last_phy=[]
         self.dwell_centre_hz=0.; self.dwell_channels=[]
@@ -243,6 +246,7 @@ class SDRBackend:
                 'dwell_centre_hz':float(self.dwell_centre_hz),
                 'dwell_role':str(self.last_dwell_role),
                 'survey_shortlist':[float(f) for f in self.survey_shortlist],
+                'search_best':dict(self._pass_best) if self._pass_best else {},
                 'site_queue_remaining':len(self._site_queue),
                 'phy':[dict(p) for p in self.last_phy],
                 'confirm_streak':int(self.alarm.streak),
@@ -259,6 +263,8 @@ class SDRBackend:
                 'scan_windows':int(self.last_scan_windows),
                 'sdr_path':str(self.sdr_path),
                 'power_warning':str(self._power_flag),
+                'power_history':str(self._power_history),
+                'power_detail':str(self._power_detail),
             }
 
     # -- SDR plumbing ------------------------------------------------------
@@ -283,23 +289,45 @@ class SDRBackend:
         on screen but need completely different fixes. On the reference unit an
         under-voltage dip dropped the dongle off the USB bus entirely, and
         without this the display simply said the SDR was not connected.
+
+        Only bit 0 -- "the 5 V rail is below about 4.63 V *right now*" -- is
+        reported as a warning. Bit 16 says it happened at some point since
+        boot and never clears again, so driving the display from it meant a
+        single dip during power-up left the warning on screen for the rest of
+        the session, over the top of a perfectly healthy scan. That history
+        is still worth keeping, but it belongs on the debug page.
         """
         now=time.time()
         if now-self._power_checked<10.0:
             return self._power_flag
         self._power_checked=now
-        self._power_flag=''
+        self._power_flag=''; self._power_history=''; self._power_detail=''
         exe=shutil.which('vcgencmd')
         if not exe:
             return ''
         try:
             cp=subprocess.run([exe,'get_throttled'],capture_output=True,
                               text=True,timeout=3)
-            bits=int(cp.stdout.strip().split('=')[-1],16)
+            word=cp.stdout.strip().split('=')[-1]
+            bits=int(word,16)
             if bits & 0x1:
                 self._power_flag='UNDER-VOLTAGE'
-            elif bits & 0x10000:
-                self._power_flag='UNDER-VOLTAGE EARLIER'
+            if bits & 0x10000:
+                self._power_history='UNDER-VOLTAGE EARLIER'
+            # A Pi 3 has no ADC on the 5 V input, so the only voltage it can
+            # actually measure is the SoC core rail. Report it as what it is
+            # rather than dressing it up as a supply reading: the number that
+            # matters, 4.63 V, is a threshold the firmware compares against
+            # and never hands out.
+            core=''
+            try:
+                cv=subprocess.run([exe,'measure_volts','core'],
+                                  capture_output=True,text=True,timeout=3)
+                core=cv.stdout.strip().split('=')[-1]
+            except Exception:
+                pass
+            bits_txt='throttled '+word
+            self._power_detail=(('core %s, ' % core) if core else '')+bits_txt
         except Exception:
             pass
         return self._power_flag
@@ -460,33 +488,85 @@ class SDRBackend:
             if snr<minsnr: continue
             scored.append((ch,snr-w*max(0.,peak-tol)))
         scored.sort(key=lambda x:x[1],reverse=True)
+        # Kept whole. The shortlist below is only what the UI shows; the
+        # verification queue is built from the full ranking, so a carrier the
+        # survey rates 20th is reached on the fifth dwell instead of waiting
+        # out the systematic remainder of the band.
+        self._survey_scores=[(float(ch),float(sc)) for ch,sc in scored]
         limit=max(1,int(self.cfg.get('survey_max_candidates',12)))
         return [ch for ch,_ in scored[:limit]]
 
     def _refill_site_queue(self,now):
         """Rebuild the downlink verification queue for one full band pass.
 
-        The survey's favourites go first, then *every* remaining raster
-        channel.  That is the important part: the survey can reorder the work
-        but can no longer hide any of it.  On the reference unit the survey's
-        twelve slots were entirely filled by spur-comb teeth, which under the
-        old design meant a genuine but weaker C2000 carrier was never handed
-        to the verifier at all.  A full pass is about 25 dwells, roughly
-        35 seconds, and it is only run while no network is locked.
+        Every channel the survey could score goes first, strongest-looking
+        first, and then *every* remaining raster channel.  Both halves matter.
+        Ordering by survey score is what makes acquisition quick: one dwell
+        covers four channels and takes about 1.1 s, so a 200-channel band is
+        68 s end to end and the position of a real carrier in the queue is
+        the whole time-to-lock budget.  Keeping the remainder is what makes
+        it safe: on the reference unit the survey's top twelve were entirely
+        spur-comb teeth, and an earlier design that queued only those never
+        handed a genuine but weaker C2000 carrier to the verifier at all.
+
+        A full pass is 50 dwells, about 70 seconds, and it only runs while no
+        network is locked.
         """
         t0=time.perf_counter()
         ranked=self._survey_downlink()
         self.last_survey_ms=(time.perf_counter()-t0)*1000.
         self.survey_shortlist=list(ranked)
-        seen={int(round(x)) for x in ranked}
+        self._log_pass(now)
+        scored=[ch for ch,_ in self._survey_scores]
+        seen={int(round(x)) for x in scored}
         rest=[x for x in self._downlink_raster() if int(round(x)) not in seen]
         # Continue the systematic pass where the previous one stopped, so
         # repeated passes do not keep re-checking the bottom of the band.
         if self._sweep_cursor:
             after=[x for x in rest if x>self._sweep_cursor]
             rest=after+[x for x in rest if x<=self._sweep_cursor]
-        self._site_queue=list(ranked)+rest
+        self._site_queue=scored+rest
         self._survey_at=now
+        self._pass_best=None; self._pass_started=now; self._pass_index+=1
+
+    def _note_pass_best(self,results):
+        """Keep the most promising channel seen during this band pass.
+
+        Without this a unit that searches for half an hour can say only that
+        it found nothing, which is indistinguishable between "no C2000 here",
+        "antenna fell off" and "one acceptance limit is too tight". The best
+        channel and the check it failed on separate those three.
+        """
+        for r in results:
+            if self._pass_best is None or r.snr_db>self._pass_best['snr_db']:
+                self._pass_best={'freq_hz':float(r.freq_hz),
+                                 'snr_db':float(r.snr_db),
+                                 'ok':bool(r.ok),
+                                 'fail':','.join(r.failed())}
+
+    def _log_pass(self,now):
+        """Append one line per completed band pass to the search log."""
+        best=self._pass_best
+        if not best or not self._pass_started:
+            return
+        try:
+            # Next to the site state, so it follows RFEYE_SITE_STATE and a
+            # test run never appends to the unit's own log.
+            path=self.sites._path().with_name('search.log')
+            path.parent.mkdir(parents=True,exist_ok=True)
+            if path.exists() and path.stat().st_size>262144:
+                keep=path.read_text().splitlines()[-800:]
+                path.write_text('\n'.join(keep)+'\n')
+            line=('%s pass=%d %.0fs best=%.4fMHz snr=%.1f %s locked=%d cand=%d\n'%(
+                time.strftime('%Y-%m-%dT%H:%M:%S',time.localtime(now)),
+                self._pass_index,now-self._pass_started,
+                best['freq_hz']/1e6,best['snr_db'],
+                'TETRA' if best['ok'] else ('fail:'+(best['fail'] or '?')),
+                len(self.sites.locked(now)),len(self.sites.candidates(now))))
+            with path.open('a') as fh:
+                fh.write(line)
+        except Exception:
+            pass
 
     # -- stage 2: verify a group of channels in one narrowband dwell -------
     def _verify(self,freqs,role):
@@ -589,6 +669,7 @@ class SDRBackend:
 
         locked_keys={int(round(x['freq_hz'])) for x in locked}
         results=self._verify(ordered,'DOWNLINK')
+        self._note_pass_best(results)
         for r in results:
             # A carrier that failed only because there was nothing to hear is
             # idle, not disproved -- traffic carriers are idle most of the time.
@@ -711,7 +792,7 @@ class SDRBackend:
             # the dongle from coming back.
             if ('timeout' in low or 'short read' in low) and 'open failed' not in low:
                 self._recover_sdr_usb()
-            power=self._power_warning()
+            power=self._power_warning() or self._power_history
             if power:
                 err=power+': '+err
             with self.lock:

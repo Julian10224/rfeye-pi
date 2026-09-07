@@ -360,6 +360,8 @@ def tap(app, x, y):
     now=time.monotonic()
     if now-float(getattr(app,"_last_compact_tap",0.0)) < 0.12: return
     app._last_compact_tap=now
+    # The supply notice floats over every page, so it gets the tap first.
+    if app._power_notice_tap(x, y): return
     if app.page == "main":
         if x <= 105 and y <= 115:
             app.page = "settings"
@@ -502,7 +504,9 @@ def tap(app, x, y):
         return
 
     if app.page == "debug":
-        if 390 <= y <= 458:
+        # The status rows now run down to y=412, so the calibration hit box
+        # starts below them rather than under the last two rows.
+        if 412 <= y <= 452:
             start_calibration(app,'debug'); return
         if y < 62 or y > 450:
             app.page = "settings"

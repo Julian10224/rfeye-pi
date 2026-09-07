@@ -23,6 +23,7 @@ import argparse
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rfeye"))
 
@@ -165,6 +166,38 @@ def scenario(name, air, cycles=14, at=None, **overrides):
             b.running = False
 
 
+def check_queue_order():
+    """The verification queue has to be complete *and* usefully ordered.
+
+    Order is the entire time-to-lock budget: one dwell covers four channels
+    in about 1.1 s, so a 200-channel band is 68 s end to end and where a real
+    carrier sits in the queue decides whether a lock takes 5 s or 70.
+    Completeness is what keeps that safe -- on the reference unit the survey's
+    top twelve were all spur-comb teeth, and queueing only those meant a
+    genuine carrier was never verified at all.
+    """
+    print("\n11. verification queue")
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=DOWNLINKS,
+                      interferers=[(390_012_500.0 + k * 800_000.0, "spur")
+                                   for k in range(6)])
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            b._refill_site_queue(time.time())
+            raster = [int(round(x)) for x in b._downlink_raster()]
+            queue = [int(round(x)) for x in b._site_queue]
+            check("queue still covers every raster channel",
+                  sorted(queue) == sorted(raster),
+                  "%d queued / %d raster" % (len(queue), len(raster)))
+            hits = [queue.index(int(round(f))) for f in DOWNLINKS
+                    if int(round(f)) in queue]
+            check("a real carrier is reached early in the queue",
+                  bool(hits) and min(hits) < 40,
+                  "first real carrier at queue position %s" % (min(hits) if hits else None))
+        finally:
+            b.running = False
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -230,6 +263,10 @@ def main():
     check("locks the real carrier despite the comb",
           any(s["site_locked_count"] for s in log),
           "max locked = %d" % max(s["site_locked_count"] for s in log))
+    first = next((i for i, s in enumerate(log) if s["site_locked_count"]), None)
+    check("locks inside one band pass rather than after it",
+          first is not None and first <= 12,
+          "first locked on cycle %s" % first)
     check("never locks a comb tooth",
           all(any(abs(x["freq_hz"] - d) < 1.0 for d in DOWNLINKS)
               for s in log for x in s["site_peaks"]),
@@ -307,6 +344,8 @@ def main():
     snapped = raster_snap(381_240_000.0, 380_000_000.0)
     check("raster snaps to the +12.5 kHz TETRA grid",
           abs(snapped - 381_237_500.0) < 1.0, f"{snapped:.0f} Hz")
+
+    check_queue_order()
 
     print()
     if FAILURES:
