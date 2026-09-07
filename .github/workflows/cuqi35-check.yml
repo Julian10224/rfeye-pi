@@ -1,4 +1,4 @@
-name: RF Eye 0.9.7 appliance checks
+name: RF Eye 0.9.8 appliance checks
 
 on:
   push:
@@ -55,6 +55,13 @@ jobs:
           grep -q 'def _draw_frame_error' rfeye/app.py
           grep -q 'self._guarded_frame()' rfeye/app.py
           grep -q 'crash.log' rfeye/app.py
+          # 0.9.8: the guard must not become a trap, and a unit that goes
+          # dark across a power cut has to leave something behind. The
+          # user journal does not survive a power cut on these units.
+          grep -q 'def boot_note' rfeye/app.py
+          grep -q 'boot.log' rfeye/app.py
+          grep -q 'frame_error_streak' rfeye/app.py
+          grep -q 'FRAME_ERROR_RESTART_FRAMES' rfeye/app.py
           grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py

@@ -166,6 +166,29 @@ def _check_frame_guard(a):
     # And it clears itself as soon as drawing works again.
     a._guarded_frame()
     assert a.frame_error is None
+    assert a.frame_error_streak == 0
+
+    # The guard must not become a trap. Until 0.9.7 an exception ended the
+    # process and systemd started a fresh one, which is what carried a unit
+    # through a transient failure at boot. Catching everything removed that,
+    # so a fault that never clears now hands the process back deliberately.
+    keep_limit = a.cfg.get("frame_error_restart_frames")
+    a.cfg["frame_error_restart_frames"] = 4
+    a.running = True
+    try:
+        a.__class__._draw_main = explode
+        for _ in range(4):
+            a._guarded_frame()
+        assert a.frame_error_streak == 4, a.frame_error_streak
+        assert a.running is False, "a fault that never clears must be handed back"
+    finally:
+        a.__class__._draw_main = real_draw
+        a.cfg.pop("frame_error_restart_frames", None)
+        if keep_limit is not None:
+            a.cfg["frame_error_restart_frames"] = keep_limit
+    a.running = True
+    a._guarded_frame()
+    assert a.frame_error is None and a.running is True
     a.page = keep_page
 
 

@@ -29,6 +29,33 @@ YELLOW = (243, 192, 56)
 ORANGE = (243, 128, 32)
 RED = (230, 54, 54)
 
+# A frame that keeps failing is handed back to systemd rather than sat in;
+# see App._guarded_frame.
+FRAME_ERROR_RESTART_FRAMES = 60
+
+
+def boot_note(text):
+    """Append one line to the boot log, and never fail doing it.
+
+    A unit that goes dark after a power cut leaves nothing behind to look at:
+    the panel says nothing by definition, and the operator has already pulled
+    the plug on whatever was on screen. This file is the smallest thing that
+    survives that, and it is what separates "the app never started" from "the
+    app started and then something went wrong".
+    """
+    try:
+        path = Path.home() / ".local" / "state" / "rfeye" / "boot.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > 131072:
+            keep = path.read_text().splitlines()[-300:]
+            path.write_text(chr(10).join(keep) + chr(10))
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with path.open("a") as fh:
+            fh.write("%s pid=%d %s%s" % (stamp, os.getpid(), text, chr(10)))
+    except Exception:
+        pass
+
+
 def clamp(v, lo=0.0, hi=1.0):
     return max(lo, min(hi, v))
 
@@ -117,6 +144,8 @@ class App:
         self.frame_error = None
         self.frame_error_logged = ""
         self.frame_error_count = 0
+        self.frame_error_streak = 0
+        self.first_frame_done = False
         self.debug_frame_ms = 0.0
         self.debug_last_frame = time.perf_counter()
         self.ready_chime_done = False
@@ -181,10 +210,17 @@ class App:
         fps = int(self.cfg.get("ui_fps", 20))
         clock = pygame.time.Clock()
 
+        boot_note("ui-loop v%s profile=%s %dx%d" % (
+            self.cfg.get("app_version", "?"),
+            getattr(self, "display_profile", "default"), self.uw, self.uh))
+
         while self.running:
             self._guarded_frame()
             clock.tick(fps)
 
+        boot_note("exit faults=%d streak=%d last=%s" % (
+            self.frame_error_count, self.frame_error_streak,
+            self.frame_error_logged or "none"))
         self.backend.stop()
         self.buzzer.close()
         pygame.quit()
@@ -201,14 +237,33 @@ class App:
         """
         try:
             self._frame()
+            self.frame_error_streak = 0
+            if not self.first_frame_done:
+                self.first_frame_done = True
+                boot_note("first-frame")
         except Exception as exc:
             self._note_frame_error(exc)
+            self.frame_error_streak += 1
             try:
                 self._draw_frame_error()
                 self._present_rotated()
                 pygame.display.flip()
             except Exception:
                 pass
+            # A fault that never clears is not something to sit in. Until
+            # 0.9.7 an exception ended the process and systemd started a fresh
+            # one half a second later, and that restart is what carried a unit
+            # through a transient failure at boot -- a display that was not
+            # ready yet, a device that had not enumerated yet. Catching
+            # everything took that recovery away and could leave a unit stuck
+            # in a fault for ever. Show the fault long enough to read, then
+            # hand the recovery back.
+            limit = int(self.cfg.get("frame_error_restart_frames",
+                                     FRAME_ERROR_RESTART_FRAMES))
+            if self.frame_error_streak >= max(1, limit):
+                boot_note("restarting after %d consecutive failed frames: %s"
+                          % (self.frame_error_streak, self.frame_error))
+                self.running = False
 
     def _frame(self):
         """One UI frame. Anything raised here is caught by ``_guarded_frame``."""
@@ -1196,6 +1251,7 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
+    boot_note("start v%s" % cfg.get("app_version", "?"))
     # Persist normalized migrations/version fields once; save_config is a
     # no-op when the file is already byte-identical.
     save_config(cfg)
