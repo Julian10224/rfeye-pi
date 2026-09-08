@@ -1,6 +1,14 @@
 [Unit]
 Description=RF Eye user display service
 After=default.target
+# systemd stops restarting a unit that fails StartLimitBurst times inside
+# StartLimitIntervalSec and leaves it failed until someone resets it by hand.
+# With the defaults (5 starts in 10 s) and RestartSec below, five quick
+# failures at boot took about two seconds and left the appliance in
+# failed (start-limit-hit) permanently: desktop up, a mouse cursor on a black
+# panel, no RF Eye, and nothing in any log to say so. An appliance whose whole
+# job is to be on screen must keep trying.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -15,7 +23,10 @@ Environment=RFEYE_CONFIG=@HOME@/.config/rfeye/config.json
 # almost two seconds of avoidable startup latency after Wayland becomes ready.
 ExecStart=/opt/rfeye/start-rfeye.sh
 Restart=always
-RestartSec=0.5
+# Two seconds, not half a second. At boot the compositor, the panel and the
+# USB bus are all still settling; retrying four times a second neither helps
+# them nor gives them room.
+RestartSec=2
 
 [Install]
 WantedBy=default.target

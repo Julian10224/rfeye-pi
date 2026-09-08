@@ -1245,6 +1245,33 @@ def _search_best_text(snap):
                                 float(best.get("snr_db", 0.0)), verdict)
 
 
+def _build_app(cfg, fullscreen, attempts=20, delay=1.0):
+    """Construct the App, retrying while the display is still coming up.
+
+    Opening the pygame display is the first thing __init__ does, and at boot
+    it can fail for a second or two while the compositor finishes bringing the
+    panel up. That failure used to end the process, and with Restart=always
+    every exit spent one of systemd's five permitted starts -- five inside ten
+    seconds and the unit was left failed for good. Retrying here keeps those
+    failures inside one process, where they cost nothing and get written down.
+    """
+    last = None
+    for attempt in range(1, int(attempts) + 1):
+        try:
+            return App(cfg, fullscreen=fullscreen)
+        except Exception as exc:
+            last = exc
+            boot_note("startup attempt %d failed: %s: %s"
+                      % (attempt, type(exc).__name__, exc))
+            try:
+                pygame.display.quit()
+            except Exception:
+                pass
+            time.sleep(float(delay))
+    boot_note("giving up after %d startup attempts: %s" % (attempts, last))
+    raise SystemExit(1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--window", action="store_true")
@@ -1256,7 +1283,7 @@ def main():
     # no-op when the file is already byte-identical.
     save_config(cfg)
     fullscreen = bool(cfg.get("fullscreen", True)) and not args.window
-    App(cfg, fullscreen=fullscreen).run()
+    _build_app(cfg, fullscreen).run()
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,4 @@
-name: RF Eye 0.9.8 appliance checks
+name: RF Eye 0.9.9 appliance checks
 
 on:
   push:
@@ -73,6 +73,14 @@ jobs:
           grep -q 'self._request_app_restart(0.75)' rfeye/app.py
           grep -q 'if self.update_message == "RESTART"' rfeye/app.py
           grep -q '^Restart=always$' config/systemd/rfeye-user.service.in
+          # 0.9.9: five quick failures at boot used to leave the unit in
+          # failed (start-limit-hit) for good -- desktop up, mouse cursor,
+          # no application, and nothing in any log. An appliance keeps trying.
+          grep -q '^StartLimitIntervalSec=0$' config/systemd/rfeye-user.service.in
+          grep -q '^RestartSec=2$' config/systemd/rfeye-user.service.in
+          ! grep -q '^RestartSec=0.5$' config/systemd/rfeye-user.service.in
+          grep -q 'def _build_app' rfeye/app.py
+          grep -q '_build_app(cfg, fullscreen).run()' rfeye/app.py
           # Detector profile v8 waveform verification must be present. These
           # guard the physics: the symbol rate and slot length are ETSI
           # constants, not tuning knobs, and a silent edit to either would

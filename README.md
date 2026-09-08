@@ -1,6 +1,6 @@
-# RF Eye 0.9.8 for Raspberry Pi
+# RF Eye 0.9.9 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.8 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.9 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.8 appliance path:
+The installer reproduces the working 0.9.9 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.8
+## User interface in 0.9.9
 
 The compact profile contains:
 
@@ -186,7 +186,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.8)
+### How the band is searched (0.9.9)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -216,7 +216,7 @@ uplink channels unwatched.
 costs about 1.1 s, so the position of a real carrier in a 200-channel queue is
 the difference between locking in five seconds and locking in seventy. Up to
 0.9.4 only the survey's top twelve were promoted and the other 188 followed in
-frequency order, which is uncorrelated with signal strength; since 0.9.8 the
+frequency order, which is uncorrelated with signal strength; since 0.9.9 the
 whole ranking is used. A carrier that passes the waveform test is re-tested on
 every following cycle, so the three hits a lock needs cost three cycles, not
 three band passes.
@@ -269,7 +269,7 @@ duration, hardware speed and watch-list length.
 
 "SEARCHING" for half an hour is indistinguishable, from the outside, between
 no C2000 in range, an antenna that fell off, and one acceptance limit set too
-tight. Since 0.9.8 the debug page carries the best channel of the current band
+tight. Since 0.9.9 the debug page carries the best channel of the current band
 pass with its SNR and the check it failed on, and every completed pass appends
 one line to `~/.local/state/rfeye/search.log`:
 
@@ -391,7 +391,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.8 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.9 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -418,9 +418,42 @@ The updater downloads the ZIP, requires and verifies its SHA-256, validates ever
 
 Application-only OTA updates update `/opt/rfeye/rfeye`. Device Tree, systemd, Plymouth and boot-service changes are applied by `install-cuqi35.sh` and therefore require root.
 
+### A mouse cursor on a black panel
+
+This one is not the application at all. The desktop is up and RF Eye is simply
+not running, and until 0.9.9 it could not come back on its own.
+
+`rfeye-user.service` carries `Restart=always`, but systemd also enforces a
+start limit: fail `StartLimitBurst` times inside `StartLimitIntervalSec` and it
+stops trying and leaves the unit `failed`, until someone resets it by hand. The
+defaults are five starts in ten seconds, and the unit asked for `RestartSec=0.5`
+-- so five quick failures took about two and a half seconds. At boot, with the
+compositor, the panel and the USB bus all still settling, that is easy to hit
+once; after that the appliance stays dead through every later power cycle,
+writing nothing anywhere, because it is never started again.
+
+```bash
+systemctl --user status rfeye-user.service     # Result: start-limit-hit
+```
+
+Since 0.9.9 the unit sets `StartLimitIntervalSec=0` and `RestartSec=2`, and the
+application retries opening the display in-process instead of exiting, so a
+display that is a second late costs nothing. Fresh installs get this from
+`scripts/apply-cuqi35-system-fixes.sh`. An already-installed unit can be
+repaired without root, because the drop-in directory belongs to the user:
+
+```bash
+mkdir -p ~/.config/systemd/user/rfeye-user.service.d
+printf '[Unit]\nStartLimitIntervalSec=0\n\n[Service]\nRestartSec=2\n' \
+  > ~/.config/systemd/user/rfeye-user.service.d/30-rfeye-restart.conf
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user reset-failed rfeye-user.service
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart rfeye-user.service
+```
+
 ### If the panel goes black after an update
 
-Since 0.9.8 every start appends a line to `~/.local/state/rfeye/boot.log`:
+Since 0.9.9 every start appends a line to `~/.local/state/rfeye/boot.log`:
 `start` with the release, `ui-loop` with the display profile and geometry,
 `first-frame` the first time a frame is presented, and `exit` with the fault
 count. The user journal does not survive a power cut on these units, so after
@@ -444,7 +477,7 @@ loop whose only visible symptom was a black screen.
 That restart was also the accidental recovery from a transient failure at
 boot -- a display not ready yet, a device not enumerated yet -- so catching
 everything would have replaced a restart loop with a unit stuck in a fault for
-ever. Since 0.9.8 a fault that has not cleared after about three seconds hands
+ever. Since 0.9.9 a fault that has not cleared after about three seconds hands
 the process back to systemd deliberately, which keeps both the message and the
 recovery.
 
@@ -461,7 +494,7 @@ predating that variable keeps the 480x800 layout on a 480x320 panel, which puts
 the top-left corner of a much larger screen on the display: mostly empty
 background, no buttons, no readings. It looks like a dead device.
 
-Since 0.9.8 the runtime falls back to the `display_profile` already recorded in
+Since 0.9.9 the runtime falls back to the `display_profile` already recorded in
 the saved config, so this repairs itself on the next start. An explicit
 environment value still wins. To check a unit:
 
@@ -485,7 +518,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.8**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.9**.
 
 Build the OTA package with:
 
