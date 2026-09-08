@@ -1,4 +1,4 @@
-name: RF Eye 0.9.9 appliance checks
+name: RF Eye 0.9.10 appliance checks
 
 on:
   push:
@@ -62,7 +62,17 @@ jobs:
           grep -q 'boot.log' rfeye/app.py
           grep -q 'frame_error_streak' rfeye/app.py
           grep -q 'FRAME_ERROR_RESTART_FRAMES' rfeye/app.py
-          grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
+          grep -q 'SETTINGS_COUNT=9' rfeye/compact_ui_draw.py
+          # 0.9.10: the Power row. ECO ships as the default because the
+          # detector's UI load kept a Pi 3 B+ busy enough to matter on a
+          # marginal 5 V rail, measured 85% -> 39% of a core. Switching it
+          # also re-checks USB: the reason to reach for it is a dongle that
+          # has just dropped off, and a reboot to find out would defeat it.
+          grep -q '"Power","ECO"' rfeye/compact_ui_draw.py
+          grep -q 'def _toggle_low_power' rfeye/compact_ui_controls.py
+          grep -q 'def reinit_usb' rfeye/sdr_backend.py
+          grep -q 'def _low_power_pause' rfeye/sdr_backend.py
+          grep -q 'def _fps' rfeye/app.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py
           grep -q 'if app.page == "record_confirm"' rfeye/compact_ui_controls.py
@@ -221,6 +231,9 @@ jobs:
           assert c['sdr_stop_join_s']==8.0
           assert c['sdr_device_index']==0
           assert c['startup_chime'] is True
+          assert c['low_power_mode'] is True, 'a fresh install ships economical'
+          assert c['low_power_ui_fps']==8
+          assert c['low_power_scan_pause_s']==1.5
           assert c['audio_mode']=='adaptive'
           assert len(c['touch_calibration_affine'])==6
           # Every v6/v7 energy-statistics key must be gone, not merely unused.

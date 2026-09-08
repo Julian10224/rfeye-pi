@@ -24,6 +24,9 @@ class FakeBackend:
     def start(self): pass
     def stop(self): pass
     def set_demo(self,value): self.cfg["demo_mode"]=bool(value)
+    def reinit_usb(self):
+        self.reinit_calls=getattr(self,"reinit_calls",0)+1
+        return {"present":False,"reset":False}
     def snapshot(self):
         return {
             "status":"LIVE","error":"","detector_state":"LOCKED",
@@ -331,8 +334,40 @@ def main():
     a._tap(30,40)
     assert a.page=="settings"
     a._last_compact_tap=0.0
-    a._tap(40,66+2*48+20)
-    assert a.page=="record_confirm"
+    # Derived from the layout constants, not written out: the settings rows
+    # have moved before and a hard-coded y silently taps the wrong feature.
+    from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_HEIGHT
+    _ROWS = ["demo_mode", "brightness", "low_power", "record_rf", "recordings",
+             "wifi", "update", "spectrum", "debug"]
+    def _row_y(name):
+        return SETTINGS_TOP + _ROWS.index(name) * SETTINGS_STEP + SETTINGS_HEIGHT // 2
+    # Power mode: the row flips the setting, the frame rate follows it live,
+    # and the same tap goes looking for the SDR again -- the reason to reach
+    # for this setting is a dongle that has dropped off a marginal supply, so
+    # needing a reboot to find out whether it helped would make it useless.
+    assert a.cfg.get("low_power_mode") is True, "eco is the shipped default"
+    assert a._fps() == int(a.cfg["low_power_ui_fps"])
+    time.sleep(0.15)
+    a._tap(40, _row_y("low_power"))
+    assert a.cfg["low_power_mode"] is False
+    assert a._fps() == int(a.cfg["ui_fps"])
+    # The switch reports back on the panel; by now the USB check may already
+    # have replaced the acknowledgement with its own result, and either is fine.
+    assert str(a.low_power_message or "").strip(), "the switch has to say something"
+    assert float(a.low_power_message_until) > time.monotonic()
+    time.sleep(0.15)
+    a._tap(40, _row_y("low_power"))
+    assert a.cfg["low_power_mode"] is True
+    for _ in range(50):
+        if getattr(a.backend, "reinit_calls", 0) >= 2:
+            break
+        time.sleep(0.05)
+    assert getattr(a.backend, "reinit_calls", 0) >= 2, "each switch re-checks USB"
+    a.page = "settings"
+
+    time.sleep(0.15)
+    a._tap(40, _row_y("record_rf"))
+    assert a.page=="record_confirm", a.page
     a.record_confirm_opened=time.monotonic()-1.0
     a._last_compact_tap=0.0
     a._tap(160,250)

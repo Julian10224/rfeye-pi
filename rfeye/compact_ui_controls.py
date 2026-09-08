@@ -356,6 +356,36 @@ def capture_calibration(app,raw_x,raw_y):
             app.touch_calibration_complete=True
             app.touch_calibration_message='CALIBRATION FAILED'
 
+def _toggle_low_power(app):
+    """Flip low power mode and look for the SDR again, in that order.
+
+    Re-initialising USB is part of the same action deliberately: the reason to
+    reach for this setting is that the dongle has dropped off a marginal
+    supply, and having to reboot to find out whether the change helped makes
+    the setting useless. The USB work runs on its own thread because a device
+    reset sleeps, and the settings page has to stay responsive.
+    """
+    app.cfg["low_power_mode"] = not bool(app.cfg.get("low_power_mode", False))
+    _save(app)
+    app.low_power_message = "power %s - checking USB" % (
+        "ECO" if app.cfg["low_power_mode"] else "MAX")
+    app.low_power_message_until = time.monotonic() + 6.0
+
+    def worker():
+        try:
+            res = app.backend.reinit_usb()
+            if res.get("present"):
+                text = "SDR found, USB reset" if res.get("reset") else "SDR on the bus"
+            else:
+                text = "SDR not on the USB bus"
+        except Exception as exc:
+            text = "USB re-init failed: %s" % str(exc)[:28]
+        app.low_power_message = text
+        app.low_power_message_until = time.monotonic() + 6.0
+
+    threading.Thread(target=worker, name="rfeye-usb-reinit", daemon=True).start()
+
+
 def tap(app, x, y):
     now=time.monotonic()
     if now-float(getattr(app,"_last_compact_tap",0.0)) < 0.12: return
@@ -377,8 +407,8 @@ def tap(app, x, y):
             app.page = "main"
             return
         idx = int((y - SETTINGS_TOP) / SETTINGS_STEP)
-        keys = ["demo_mode", "brightness", "record_rf", "recordings", "wifi",
-                "update", "spectrum", "debug"]
+        keys = ["demo_mode", "brightness", "low_power", "record_rf", "recordings",
+                "wifi", "update", "spectrum", "debug"]
         if not 0 <= idx < min(SETTINGS_COUNT, len(keys)): return
         key = keys[idx]
         if key == "demo_mode":
@@ -388,6 +418,8 @@ def tap(app, x, y):
                 lo,hi,step=0.4,1.0,0.05
                 n=max(0.0,min(1.0,(float(x)-BRIGHT_SLIDER_X0)/max(1.0,BRIGHT_SLIDER_X1-BRIGHT_SLIDER_X0)))
                 v=round((lo+n*(hi-lo))/step)*step; app.cfg["brightness"]=max(lo,min(hi,v)); _save(app)
+        elif key == "low_power":
+            _toggle_low_power(app)
         elif key == "record_rf":
             if not bool(getattr(app,"rf_recording",False)):
                 app.record_confirm_opened=time.monotonic(); app.page="record_confirm"

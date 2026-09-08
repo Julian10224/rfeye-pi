@@ -210,6 +210,44 @@ class SDRBackend:
         try: self.sites.save()
         except Exception: pass
 
+    def reinit_usb(self):
+        """Drop the SDR handle and look for the device again, from scratch.
+
+        The useful moment for this is right after someone has changed
+        something physical -- a cable, a port, the supply -- and wants the
+        appliance to look again without a reboot. It closes the librtlsdr
+        handle, clears the failure counters and back-off that would otherwise
+        make the next attempt wait, and resets the device over USB if it is
+        actually on the bus. A device that is not enumerated cannot be reset
+        by anyone, so that case is reported rather than papered over.
+        """
+        self._close_direct_sdr()
+        self._usb_resets = 0
+        self._usb_backoff = 0.
+        self.last_usb_reset = 0.
+        self._power_checked = 0.
+        present = self._sdr_present()
+        did_reset = self._recover_sdr_usb() if present else False
+        with self.lock:
+            self.scan_failures = 0
+            self.error = '' if present else 'SDR not on the USB bus'
+        return {'present': bool(present), 'reset': bool(did_reset)}
+
+    def _low_power_pause(self):
+        """Idle between cycles so the CPU can clock back down.
+
+        Without this the detector hands the governor a continuous FFT load and
+        a Pi 3 B+ never leaves 1.4 GHz. The pause costs time to lock and buys
+        supply headroom, which on a marginal 5 V rail is what decides whether
+        the RTL-SDR stays on the bus at all.
+        """
+        if not bool(self.cfg.get('low_power_mode', False)):
+            return
+        pause = max(0., float(self.cfg.get('low_power_scan_pause_s', 1.5)))
+        end = time.time() + pause
+        while self.running and time.time() < end:
+            time.sleep(min(0.25, max(0.01, end - time.time())))
+
     def _run(self):
         try:
             while self.running:
@@ -219,6 +257,7 @@ class SDRBackend:
                 if not self._scan_cycle():
                     if self.cfg.get('auto_demo_if_no_sdr',False): self._demo_once()
                     else: time.sleep(.5)
+                self._low_power_pause()
         finally:
             # Close from the same worker that performs synchronous USB reads.
             self._close_direct_sdr()

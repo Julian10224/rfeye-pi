@@ -206,8 +206,13 @@ class App:
         except Exception:
             return None
 
+    def _fps(self):
+        """Frame rate for this frame, so the low power setting applies at once."""
+        if bool(self.cfg.get("low_power_mode", False)):
+            return max(1, int(self.cfg.get("low_power_ui_fps", 8)))
+        return max(1, int(self.cfg.get("ui_fps", 20)))
+
     def run(self):
-        fps = int(self.cfg.get("ui_fps", 20))
         clock = pygame.time.Clock()
 
         boot_note("ui-loop v%s profile=%s %dx%d" % (
@@ -216,7 +221,7 @@ class App:
 
         while self.running:
             self._guarded_frame()
-            clock.tick(fps)
+            clock.tick(self._fps())
 
         boot_note("exit faults=%d streak=%d last=%s" % (
             self.frame_error_count, self.frame_error_streak,

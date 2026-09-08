@@ -30,6 +30,21 @@ def _coeffs(app):
         pass
     return list(FACTORY_AFFINE)
 
+def _in_brightness_row(uy):
+    """Is this y inside the brightness row of the settings page?
+
+    Derived from the layout constants rather than written out, because the
+    hard-coded bands this replaces had drifted off the row they were meant to
+    cover and would have drifted again the next time a row was added.
+    """
+    try:
+        from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_HEIGHT
+    except Exception:
+        return False
+    top = SETTINGS_TOP + SETTINGS_STEP          # row index 1
+    return top - 4 <= uy <= top + SETTINGS_HEIGHT + 4
+
+
 def _map(app,raw_x,raw_y):
     a,b,c,d,e,f=_coeffs(app)
     x=a*float(raw_x)+b*float(raw_y)+c
@@ -67,7 +82,7 @@ def install(app):
                             elif value==0: touching=False
                         elif etype==EV_SYN and code==SYN_REPORT:
                             mapped=_map(app,raw_x,raw_y); now=time.monotonic()
-                            slider_drag=(touching and dirty and getattr(app,'page',None)=='settings' and ((135<=mapped[1]<=190) or (205<=mapped[1]<=260)) and now-last_emit>=0.06)
+                            slider_drag=(touching and dirty and getattr(app,'page',None)=='settings' and _in_brightness_row(mapped[1]) and now-last_emit>=0.06)
                             if pending or slider_drag:
                                 app._direct_touch_queue.append((raw_x,raw_y,mapped[0],mapped[1])); last_emit=now
                             pending=False; dirty=False

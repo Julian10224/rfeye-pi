@@ -148,6 +148,13 @@ DEFAULTS = {
     "max_signals": 3,
     "rf_record_duration_s": 15.0,
     "ui_fps": 20,
+    # Low power mode. The detector keeps a Pi 3 B+ at its full 1.4 GHz around
+    # the clock, which on a marginal supply is the difference between the
+    # RTL-SDR enumerating and not. This trades time-to-lock for headroom, and
+    # it is the user's call, so it lives in the settings menu.
+    "low_power_mode": True,
+    "low_power_ui_fps": 8,
+    "low_power_scan_pause_s": 1.5,
     "gain": "auto",
     "ppm": 0,
     "muted": False,
@@ -171,7 +178,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.9",
+    "app_version": "0.9.10",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
