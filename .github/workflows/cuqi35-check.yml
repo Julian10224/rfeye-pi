@@ -1,4 +1,4 @@
-name: RF Eye 0.9.10 appliance checks
+name: RF Eye 0.9.11 appliance checks
 
 on:
   push:
@@ -62,17 +62,24 @@ jobs:
           grep -q 'boot.log' rfeye/app.py
           grep -q 'frame_error_streak' rfeye/app.py
           grep -q 'FRAME_ERROR_RESTART_FRAMES' rfeye/app.py
-          grep -q 'SETTINGS_COUNT=9' rfeye/compact_ui_draw.py
+          grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           # 0.9.10: the Power row. ECO ships as the default because the
           # detector's UI load kept a Pi 3 B+ busy enough to matter on a
           # marginal 5 V rail, measured 85% -> 39% of a core. Switching it
           # also re-checks USB: the reason to reach for it is a dongle that
           # has just dropped off, and a reboot to find out would defeat it.
-          grep -q '"Power","ECO"' rfeye/compact_ui_draw.py
+          grep -q '"Max power"' rfeye/compact_ui_draw.py
+          ! grep -q '("Spectrum","OPEN"' rfeye/compact_ui_draw.py
           grep -q 'def _toggle_low_power' rfeye/compact_ui_controls.py
           grep -q 'def reinit_usb' rfeye/sdr_backend.py
           grep -q 'def _low_power_pause' rfeye/sdr_backend.py
           grep -q 'def _fps' rfeye/app.py
+          # 0.9.11: a live under-voltage takes max power back off, and a
+          # locked network no longer stops the band being swept -- one lock
+          # used to mean one watched uplink channel for the whole session.
+          grep -q 'Max power switched off' rfeye/app.py
+          grep -q 'site_rescan_s' rfeye/sdr_backend.py rfeye/config.py
+          ! grep -q 'if locked:\\n                return \\[\\]' rfeye/sdr_backend.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py
           grep -q 'if app.page == "record_confirm"' rfeye/compact_ui_controls.py
@@ -216,6 +223,7 @@ jobs:
           assert c['site_lock_hits']==3
           assert c['site_unlock_misses']==4
           assert c['site_reverify_s']==60.0
+          assert c['site_rescan_s']==300.0
           assert c['site_lost_rounds']==3
           assert c['site_lock_stale_s']==600.0
           assert c['site_state_persist'] is True

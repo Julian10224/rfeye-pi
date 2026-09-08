@@ -338,7 +338,7 @@ def main():
     # have moved before and a hard-coded y silently taps the wrong feature.
     from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_HEIGHT
     _ROWS = ["demo_mode", "brightness", "low_power", "record_rf", "recordings",
-             "wifi", "update", "spectrum", "debug"]
+             "wifi", "update", "debug"]
     def _row_y(name):
         return SETTINGS_TOP + _ROWS.index(name) * SETTINGS_STEP + SETTINGS_HEIGHT // 2
     # Power mode: the row flips the setting, the frame rate follows it live,
@@ -363,6 +363,27 @@ def main():
             break
         time.sleep(0.05)
     assert getattr(a.backend, "reinit_calls", 0) >= 2, "each switch re-checks USB"
+    # A live under-voltage takes max power back off, even after the notice has
+    # already been seen and dismissed once: it is a change the user asked for
+    # and did not make, so it has to be said out loud.
+    a.cfg["low_power_mode"] = False
+    a.power_notice_done = True
+    a.power_notice_open = False
+    a._power_notice_update({"power_warning": "UNDER-VOLTAGE",
+                            "power_detail": "core 1.2563V, throttled 0xd0005"})
+    assert a.cfg["low_power_mode"] is True, "a sagging rail drops max power"
+    assert a.power_notice_open is True, "and says so, dismissed or not"
+    assert any("Max power" in line for line in a.power_notice_lines), a.power_notice_lines
+    a.power_notice_open = False
+    a.power_notice_done = True
+    # With the load already backed off there is nothing left to revert, so a
+    # dismissed notice stays dismissed.
+    a._power_notice_update({"power_warning": "UNDER-VOLTAGE"})
+    assert a.power_notice_open is False
+    # Leave the notice as the later check expects to find it.
+    a.power_notice_done = False
+    a.power_notice_lines = []
+
     a.page = "settings"
 
     time.sleep(0.15)

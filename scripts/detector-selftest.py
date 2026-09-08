@@ -198,6 +198,44 @@ def check_queue_order():
             b.running = False
 
 
+def check_rescan_while_locked():
+    """A locked network must not stop the band being swept.
+
+    A TETRA site runs several carriers and each one has its own uplink
+    partner, so the watch list is exactly as wide as the number of locked
+    downlinks. Until 0.9.11 the pass stopped for good once the first carrier
+    locked and the queue drained: one lock meant one watched uplink channel
+    for the rest of the session, and a handset on any other carrier of the
+    same site was never looked at.
+    """
+    print("\n12. rediscovery while locked")
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=DOWNLINKS)
+        b = make_backend(air, os.path.join(d, "sites.json"), site_rescan_s=60.0)
+        try:
+            now = time.time()
+            # A locked carrier, an exhausted queue, and the rescan timer due.
+            b.sites.entries[int(round(DOWNLINKS[0]))] = {
+                "hits": 9, "misses": 0, "quality": 0.7,
+                "last_ok": now, "first_seen": now}
+            assert b.sites.locked(now), "test setup: the carrier must read as locked"
+            b._site_queue = []
+            b._survey_at = now - 3600.0
+            b._site_work(now)
+            check("sweeps the band again once a network is locked",
+                  len(b._site_queue) > 0,
+                  "queue refilled to %d channels" % len(b._site_queue))
+
+            # ...but not on every round, or it would starve the uplink watch.
+            b._site_queue = []
+            b._survey_at = time.time()
+            b._site_work(time.time())
+            check("and not on every round", len(b._site_queue) == 0,
+                  "queue %d" % len(b._site_queue))
+        finally:
+            b.running = False
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -346,6 +384,7 @@ def main():
           abs(snapped - 381_237_500.0) < 1.0, f"{snapped:.0f} Hz")
 
     check_queue_order()
+    check_rescan_while_locked()
 
     print()
     if FAILURES:

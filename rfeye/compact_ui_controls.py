@@ -367,8 +367,8 @@ def _toggle_low_power(app):
     """
     app.cfg["low_power_mode"] = not bool(app.cfg.get("low_power_mode", False))
     _save(app)
-    app.low_power_message = "power %s - checking USB" % (
-        "ECO" if app.cfg["low_power_mode"] else "MAX")
+    app.low_power_message = "max power %s - checking USB" % (
+        "OFF" if app.cfg["low_power_mode"] else "ON")
     app.low_power_message_until = time.monotonic() + 6.0
 
     def worker():
@@ -408,7 +408,7 @@ def tap(app, x, y):
             return
         idx = int((y - SETTINGS_TOP) / SETTINGS_STEP)
         keys = ["demo_mode", "brightness", "low_power", "record_rf", "recordings",
-                "wifi", "update", "spectrum", "debug"]
+                "wifi", "update", "debug"]
         if not 0 <= idx < min(SETTINGS_COUNT, len(keys)): return
         key = keys[idx]
         if key == "demo_mode":
@@ -429,7 +429,6 @@ def tap(app, x, y):
             app.page="recordings"
         elif key == "wifi": app.page = "wifi"; app._wifi_scan()
         elif key == "update": app._update_action()
-        elif key == "spectrum": app.page = "spectrum"
         elif key == "debug": app.page = "debug"
         return
 

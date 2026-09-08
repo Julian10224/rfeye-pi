@@ -437,16 +437,34 @@ class App:
 
     # -- supply notice -----------------------------------------------------
     def _power_notice_update(self, snap):
-        """Raise the notice the first time the 5 V rail actually sags."""
-        if self.power_notice_done or self.power_notice_open:
-            return
+        """Raise the notice when the 5 V rail sags, and back off the load.
+
+        Max power is the setting most likely to have caused the sag, so a live
+        under-voltage drops it before anything else: complaining about a
+        supply while continuing to load it as hard as possible would be an odd
+        way to help. That is a change the user asked for and did not make, so
+        the notice comes back to say so even if it has already been dismissed
+        once this session.
+        """
         if not snap.get("power_warning"):
+            return
+        reverted = False
+        if not bool(self.cfg.get("low_power_mode", True)):
+            self.cfg["low_power_mode"] = True
+            try:
+                save_config(self.cfg)
+            except Exception:
+                pass
+            reverted = True
+            self.power_notice_done = False
+        if self.power_notice_done or self.power_notice_open:
             return
         detail = str(snap.get("power_detail") or "").strip()
         self.power_notice_lines = [
             "5V rail below 4.63 V",
             detail or "measured by the Pi firmware",
-            "Scanning continues in the background",
+            "Max power switched off" if reverted
+            else "Scanning continues in the background",
         ]
         self.power_notice_open = True
 

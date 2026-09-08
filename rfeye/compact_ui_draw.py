@@ -4,9 +4,9 @@ WHITE=(224,229,236); DIM=(82,90,100); SEG_OFF=(34,35,31); GREEN=(57,205,91)
 YELLOW=(243,192,56); RED=(230,54,54)
 
 SETTINGS_TOP=62
-SETTINGS_STEP=44
-SETTINGS_HEIGHT=40
-SETTINGS_COUNT=9
+SETTINGS_STEP=48
+SETTINGS_HEIGHT=44
+SETTINGS_COUNT=8
 BRIGHT_SLIDER_X0=118
 BRIGHT_SLIDER_X1=298
 
@@ -98,12 +98,11 @@ def draw_settings(app):
     rows=[
         ("Demo","ON" if app.cfg.get("demo_mode") else "OFF","toggle"),
         ("Brightness",f'{int(round(float(app.cfg.get("brightness",1.0))*100))}%',"brightness_slider"),
-        ("Power","ECO" if app.cfg.get("low_power_mode",True) else "MAX","toggle"),
+        ("Max power","OFF" if app.cfg.get("low_power_mode",True) else "ON","toggle"),
         ("Record RF",(f'REC {max(0,int(round(float(getattr(app,"rf_record_end",0.0))-time.monotonic())))}s' if bool(getattr(app,"rf_recording",False)) else (getattr(app,"rf_record_message","SAVE") if time.monotonic()<float(getattr(app,"rf_record_message_until",0.0)) else "SAVE")),"action"),
         ("Recordings","OPEN","action"),
         ("Wi-Fi",app._wifi_text(),"status"),
         ("Update",app.update_message,"action"),
-        ("Spectrum","OPEN","action"),
         ("Debug","OPEN","action"),
     ]
     for i,(label,value,kind) in enumerate(rows):
@@ -118,9 +117,7 @@ def draw_settings(app):
             continue
         app._text(label,18,y+13,app.font_s,WHITE)
         if kind=="toggle":
-            # "Demo" reads ON/OFF, "Power" reads ECO/MAX; the knob is left for
-            # the economical setting and right for the demanding one.
-            enabled=value in ("ON","MAX"); pygame.draw.rect(app.ui,BLUE if enabled else (38,43,49),(252,y+11,50,24),border_radius=12); pygame.draw.circle(app.ui,WHITE,(289 if enabled else 265,y+23),9)
+            enabled=value=="ON"; pygame.draw.rect(app.ui,BLUE if enabled else (38,43,49),(252,y+11,50,24),border_radius=12); pygame.draw.circle(app.ui,WHITE,(289 if enabled else 265,y+23),9)
         else:
             col=GREEN if kind=="status" and value=="CONNECTED" else (RED if kind=="status" else BLUE_BRIGHT if kind=="action" else (150,201,226))
             shown=str(value); shown=shown if len(shown)<=13 else shown[:12]+"…"

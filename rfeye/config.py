@@ -121,6 +121,10 @@ DEFAULTS = {
     "site_lock_max_age_days": 21.0,
     "site_forget_s": 1800.0,
     "site_reverify_s": 60.0,
+    # How often the whole band is swept again once a network is locked. A site
+    # runs several carriers and each one carries its own uplink partner, so a
+    # single locked carrier watches a single uplink channel.
+    "site_rescan_s": 300.0,
     "site_lost_rounds": 3,
     "site_state_persist": True,
 
@@ -178,7 +182,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.10",
+    "app_version": "0.9.11",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.9.10",
+  "app_version": "0.9.11",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -104,5 +104,6 @@
   "usb_reset_max_attempts": 3,
   "low_power_mode": true,
   "low_power_ui_fps": 8,
-  "low_power_scan_pause_s": 1.5
+  "low_power_scan_pause_s": 1.5,
+  "site_rescan_s": 300.0
 }

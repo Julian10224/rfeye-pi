@@ -1,6 +1,6 @@
-# RF Eye 0.9.10 for Raspberry Pi
+# RF Eye 0.9.11 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.10 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.11 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.10 appliance path:
+The installer reproduces the working 0.9.11 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.10
+## User interface in 0.9.11
 
 The compact profile contains:
 
@@ -186,7 +186,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.10)
+### How the band is searched (0.9.11)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -216,7 +216,7 @@ uplink channels unwatched.
 costs about 1.1 s, so the position of a real carrier in a 200-channel queue is
 the difference between locking in five seconds and locking in seventy. Up to
 0.9.4 only the survey's top twelve were promoted and the other 188 followed in
-frequency order, which is uncorrelated with signal strength; since 0.9.10 the
+frequency order, which is uncorrelated with signal strength; since 0.9.11 the
 whole ranking is used. A carrier that passes the waveform test is re-tested on
 every following cycle, so the three hits a lock needs cost three cycles, not
 three band passes.
@@ -227,6 +227,26 @@ centred on a group of carriers lands the spike on one of them -- there is no
 gap in a contiguous run to hide in. The dwell planner therefore parks the
 tuner clear of the highest member of the group, which also bounds a dwell to
 the four channels that still fit inside the usable window.
+
+### One lock is not the whole site
+
+A TETRA site runs several carriers, and each downlink has its own uplink
+partner ten megahertz below it. The uplink watch list is therefore exactly as
+wide as the number of *locked* downlinks: lock one carrier and you are watching
+one uplink channel, so a handset keyed up on any other carrier of the same site
+is never looked at.
+
+Until 0.9.11 that was the permanent state after the first lock. The band pass
+ran only while nothing was locked, so once the first carrier locked and the
+queue drained the band was never swept again and no further carrier could be
+found. The detector was not deaf; it had stopped looking. Since 0.9.11 a locked
+network re-sweeps the whole band every `site_rescan_s` (300 s by default), slow
+enough not to starve the uplink watch and quick enough that a site's other
+carriers turn up within a few minutes.
+
+If a unit reports one locked carrier where the site plainly has more, read
+`site_locked_count` on the debug page after five minutes rather than
+immediately.
 
 ### Main carriers and traffic carriers
 
@@ -269,7 +289,7 @@ duration, hardware speed and watch-list length.
 
 "SEARCHING" for half an hour is indistinguishable, from the outside, between
 no C2000 in range, an antenna that fell off, and one acceptance limit set too
-tight. Since 0.9.10 the debug page carries the best channel of the current band
+tight. Since 0.9.11 the debug page carries the best channel of the current band
 pass with its SNR and the check it failed on, and every completed pass appends
 one line to `~/.local/state/rfeye/search.log`:
 
@@ -391,7 +411,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.10 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.11 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -421,7 +441,7 @@ Application-only OTA updates update `/opt/rfeye/rfeye`. Device Tree, systemd, Pl
 ### A mouse cursor on a black panel
 
 This one is not the application at all. The desktop is up and RF Eye is simply
-not running, and until 0.9.10 it could not come back on its own.
+not running, and until 0.9.11 it could not come back on its own.
 
 `rfeye-user.service` carries `Restart=always`, but systemd also enforces a
 start limit: fail `StartLimitBurst` times inside `StartLimitIntervalSec` and it
@@ -436,7 +456,7 @@ writing nothing anywhere, because it is never started again.
 systemctl --user status rfeye-user.service     # Result: start-limit-hit
 ```
 
-Since 0.9.10 the unit sets `StartLimitIntervalSec=0` and `RestartSec=2`, and the
+Since 0.9.11 the unit sets `StartLimitIntervalSec=0` and `RestartSec=2`, and the
 application retries opening the display in-process instead of exiting, so a
 display that is a second late costs nothing. Fresh installs get this from
 `scripts/apply-cuqi35-system-fixes.sh`. An already-installed unit can be
@@ -453,7 +473,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart rfeye-user.service
 
 ### If the panel goes black after an update
 
-Since 0.9.10 every start appends a line to `~/.local/state/rfeye/boot.log`:
+Since 0.9.11 every start appends a line to `~/.local/state/rfeye/boot.log`:
 `start` with the release, `ui-loop` with the display profile and geometry,
 `first-frame` the first time a frame is presented, and `exit` with the fault
 count. The user journal does not survive a power cut on these units, so after
@@ -477,7 +497,7 @@ loop whose only visible symptom was a black screen.
 That restart was also the accidental recovery from a transient failure at
 boot -- a display not ready yet, a device not enumerated yet -- so catching
 everything would have replaced a restart loop with a unit stuck in a fault for
-ever. Since 0.9.10 a fault that has not cleared after about three seconds hands
+ever. Since 0.9.11 a fault that has not cleared after about three seconds hands
 the process back to systemd deliberately, which keeps both the message and the
 recovery.
 
@@ -494,7 +514,7 @@ predating that variable keeps the 480x800 layout on a 480x320 panel, which puts
 the top-left corner of a much larger screen on the display: mostly empty
 background, no buttons, no readings. It looks like a dead device.
 
-Since 0.9.10 the runtime falls back to the `display_profile` already recorded in
+Since 0.9.11 the runtime falls back to the `display_profile` already recorded in
 the saved config, so this repairs itself on the next start. An explicit
 environment value still wins. To check a unit:
 
@@ -518,7 +538,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.10**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.11**.
 
 Build the OTA package with:
 
@@ -530,9 +550,10 @@ The build normalizes archive metadata so unchanged source produces the same ZIP 
 
 ## Power mode
 
-Settings carries a **Power** row with two positions, and **ECO is the default**.
+Settings carries a **Max power** row. It ships **OFF**, which is the
+economical setting.
 
-|  | ECO (default) | MAX |
+|  | Max power OFF (default) | Max power ON |
 |---|---|---|
 | UI frame rate | 8 fps | 20 fps |
 | Pause between dwells | 1.5 s | none |
@@ -544,9 +565,16 @@ rotates and rescales a 320x480 surface for the panel, so the frame rate is the
 biggest single lever. The dwell pause is the second one, and it is what lets the
 governor clock back down instead of sitting at full speed indefinitely.
 
-ECO costs time to lock. A full 200-channel band pass is about 70 s in MAX and
-roughly twice that in ECO, because each dwell is followed by the pause. If a
-unit has a healthy supply and you want the fastest acquisition, switch to MAX.
+A live under-voltage switches Max power back off by itself and says so on the
+panel, even if the supply notice has already been dismissed once this session.
+Complaining about a sagging rail while continuing to load it as hard as possible
+would be an odd way to help, and it is a change the user asked for and did not
+make, so it is not made silently.
+
+The economical setting costs time to lock. A full 200-channel band pass is about
+70 s at max power and roughly twice that without it, because each dwell is
+followed by the pause. If a unit has a healthy supply and you want the fastest
+acquisition, switch Max power on.
 
 **Switching the mode also re-initialises USB.** That is deliberate rather than
 tidy: the reason to reach for this setting is an RTL-SDR that has just dropped
