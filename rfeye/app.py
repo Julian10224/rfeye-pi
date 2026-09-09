@@ -312,7 +312,10 @@ class App:
         elif self.page == "recording_replay":
             self._draw_recording_replay()
         else:
-            self._draw_spectrum(snap)
+            # There is no spectrum page any more; an unknown page falls back
+            # to the one the appliance exists to show.
+            self.page = "main"
+            self._draw_main(snap)
 
         self._power_notice_update(snap)
         if self.power_notice_open:
@@ -415,8 +418,6 @@ class App:
                         self.page = "main"
                 elif e.key == pygame.K_s:
                     self.page = "settings"
-                elif e.key == pygame.K_t:
-                    self.page = "spectrum"
                 elif e.key == pygame.K_d:
                     self._toggle_demo()
                 elif e.key == pygame.K_m:
@@ -520,9 +521,6 @@ class App:
             if x < 120 and y > 655:
                 self._toggle_mute()
                 return
-            if 160 <= x <= 320 and y > 675:
-                self.page = "spectrum"
-                return
 
         elif self.page == "settings":
             if y < 90:
@@ -543,7 +541,6 @@ class App:
                 "show_frequency",
                 "wifi",
                 "update",
-                "spectrum",
                 "debug",
             ]
             if idx >= len(keys):
@@ -570,8 +567,6 @@ class App:
                 self._wifi_scan()
             elif key == "update":
                 self._update_action()
-            elif key == "spectrum":
-                self.page = "spectrum"
             elif key == "debug":
                 self.page = "debug"
 
@@ -615,10 +610,6 @@ class App:
                 self.wifi_password = ""
                 self.wifi_message = "Enter Wi-Fi password"
                 return
-
-        elif self.page == "spectrum":
-            if y < 90 or y > 725:
-                self.page = "main"
 
         elif self.page == "debug":
             if y < 100 or y > 710:
@@ -1138,7 +1129,6 @@ class App:
             ("Frequency labels", "ON" if self.cfg.get("show_frequency") else "OFF", "toggle"),
             ("Wi-Fi", self._wifi_text(), "status"),
             ("Software update", self.update_message, "action"),
-            ("Spectrum", "OPEN", "action"),
             ("Debug", "OPEN", "action"),
         ]
 
@@ -1212,43 +1202,6 @@ class App:
         if err:
             self._text("ERR " + err[-46:], 240, 681, self.font_s, RED, center=True)
         self._text("tap top or bottom to return", 240, 758, self.font_s, DIM, center=True)
-
-    def _draw_spectrum(self, snap):
-        self.ui.fill(BG)
-        self._text("<", 28, 30, self.font_xl, BLUE)
-        self._text("SPECTRUM", 240, 45, self.font_l, BLUE_BRIGHT, center=True)
-
-        plot = pygame.Rect(26, 115, 428, 320)
-        pygame.draw.rect(self.ui, (7, 8, 10), plot)
-        pygame.draw.rect(self.ui, (45, 48, 54), plot, 1)
-
-        p = snap["spectrum"]
-        if len(p) > 2:
-            pmin = snap["noise"] - 12
-            pmax = max(max(float(v) for v in p), pmin + 45)
-            pts = []
-            for i, v in enumerate(p):
-                x = plot.left + int(i * (plot.width - 1) / (len(p) - 1))
-                norm = clamp((float(v) - pmin) / (pmax - pmin))
-                y = plot.bottom - int(norm * (plot.height - 1))
-                pts.append((x, y))
-            if len(pts) > 1:
-                pygame.draw.lines(self.ui, BLUE_BRIGHT, False, pts, 2)
-
-        self._text(f'{self.cfg.get("mobile_band_start_hz", self.cfg["scan_start_hz"]) / 1e6:.3f} MHz', 30, 446, self.font_s, DIM)
-        self._text(f'{self.cfg.get("mobile_band_end_hz", self.cfg["scan_end_hz"]) / 1e6:.3f} MHz', 304, 446, self.font_s, DIM)
-        self._text(f'Noise floor {snap["noise"]:.1f} dB', 240, 495, self.font_m, WHITE, center=True)
-
-        if snap["peaks"]:
-            y = 555
-            for i, peak in enumerate(snap["peaks"][:3]):
-                self._text(f'{i+1}.', 38, y + i * 54, self.font_m, BLUE_BRIGHT)
-                self._text(f'{peak["freq_hz"] / 1e6:.5f} MHz', 80, y + i * 54, self.font_m, WHITE)
-                self._text(f'{int(peak["level"] * 100):3d}%', 392, y + i * 54, self.font_m, DIM, center=True)
-        else:
-            self._text("No transient RF activity", 240, 610, self.font_m, DIM, center=True)
-
-        self._text("tap top or bottom to return", 240, 770, self.font_s, DIM, center=True)
 
     def _apply_brightness(self):
         br = clamp(float(self.cfg.get("brightness", 1.0)), 0.35, 1.0)

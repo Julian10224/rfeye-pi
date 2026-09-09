@@ -42,8 +42,7 @@ def _network_line(snap, status):
     if state=="ALERT":
         return "C2000 ACTIVITY NEARBY",RED
     if snap.get("network_locked"):
-        n=int(snap.get("site_locked_count",0) or 0)
-        return f"C2000 NETWORK LOCKED ({n})",GREEN
+        return "C2000 LOCKED",GREEN
     return "SEARCHING FOR C2000",YELLOW
 
 
@@ -58,6 +57,17 @@ def draw_main(app, snap):
     # the user needs to see that rather than read silence as "all clear".
     stxt,scol=_network_line(snap,status)
     app._text(stxt,160,52,app.font_s,scol,center=True)
+    # While searching, say what the band pass is actually finding. "No RF at
+    # all" and "a strong carrier that fails one test" look identical from a
+    # status word, and telling those apart is the whole question when a unit
+    # sits on SEARCHING.
+    if status=="LIVE" and not snap.get("network_locked"):
+        sb=snap.get("search_best") or {}
+        if sb:
+            app._text("%.4f %+.0fdB %s"%(float(sb.get("freq_hz",0.0))/1e6,
+                float(sb.get("snr_db",0.0)),
+                "TETRA" if sb.get("ok") else str(sb.get("fail") or "?").split(",")[0]),
+                160,72,app.font_s,DIM,center=True)
     peaks=list(snap["peaks"][:3])
     while len(peaks)<3: peaks.append({"level":0.0,"freq_hz":0.0})
     if not hasattr(app,"_last_peak_freqs"):
@@ -87,7 +97,9 @@ def draw_main(app, snap):
     for rect in [(8,374,94,90),(112,374,96,90),(218,374,94,90)]: pygame.draw.rect(app.ui,(17,20,25),rect,border_radius=11)
     app._text("MUTED" if app.cfg.get("muted") else "SOUND",55,405,app.font_m,RED if app.cfg.get("muted") else BLUE_BRIGHT,center=True)
     app._text("tap",55,438,app.font_s,DIM,center=True)
-    app._text("SPECTRUM",160,405,app.font_s,WHITE,center=True); app._text("open",160,438,app.font_s,DIM,center=True)
+    nlock=int(snap.get("site_locked_count",0) or 0)
+    app._text(str(nlock),160,402,app.font_l,GREEN if nlock else DIM,center=True)
+    app._text("LOCKED",160,438,app.font_s,DIM,center=True)
     app._text(state,265,405,app.font_m if len(state)<7 else app.font_s,col,center=True); app._text("status",265,438,app.font_s,DIM,center=True)
 
 def draw_settings(app):
@@ -148,16 +160,18 @@ def draw_debug(app,snap):
               "TETRA" if sb.get("ok") else str(sb.get("fail") or "?"))) if sb else "-")),
           ("Cycle / dwell",f"{float(snap.get('cycle_ms',0)):.0f} / {float(snap.get('dwell_ms',0)):.0f} ms"),
           ("Verify",f"{float(snap.get('verify_ms',0)):.0f} ms  age {age_ms:.0f} ms"),
+          ("Last band pass",(f"{float(snap.get('last_pass_s',0)):.0f} s"
+                             if float(snap.get("last_pass_s",0)) else "-")),
           ("Supply",str(snap.get("power_warning") or snap.get("power_history") or "OK")),
           ("Backend",f"{snap.get('status','?')} {str(snap.get('sdr_path','?'))[:9]}")]
     y=64
     for label,value in rows:
-        pygame.draw.rect(app.ui,(9,13,18),(8,y,304,27),border_radius=6); app._text(label,16,y+6,app.font_s,DIM)
+        pygame.draw.rect(app.ui,(9,13,18),(8,y,304,25),border_radius=6); app._text(label,16,y+5,app.font_s,DIM)
         shown=value if len(value)<=22 else value[:21]+"…"; col=GREEN if label=="Backend" and value=="LIVE" else BLUE_BRIGHT
-        surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(304-surf.get_width(),y+6)); y+=29
-    pygame.draw.rect(app.ui,(12,24,32),(8,416,304,30),border_radius=8)
-    app._text("Touch calibration",18,423,app.font_s,WHITE)
-    surf=app.font_s.render("CALIBRATE",True,BLUE_BRIGHT); app.ui.blit(surf,(302-surf.get_width(),423))
+        surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(304-surf.get_width(),y+5)); y+=27
+    pygame.draw.rect(app.ui,(12,24,32),(8,420,304,30),border_radius=8)
+    app._text("Touch calibration",18,427,app.font_s,WHITE)
+    surf=app.font_s.render("CALIBRATE",True,BLUE_BRIGHT); app.ui.blit(surf,(302-surf.get_width(),427))
     msg=str(getattr(app,"low_power_message","") or "")
     if msg and time.monotonic() < float(getattr(app,"low_power_message_until",0.0)):
         app._text(msg,160,465,app.font_s,BLUE_BRIGHT,center=True)
@@ -326,23 +340,3 @@ def draw_calibration(app):
     tx,ty=CALIBRATION_TARGETS[min(idx,len(CALIBRATION_TARGETS)-1)]
     pygame.draw.circle(app.ui,BLUE_BRIGHT,(tx,ty),13,2); pygame.draw.line(app.ui,BLUE_BRIGHT,(tx-18,ty),(tx+18,ty),2); pygame.draw.line(app.ui,BLUE_BRIGHT,(tx,ty-18),(tx,ty+18),2); pygame.draw.circle(app.ui,WHITE,(tx,ty),3)
     app._text("Use a precise fingertip/stylus",160,466,app.font_s,DIM,center=True)
-
-def draw_spectrum(app,snap):
-    import pygame
-    app.ui.fill(BG); app._text("‹",18,26,app.font_xl,BLUE_BRIGHT,center=True); app._text("SPECTRUM",160,24,app.font_l,BLUE_BRIGHT,center=True)
-    plot=pygame.Rect(12,72,296,188); pygame.draw.rect(app.ui,(7,8,10),plot); pygame.draw.rect(app.ui,(45,48,54),plot,1)
-    spectrum=snap["spectrum"]
-    if len(spectrum)>2:
-        pmin=float(snap["noise"])-12; pmax=max(max(float(v) for v in spectrum),pmin+45); pts=[]
-        for i,v in enumerate(spectrum):
-            x=plot.left+int(i*(plot.width-1)/(len(spectrum)-1)); n=_clamp((float(v)-pmin)/(pmax-pmin)); y=plot.bottom-int(n*(plot.height-1)); pts.append((x,y))
-        if len(pts)>1: pygame.draw.lines(app.ui,BLUE_BRIGHT,False,pts,1)
-    lf=app.cfg.get("mobile_band_start_hz",app.cfg["scan_start_hz"])/1e6; rf=app.cfg.get("mobile_band_end_hz",app.cfg["scan_end_hz"])/1e6
-    app._text(f"{lf:.3f}",12,268,app.font_s,DIM); label=f"{rf:.3f} MHz"; surf=app.font_s.render(label,True,DIM); app.ui.blit(surf,(308-surf.get_width(),268))
-    app._text(f'Noise floor {snap["noise"]:.1f} dB',160,300,app.font_m,WHITE,center=True)
-    peaks=list(snap["peaks"][:3]); y=332
-    if not peaks: app._text("No transient RF activity",160,360,app.font_s,DIM,center=True)
-    for i,p in enumerate(peaks):
-        pygame.draw.rect(app.ui,(9,13,18),(12,y,296,34),border_radius=6); app._text(f'{i+1}. {p["freq_hz"]/1e6:.5f} MHz',20,y+9,app.font_s,WHITE)
-        app._text(f'{int(p["level"]*100)}%',286,y+17,app.font_s,BLUE_BRIGHT,center=True); y+=42
-    app._text("tap top/bottom to return",160,463,app.font_s,DIM,center=True)

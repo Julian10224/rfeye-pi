@@ -84,18 +84,24 @@ class SiteRegistry:
         """Has anything verified recently, anywhere on the locked site?"""
         return self.lost_rounds == 0
 
-    def note_round(self, any_locked_ok, now=None):
-        """Record the outcome of a round that re-tested locked carriers.
+    def note_round(self, health_ok, now=None):
+        """Record what the health carrier did when it was last re-tested.
 
-        A base station's main carrier is continuous by definition, so a locked
-        site that produces nothing at all is not a quiet site -- it is a
-        receiver that has lost it. Without this, pulling the antenna off left
-        the display reporting a locked network for the best part of an hour,
+        A base station's main carrier is continuous by definition, so a health
+        carrier that produces nothing is not a quiet site -- it is a receiver
+        that has lost it. Without this, pulling the antenna off left the
+        display reporting a locked network for the best part of an hour,
         because every channel then failed only on SNR and each carrier's
         silence was individually excusable.
+
+        Only the health carrier feeds this. A traffic carrier is idle most of
+        the time by design, and counting its silence here meant three quiet
+        traffic carriers in a row could throw away a working lock -- the same
+        silence that ``observe`` correctly declines to hold against the
+        carrier itself.
         """
         now = time.time() if now is None else float(now)
-        if any_locked_ok:
+        if health_ok:
             self.lost_rounds = 0
             return False
         self.lost_rounds += 1
@@ -191,7 +197,7 @@ class SiteRegistry:
             if not ok:
                 return None
             e = {'hits': 0, 'misses': 0, 'quality': 0.0,
-                 'last_ok': 0.0, 'first_seen': now}
+                 'last_ok': 0.0, 'first_seen': now, 'ok_total': 0}
             self.entries[f] = e
         need = max(2, int(self.cfg.get('site_lock_hits', 3)))
         if ok:
@@ -201,6 +207,11 @@ class SiteRegistry:
             e['hits'] = min(int(e['hits']) + 1, need + 1)
             e['misses'] = 0
             e['last_ok'] = now
+            # Lifetime successes, which is how the health carrier is chosen.
+            # Unlike 'hits' this is not capped and not reset by a miss, so it
+            # measures how consistently a carrier has been on the air rather
+            # than how it is doing this minute.
+            e['ok_total'] = int(e.get('ok_total', 0)) + 1
             e['quality'] = float(e['quality'] * 0.6 + float(quality) * 0.4)
         elif silent and int(e['hits']) > 0 and self.network_alive():
             # Known carrier, nothing on air, and the site is still audible
@@ -240,6 +251,30 @@ class SiteRegistry:
                for f, e in self.entries.items() if int(e['hits']) < need]
         out.sort(key=lambda x: (x['hits'], x['last_ok']), reverse=True)
         return out
+
+    def health_carrier(self, now=None):
+        """The locked carrier that decides whether this site still exists.
+
+        ETSI EN 300 392-2 requires a site's *main* carrier to transmit
+        continuously; its traffic carriers are discontinuous by design and are
+        idle most of the time. Judging the site by whichever carrier happened
+        to come round in the rotation therefore let three quiet traffic
+        carriers in a row read as a site that had disappeared, and dropped a
+        perfectly good lock.
+
+        The main carrier is not announced anywhere the detector can read
+        without demodulating the network, so it is inferred: of the locked
+        carriers, the one that has verified successfully the most times is the
+        one that has been on the air most consistently. That is the carrier
+        site health is judged on; the rest are maintained separately.
+        """
+        locked = self.locked(now)
+        if not locked:
+            return None
+        def rank(entry):
+            e = self.entries.get(int(round(entry['freq_hz'])), {})
+            return (int(e.get('ok_total', 0)), float(entry.get('quality', 0.0)))
+        return max(locked, key=rank)
 
     def uplink_partners(self, now=None):
         """Uplink frequencies to watch, from the locked downlink carriers."""

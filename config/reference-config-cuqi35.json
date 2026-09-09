@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.9.11",
+  "app_version": "0.9.12",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -17,7 +17,6 @@
   "demo_mode": false,
   "detector_profile_version": 9,
   "display_profile": "cuqi35",
-  "display_sweep_interval": 4,
   "duplex_split_hz": 10000000.0,
   "fft_size": 1024,
   "fullscreen": true,
@@ -105,5 +104,6 @@
   "low_power_mode": true,
   "low_power_ui_fps": 8,
   "low_power_scan_pause_s": 1.5,
-  "site_rescan_s": 300.0
+  "site_rescan_s": 300.0,
+  "low_power_locked_pause_s": 0.25
 }

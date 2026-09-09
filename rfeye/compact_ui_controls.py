@@ -397,8 +397,6 @@ def tap(app, x, y):
             app.page = "settings"
         elif y >= 326 and x < 145:
             app._toggle_mute()
-        elif y >= 326 and 104 <= x <= 248:
-            app.page = "spectrum"
         return
 
     if app.page == "settings":
@@ -530,14 +528,10 @@ def tap(app, x, y):
                 app.wifi_message = "ENTER PASSWORD"
         return
 
-    if app.page == "spectrum" and (y < 62 or y > 448):
-        app.page = "main"
-        return
-
     if app.page == "debug":
         # The status rows now run down to y=412, so the calibration hit box
         # starts below them rather than under the last two rows.
-        if 412 <= y <= 452:
+        if 418 <= y <= 452:
             start_calibration(app,'debug'); return
         if y < 62 or y > 450:
             app.page = "settings"

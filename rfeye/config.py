@@ -80,7 +80,6 @@ DEFAULTS = {
     "survey_flatness_weight": 0.5,
     "survey_flatness_tolerance_db": 6.0,
     "survey_max_candidates": 12,
-    "display_sweep_interval": 4,
     "mobile_percentile": 95.0,
 
     # Narrowband verification dwell. 288 kS/s is 28.8 MHz / 100 exactly, and
@@ -159,6 +158,10 @@ DEFAULTS = {
     "low_power_mode": True,
     "low_power_ui_fps": 8,
     "low_power_scan_pause_s": 1.5,
+    # Once a network is locked the uplink watch is the job, and a TETRA slot
+    # is 14.2 ms. Idling for a second and a half between cycles then costs
+    # detections rather than saving anything worth having.
+    "low_power_locked_pause_s": 0.25,
     "gain": "auto",
     "ppm": 0,
     "muted": False,
@@ -182,7 +185,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.11",
+    "app_version": "0.9.12",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -203,7 +206,7 @@ _DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_")
 _DETECTOR_KEYS = (
     "sample_rate", "fft_size", "duplex_split_hz",
     "mobile_band_start_hz", "mobile_band_end_hz",
-    "display_sweep_interval", "mobile_percentile",
+    "mobile_percentile",
     "tetra_channel_spacing_hz", "tetra_raster_offset_hz",
     "tetra_channel_half_width_hz", "allow_cli_sdr_fallback",
     "usb_reset_max_attempts", "phy_timing_phases",

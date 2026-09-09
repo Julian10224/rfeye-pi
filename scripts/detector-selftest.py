@@ -236,6 +236,51 @@ def check_rescan_while_locked():
             b.running = False
 
 
+def check_health_carrier():
+    """A quiet traffic carrier must not throw away a working lock.
+
+    ETSI requires only the *main* carrier to be continuous; traffic carriers
+    are idle most of the time by design. Judging the site by whichever carrier
+    came round in the rotation meant three quiet ones in a row read as a site
+    that had gone, and dropped every lock -- the same silence that observe()
+    correctly refuses to hold against the carrier itself.
+    """
+    print("\n13. site health rests on one carrier")
+    from tetra_detector import SiteRegistry
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["RFEYE_SITE_STATE"] = os.path.join(d, "sites.json")
+        cfg = dict(DEFAULTS)
+        reg = SiteRegistry(cfg)
+        now = time.time()
+        main_c, traffic = int(DOWNLINKS[0]), int(DOWNLINKS[1])
+        reg.entries[main_c] = {"hits": 9, "misses": 0, "quality": 0.7,
+                               "last_ok": now, "first_seen": now, "ok_total": 40}
+        reg.entries[traffic] = {"hits": 9, "misses": 0, "quality": 0.9,
+                                "last_ok": now, "first_seen": now, "ok_total": 3}
+        health = reg.health_carrier(now)
+        check("picks the most consistently present carrier, not the loudest",
+              health is not None and int(health["freq_hz"]) == main_c,
+              "%.4f MHz (quality favoured %.4f)" % (
+                  (health["freq_hz"] if health else 0) / 1e6, traffic / 1e6))
+
+        # Round after round of the traffic carrier being idle: the site stands.
+        for _ in range(6):
+            reg.observe(traffic, False, 0.0, now, silent=True)
+        check("a silent traffic carrier never reaches the site counter",
+              reg.lost_rounds == 0 and len(reg.locked(now)) == 2,
+              "lost_rounds=%d locked=%d" % (reg.lost_rounds, len(reg.locked(now))))
+
+        # The health carrier going quiet is a different matter entirely.
+        dropped = False
+        for _ in range(int(cfg["site_lost_rounds"])):
+            dropped = reg.note_round(False, now) or dropped
+        check("the health carrier going quiet does drop the site",
+              dropped and not reg.locked(now),
+              "locked=%d after %d silent rounds" % (
+                  len(reg.locked(now)), int(cfg["site_lost_rounds"])))
+    os.environ.pop("RFEYE_SITE_STATE", None)
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -385,6 +430,7 @@ def main():
 
     check_queue_order()
     check_rescan_while_locked()
+    check_health_carrier()
 
     print()
     if FAILURES:

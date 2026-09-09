@@ -1,4 +1,4 @@
-name: RF Eye 0.9.11 appliance checks
+name: RF Eye 0.9.12 appliance checks
 
 on:
   push:
@@ -69,7 +69,21 @@ jobs:
           # also re-checks USB: the reason to reach for it is a dongle that
           # has just dropped off, and a reboot to find out would defeat it.
           grep -q '"Max power"' rfeye/compact_ui_draw.py
-          ! grep -q '("Spectrum","OPEN"' rfeye/compact_ui_draw.py
+          # 0.9.12: the spectrum page is gone, and with it the 380-385 MHz
+          # sweep that ran every fourth cycle to draw it. The detector never
+          # read that sweep; it dwells on the uplink channels individually.
+          ! grep -q 'def draw_spectrum' rfeye/compact_ui_draw.py
+          ! grep -q '_draw_spectrum' rfeye/app.py rfeye/compact_display_patch.py
+          ! grep -q 'display_sweep_interval' rfeye/sdr_backend.py rfeye/config.py
+          grep -q '"C2000 LOCKED"' rfeye/compact_ui_draw.py
+          grep -q '"LOCKED",160,438' rfeye/compact_ui_draw.py
+          # Site health is one carrier's question, not every carrier's: a
+          # traffic carrier is idle by design and its silence must not throw
+          # away a working lock.
+          grep -q 'def health_carrier' rfeye/tetra_detector.py
+          grep -q 'self.sites.health_carrier' rfeye/sdr_backend.py
+          grep -q 'low_power_locked_pause_s' rfeye/sdr_backend.py rfeye/config.py
+          grep -q 'last_pass_s' rfeye/sdr_backend.py rfeye/compact_ui_draw.py
           grep -q 'def _toggle_low_power' rfeye/compact_ui_controls.py
           grep -q 'def reinit_usb' rfeye/sdr_backend.py
           grep -q 'def _low_power_pause' rfeye/sdr_backend.py
@@ -224,6 +238,8 @@ jobs:
           assert c['site_unlock_misses']==4
           assert c['site_reverify_s']==60.0
           assert c['site_rescan_s']==300.0
+          assert c['low_power_locked_pause_s']==0.25
+          assert 'display_sweep_interval' not in c
           assert c['site_lost_rounds']==3
           assert c['site_lock_stale_s']==600.0
           assert c['site_state_persist'] is True

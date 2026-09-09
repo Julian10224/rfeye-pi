@@ -171,6 +171,8 @@ class SDRBackend:
         self._site_queue=[]; self._sweep_cursor=0.; self._alt_cycle=False
         self._survey_scores=[]
         self._pass_best=None; self._pass_started=0.; self._pass_index=0
+        self._pass_channels=0; self._pass_ok=0; self._pass_fails={}
+        self.last_pass_s=0.
         self._site_verify_at=0.; self._watch_idx=0; self._display_cycle=0
         self.last_phy=[]
         self.dwell_centre_hz=0.; self.dwell_channels=[]
@@ -241,9 +243,16 @@ class SDRBackend:
         supply headroom, which on a marginal 5 V rail is what decides whether
         the RTL-SDR stays on the bus at all.
         """
-        if not bool(self.cfg.get('low_power_mode', False)):
+        if not bool(self.cfg.get('low_power_mode', True)):
             return
         pause = max(0., float(self.cfg.get('low_power_scan_pause_s', 1.5)))
+        if self.sites.locked():
+            # With a network locked the uplink watch is the whole job, and a
+            # TETRA slot is 14.2 ms: a second and a half of idling between
+            # cycles is time a handset can key up and drop again unseen. The
+            # frame-rate saving stays either way, so keep a short pause here
+            # rather than the searching one.
+            pause = max(0., float(self.cfg.get('low_power_locked_pause_s', 0.25)))
         end = time.time() + pause
         while self.running and time.time() < end:
             time.sleep(min(0.25, max(0.01, end - time.time())))
@@ -286,6 +295,7 @@ class SDRBackend:
                 'dwell_role':str(self.last_dwell_role),
                 'survey_shortlist':[float(f) for f in self.survey_shortlist],
                 'search_best':dict(self._pass_best) if self._pass_best else {},
+                'last_pass_s':float(self.last_pass_s),
                 'site_queue_remaining':len(self._site_queue),
                 'phy':[dict(p) for p in self.last_phy],
                 'confirm_streak':int(self.alarm.streak),
@@ -567,6 +577,7 @@ class SDRBackend:
         self._site_queue=scored+rest
         self._survey_at=now
         self._pass_best=None; self._pass_started=now; self._pass_index+=1
+        self._pass_channels=0; self._pass_ok=0; self._pass_fails={}
 
     def _note_pass_best(self,results):
         """Keep the most promising channel seen during this band pass.
@@ -577,6 +588,12 @@ class SDRBackend:
         channel and the check it failed on separate those three.
         """
         for r in results:
+            self._pass_channels+=1
+            if r.ok:
+                self._pass_ok+=1
+            else:
+                for name in r.failed():
+                    self._pass_fails[name]=self._pass_fails.get(name,0)+1
             if self._pass_best is None or r.snr_db>self._pass_best['snr_db']:
                 self._pass_best={'freq_hz':float(r.freq_hz),
                                  'snr_db':float(r.snr_db),
@@ -588,6 +605,9 @@ class SDRBackend:
         best=self._pass_best
         if not best or not self._pass_started:
             return
+        # Measured, not the figure in the README: what a pass really costs on
+        # this Pi in the mode it is actually running.
+        self.last_pass_s=float(now-self._pass_started)
         try:
             # Next to the site state, so it follows RFEYE_SITE_STATE and a
             # test run never appends to the unit's own log.
@@ -596,12 +616,24 @@ class SDRBackend:
             if path.exists() and path.stat().st_size>262144:
                 keep=path.read_text().splitlines()[-800:]
                 path.write_text('\n'.join(keep)+'\n')
-            line=('%s pass=%d %.0fs best=%.4fMHz snr=%.1f %s locked=%d cand=%d\n'%(
+            # Enough to tell, months later and without the unit in front of
+            # you, whether a change to the algorithm helped or hurt: how long
+            # the pass took, how much of the band it actually got through, how
+            # many channels passed the full waveform test, and what the rest
+            # fell over on.
+            common=''
+            if self._pass_fails:
+                name,count=max(self._pass_fails.items(),key=lambda kv:kv[1])
+                common=' mostly=%s(%d)'%(name,count)
+            line=('%s pass=%d %.0fs ch=%d phy=%d locked=%d cand=%d '
+                  'best=%.4fMHz snr=%.1f %s%s\n'%(
                 time.strftime('%Y-%m-%dT%H:%M:%S',time.localtime(now)),
                 self._pass_index,now-self._pass_started,
+                self._pass_channels,self._pass_ok,
+                len(self.sites.locked(now)),len(self.sites.candidates(now)),
                 best['freq_hz']/1e6,best['snr_db'],
                 'TETRA' if best['ok'] else ('fail:'+(best['fail'] or '?')),
-                len(self.sites.locked(now)),len(self.sites.candidates(now))))
+                common))
             with path.open('a') as fh:
                 fh.write(line)
         except Exception:
@@ -663,6 +695,24 @@ class SDRBackend:
             float(self.cfg.get('tetra_channel_spacing_hz',25000.))))
 
     # -- orchestration -----------------------------------------------------
+    def _reverify_interval(self,locked):
+        """How often a locked carrier is re-tested.
+
+        Every locked carrier has to come round again well inside
+        site_lock_stale_s or it ages out while still perfectly healthy.
+        Rotating one carrier per tick at a fixed 60 s meant ten carriers took
+        600 s for a full turn -- exactly the stale limit, before any scan work
+        or low-power pause is counted. So the tick shortens as more carriers
+        are found. Both the caller that decides whether to run site work and
+        the site work itself read this, or the two disagree and the shorter
+        interval never actually happens.
+        """
+        base=max(0.,float(self.cfg.get('site_reverify_s',60.0)))
+        if not locked:
+            return base
+        stale=max(60.,float(self.cfg.get('site_lock_stale_s',600.0)))
+        return min(base,max(5.,stale/(2.0*max(1,len(locked)-1))))
+
     def _site_work(self,now):
         """Acquire a C2000 network lock, or keep an existing one fresh."""
         band=float(self.cfg.get('site_band_start_hz',390e6))
@@ -679,10 +729,23 @@ class SDRBackend:
         # a drive out of coverage -- kept reporting a locked network. The
         # timer keeps it rare enough not to starve the pass, which is what
         # putting it behind the queue was trying to achieve.
-        reverify=max(0.,float(self.cfg.get('site_reverify_s',60.0)))
+        reverify=self._reverify_interval(locked)
         if locked and now-self._site_verify_at>=reverify:
-            priority.insert(0,locked[self._survey_idx%len(locked)]['freq_hz'])
-            self._survey_idx+=1
+            # Site health: "does this C2000 site still exist?" -- always the
+            # health carrier, every tick, because that is the question the
+            # network lock depends on.
+            health=self.sites.health_carrier(now)
+            health_key=int(round(health['freq_hz'])) if health else None
+            if health:
+                priority.insert(0,health['freq_hz'])
+            # Carrier maintenance: "is this particular downlink still active?"
+            # -- the rest in rotation. Failing this ages one carrier out; it
+            # says nothing about the site.
+            rest=[x['freq_hz'] for x in locked
+                  if int(round(x['freq_hz']))!=health_key]
+            if rest:
+                priority.insert(1 if health else 0,rest[self._survey_idx%len(rest)])
+                self._survey_idx+=1
             self._site_verify_at=now
 
         if not self._site_queue:
@@ -721,7 +784,6 @@ class SDRBackend:
             if k not in seen:
                 seen.add(k); ordered.append(float(k))
 
-        locked_keys={int(round(x['freq_hz'])) for x in locked}
         results=self._verify(ordered,'DOWNLINK')
         self._note_pass_best(results)
         for r in results:
@@ -730,12 +792,15 @@ class SDRBackend:
             silent=(not r.ok and r.failed()==['snr'])
             self.sites.observe(r.freq_hz,r.ok,r.quality,now,silent=silent)
 
-        # Only a round that actually re-tested a locked carrier can say
-        # anything about whether the site is still audible. A band-pass dwell
-        # across empty spectrum proves nothing and must not count.
-        retested=[r for r in results if int(round(r.freq_hz)) in locked_keys]
-        if retested:
-            if self.sites.note_round(any(r.ok for r in retested),now):
+        # Only the health carrier can answer whether the site is still there.
+        # A band-pass dwell across empty spectrum proves nothing, and neither
+        # does a traffic carrier that happens to be idle -- it is idle most of
+        # the time by design, and letting that count cost working locks.
+        health=self.sites.health_carrier(now)
+        if health is not None:
+            key=int(round(health['freq_hz']))
+            seen=[r for r in results if int(round(r.freq_hz))==key]
+            if seen and self.sites.note_round(bool(seen[0].ok),now):
                 self.alarm.reset()
 
         covered={int(round(x)) for x in self.dwell_channels}
@@ -778,7 +843,7 @@ class SDRBackend:
                 # turn whenever it comes round. _site_work owns the timer, so
                 # a pass dwell can no longer postpone the next re-proof.
                 due=(now-self._site_verify_at
-                     >= max(0.,float(self.cfg.get('site_reverify_s',60.0))))
+                     >= self._reverify_interval(self.sites.locked(now)))
                 if (self._site_queue and self._alt_cycle) or due:
                     site_results=self._site_work(now)
             else:
@@ -790,18 +855,11 @@ class SDRBackend:
             confirmed,level,peaks=self.alarm.update(verified,watched,now)
             locked=self.sites.locked(now)
 
-            # Display spectrum. The 380-385 MHz view is what the user expects
-            # to see, but sweeping it is pure display cost, so it runs on its
-            # own slow schedule and never gates a detection.
-            every=max(1,int(self.cfg.get('display_sweep_interval',4)))
-            self._display_cycle=(self._display_cycle+1)%every
-            sf=sd=None
-            if self._display_cycle==0 or not len(self.spectrum_freqs):
-                t1=time.perf_counter()
-                sf,sd=self._sweep(float(self.cfg.get('mobile_band_start_hz',380e6)),
-                                  float(self.cfg.get('mobile_band_end_hz',385e6)),
-                                  percentile=float(self.cfg.get('mobile_percentile',95.)))
-                self.last_survey_ms=(time.perf_counter()-t1)*1000.
+            # The 380-385 MHz sweep that used to run here fed the spectrum
+            # page and nothing else. It cost a full wide capture every fourth
+            # cycle -- measured, the difference between a 1.1 s and a 1.7 s
+            # round -- to draw a picture the detector never read. The uplink
+            # channels that matter are dwelt on individually by _watch_work.
 
             # With no lock and an exhausted shortlist there is nothing to
             # verify until the next survey is due. Without this the scan
@@ -826,11 +884,6 @@ class SDRBackend:
                 self.activity_confidence=float(level)
                 self.mobile_confirmed=bool(confirmed)
                 self.last_phy=phy_rows
-                if sf is not None and len(sf):
-                    idx=np.linspace(0,len(sf)-1,min(240,len(sf))).astype(int)
-                    self.spectrum_freqs=sf[idx].astype(np.float64)
-                    self.spectrum_db=sd[idx].astype(np.float32)
-                    self.noise_floor_db=float(np.percentile(sd,40))
                 self.last_update=now; self.status='LIVE'; self.error=''
                 self.demo_active=False; self.last_good_scan=now; self.scan_failures=0
                 self._usb_resets=0; self._usb_backoff=0.

@@ -6,7 +6,7 @@ from pathlib import Path
 
 def _patch_app_class(cls):
     from compact_ui_controls import tap
-    from compact_ui_draw import (draw_main, draw_settings, draw_spectrum, draw_debug,
+    from compact_ui_draw import (draw_main, draw_settings, draw_debug,
                                  draw_calibration, draw_record_confirm, draw_recordings,
                                  draw_recording_detail, draw_recording_delete_confirm,
                                  draw_recording_replay, draw_gear)
@@ -62,7 +62,7 @@ def _patch_app_class(cls):
         if self.cfg.get("touch_invert_y",False): uy=self.uh-1-uy
         return ux,uy
     cls.__init__=init; cls._events=events; cls._present_rotated=present; cls._physical_to_ui=physical_to_ui; cls._tap=tap; cls._gear=draw_gear
-    cls._draw_main=draw_main; cls._draw_settings=draw_settings; cls._draw_spectrum=draw_spectrum; cls._draw_debug=draw_debug; cls._draw_calibration=draw_calibration; cls._draw_record_confirm=draw_record_confirm
+    cls._draw_main=draw_main; cls._draw_settings=draw_settings; cls._draw_debug=draw_debug; cls._draw_calibration=draw_calibration; cls._draw_record_confirm=draw_record_confirm
     cls._draw_recordings=draw_recordings; cls._draw_recording_detail=draw_recording_detail
     cls._draw_recording_delete_confirm=draw_recording_delete_confirm; cls._draw_recording_replay=draw_recording_replay
     cls._compact_wifi_rows=rows; cls._wifi_key_at=key_at; cls._draw_wifi_keyboard=draw_keyboard; cls._draw_wifi=draw_wifi

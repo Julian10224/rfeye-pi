@@ -44,6 +44,7 @@ class FakeBackend:
             "survey_shortlist":[],"phy":[],
             "search_best":{"freq_hz":391237500.0,"snr_db":10.6,"ok":False,
                            "fail":"bandwidth,boundary"},
+            "last_pass_s":72.4,
             "sdr_path":"TEST","power_warning":"","power_history":"",
             "power_detail":"",
         }
@@ -314,7 +315,6 @@ def main():
     drawers={
         "main":lambda:a._draw_main(snap),
         "settings":a._draw_settings,
-        "spectrum":lambda:a._draw_spectrum(snap),
         "debug":lambda:a._draw_debug(snap),
         "record_confirm":a._draw_record_confirm,
         "recordings":a._draw_recordings,
