@@ -1,4 +1,4 @@
-name: RF Eye 0.9.18 appliance checks
+name: RF Eye 0.9.19 appliance checks
 
 on:
   push:
@@ -149,6 +149,11 @@ jobs:
           # was enough to stop the band being swept at all.
           ! grep -q 'elif not priority' rfeye/sdr_backend.py
           grep -q 'def check_rescan_with_candidates' scripts/detector-selftest.py
+          # 0.9.19: a round is one dwell, so an unconditional priority
+          # list anchors every capture to a candidate's neighbourhood and
+          # the band pass never reaches the rest of the band.
+          grep -q '_priority_turn' rfeye/sdr_backend.py
+          grep -q 'def check_candidate_does_not_starve_the_pass' scripts/detector-selftest.py
           ! grep -q 'if locked:\\n                return \\[\\]' rfeye/sdr_backend.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py

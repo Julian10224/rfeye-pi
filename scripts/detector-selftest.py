@@ -330,6 +330,66 @@ def check_rescan_with_candidates():
             b.running = False
 
 
+def check_candidate_does_not_starve_the_pass():
+    """A candidate outside the current dwell must not hold every round.
+
+    A round is one dwell, one ~100 kHz window, so whatever heads the priority
+    list consumes it. Candidates were queued unconditionally on every round
+    while locked carriers had a timer, so a candidate sitting far from the
+    channels the queue was working through took every dwell for itself. The
+    queue then never drained, never emptied, never refilled, and no band pass
+    ever completed -- and `candidates()` has no age limit, so it never expired.
+
+    Seen in the field at 0.9.18: two candidates 575 kHz apart and not one
+    band pass in an hour, on a unit reporting SEARCHING throughout.
+    """
+    print(chr(10) + "15. a candidate must not monopolise the dwell")
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=DOWNLINKS)
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            now = time.time()
+            # Two half-verified carriers far enough apart that neither can
+            # share a dwell with the other, or with the head of the queue.
+            for f in (391_187_500.0, 391_762_500.0):
+                b.sites.entries[int(round(f))] = {
+                    "hits": 1, "misses": 0, "quality": 0.4,
+                    "last_ok": now - 60.0, "first_seen": now - 600.0}
+            assert not b.sites.locked(now), "test setup: nothing may be locked"
+            assert len(b.sites.candidates(now)) == 2
+
+            b._survey_at = 0.0
+            b._site_queue = []
+            b._site_work(now)            # first round refills the queue
+            start = len(b._site_queue)
+            assert start > 0, "test setup: the queue must have been refilled"
+
+            # The channels either candidate can drag into its own dwell are
+            # not the interesting ones -- they come along for free and then
+            # run out. What matters is whether the pass reaches the rest of
+            # the band afterwards.
+            near = lambda f: min(abs(f - 391_187_500.0), abs(f - 391_762_500.0)) <= 150_000.0
+            far_before = [f for f in b._site_queue if not near(f)]
+            for i in range(40):
+                b._site_work(now + 1.0 + i)
+            far_after = [f for f in b._site_queue if not near(f)]
+            far_done = len(far_before) - len(far_after)
+            check("the pass reaches the band beyond the candidates",
+                  far_done > 0,
+                  "%d of %d distant channels covered in 40 rounds"
+                  % (far_done, len(far_before)))
+
+            # ...and they are not parked while that happens.
+            served = sum(1 for f in (391_187_500.0, 391_762_500.0)
+                         if int(round(f)) in b.sites.entries
+                         and (b.sites.entries[int(round(f))]["last_ok"] > now - 60.0
+                              or b.sites.entries[int(round(f))]["misses"] > 0))
+            check("and the candidates are still being re-tested",
+                  served == 2, "%d of 2 candidates revisited" % served)
+        finally:
+            b.running = False
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -481,6 +541,7 @@ def main():
     check_rescan_while_locked()
     check_health_carrier()
     check_rescan_with_candidates()
+    check_candidate_does_not_starve_the_pass()
 
     print()
     if FAILURES:

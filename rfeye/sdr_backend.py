@@ -157,6 +157,8 @@ class SDRBackend:
         self._demo_forced=bool(cfg.get('demo_mode',False))
         # Set by set_demo, acted on by the scan thread: see _reopen_sdr.
         self._sdr_reopen=False
+        # Alternates candidate work with the band pass; see _site_work.
+        self._priority_turn=0
         self.last_good_scan=0.; self.scan_failures=0; self.last_usb_reset=0.
         self._usb_resets=0; self._usb_backoff=0.
         self._power_checked=0.; self._power_flag=''
@@ -753,7 +755,29 @@ class SDRBackend:
 
         # Half-verified carriers come first: they already passed the waveform
         # test at least once, so they are the cheapest route to a lock.
-        priority=[c['freq_hz'] for c in self.sites.candidates(now)]
+        #
+        # But a round is exactly one dwell, one ~100 kHz window, so whatever
+        # heads this list consumes the entire round. Serving every candidate
+        # every round therefore stops the band pass dead as soon as a
+        # candidate sits outside the window the queue is working through.
+        # Observed on a field unit: two candidates 575 kHz apart, and not one
+        # band pass logged in an hour while the unit reported SEARCHING and
+        # looked busy. `candidates()` has no age limit, so this never expires
+        # on its own.
+        #
+        # So they alternate with the queue rather than pre-empting it. A
+        # candidate is still re-tested every couple of rounds -- a few seconds
+        # -- which is far quicker than it needs to be to reach a lock, and the
+        # pass keeps moving. With nothing queued they get every round, because
+        # then there is nothing to starve.
+        candidates=[c['freq_hz'] for c in self.sites.candidates(now)]
+        self._priority_turn+=1
+        priority=[]
+        if candidates and (not self._site_queue or self._priority_turn%2==0):
+            # Rotate, so candidates too far apart to share a dwell take turns
+            # instead of the first one holding every slot it is offered.
+            start=(self._priority_turn//2)%len(candidates)
+            priority=candidates[start:]+candidates[:start]
 
         # Re-proving a locked carrier is on its own timer, not queued behind
         # the band pass. Waiting for the pass to finish meant a locked site
