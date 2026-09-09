@@ -1,4 +1,4 @@
-name: RF Eye 0.9.15 appliance checks
+name: RF Eye 0.9.16 appliance checks
 
 on:
   push:
@@ -90,6 +90,13 @@ jobs:
           test -x scripts/rfeye-power-profile.sh
           bash -n scripts/rfeye-power-profile.sh
           grep -q 'scaling_governor' scripts/rfeye-power-profile.sh
+          # 0.9.16: a fresh install has to apply the power profile by itself.
+          # An OTA update replaces the runtime only, so this is the one path
+          # that can set a root-owned sysfs value.
+          grep -q 'scripts/rfeye-power-profile.sh' install.sh
+          grep -q 'RFEYE_KEEP_ONDEMAND' install.sh install-cuqi35.sh
+          bash -n install.sh
+          bash -n install-cuqi35.sh
           # 0.9.14: leaving demo mode has to give the radio a clean start,
           # and the close has to happen on the scan thread -- closing a
           # librtlsdr handle from the UI thread while that thread may be

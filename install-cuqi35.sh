@@ -247,6 +247,19 @@ assert (cfg.get('ui_width'),cfg.get('ui_height')) == (320,480)
 assert (cfg.get('physical_width'),cfg.get('physical_height')) == (480,320)
 PY
 
+# The power profile is applied by install.sh; fail loudly if it did not take,
+# because a unit that silently kept ondemand is the one that browns out in a
+# car and looks like a software fault.
+if [[ "${RFEYE_KEEP_ONDEMAND:-0}" != "1" ]]; then
+  gov="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+  if [[ "$gov" == "ondemand" || "$gov" == "unknown" ]]; then
+    echo "WARNING: CPU governor is '$gov'; expected the RF Eye power profile." >&2
+    echo "         Apply it with: sudo ./scripts/rfeye-power-profile.sh" >&2
+  else
+    echo "  CPU governor: $gov"
+  fi
+fi
+
 sync
 echo "[MHS35 8/8] Done."
 cat <<EOF
@@ -258,6 +271,7 @@ Touch:    XPT2046 (Linux ADS7846 driver), direct calibrated RF Eye input
 Native:   480x320 physical / 320x480 portrait UI
 SPI:      ${SPI_HZ} Hz
 Branch:   ${REPO_BRANCH}
+Power:    CPU governor $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown), status LEDs off
 
 Reboot now:
   sudo reboot

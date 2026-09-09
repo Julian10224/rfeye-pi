@@ -56,8 +56,20 @@ ETH_OFF="${RFEYE_ETH_OFF:-0}"
 
 available=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null || echo "")
 if [[ -n "$available" && " $available " != *" $GOVERNOR "* ]]; then
-  echo "Governor '$GOVERNOR' not available. This kernel offers: $available" >&2
-  exit 1
+  # conservative is a module on some kernels and simply absent on others.
+  # Fall back rather than leave the unit on ondemand, which is the one
+  # setting this script exists to get rid of.
+  fallback=""
+  for cand in schedutil powersave; do
+    if [[ " $available " == *" $cand "* ]]; then fallback="$cand"; break; fi
+  done
+  if [[ -z "$fallback" ]]; then
+    echo "Governor '$GOVERNOR' not available and no fallback found." >&2
+    echo "This kernel offers: $available" >&2
+    exit 1
+  fi
+  echo "Governor '$GOVERNOR' not available; using '$fallback' instead." >&2
+  GOVERNOR="$fallback"
 fi
 
 cat > "$UNIT" <<EOF

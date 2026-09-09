@@ -207,6 +207,21 @@ loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 
 bash "$SRC_ROOT/scripts/optimize-rpi-appliance.sh" "$TARGET_USER"
 
+# Power profile. Measured on the reference unit: the application used 13.4% of
+# one core while the CPU sat at 1400 MHz for 18 of 20 sampled seconds, because
+# `ondemand` jumps to maximum on any burst of work and stays there. The core
+# runs 1.3563 V there against 1.2000 V at 600 MHz, so a 13% duty cycle was
+# being served at close to three times the SoC power it needed. That made the
+# detector's 1.5 s inter-dwell pause -- added so the governor could clock down
+# -- worth nothing. This is a root-owned sysfs setting, so it belongs to the
+# installer rather than to the application.
+#
+# Opt out with RFEYE_KEEP_ONDEMAND=1; tune with RFEYE_GOVERNOR /
+# RFEYE_MAX_FREQ_KHZ / RFEYE_ETH_OFF, which pass straight through.
+if [[ "${RFEYE_KEEP_ONDEMAND:-0}" != "1" ]]; then
+  bash "$SRC_ROOT/scripts/rfeye-power-profile.sh" ||     echo "WARNING: power profile could not be applied; continuing" >&2
+fi
+
 echo "[8/9] Configuring Wi-Fi updater..."
 MANIFEST_URL="https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/update/manifest.json"
 python3 - "$APP_ROOT/rfeye/config.py" "$MANIFEST_URL" <<'PY'
