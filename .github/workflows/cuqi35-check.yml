@@ -1,4 +1,4 @@
-name: RF Eye 0.9.12 appliance checks
+name: RF Eye 0.9.13 appliance checks
 
 on:
   push:
@@ -82,6 +82,20 @@ jobs:
           # away a working lock.
           grep -q 'def health_carrier' rfeye/tetra_detector.py
           grep -q 'self.sites.health_carrier' rfeye/sdr_backend.py
+          # 0.9.13: both ends of the brightness slider must be reachable
+          # with a finger inside the enclosure. The old 118..298 track put
+          # 100% under the bezel and the row topped out around 95%.
+          grep -q 'BRIGHT_SLIDER_X0=60' rfeye/compact_ui_draw.py
+          grep -q 'BRIGHT_SLIDER_X1=260' rfeye/compact_ui_draw.py
+          # The recording chain is the field evidence trail; every page of it
+          # has to stay reachable and every draw hook has to stay bound.
+          grep -q 'def _record_rf_worker' rfeye/compact_ui_controls.py
+          grep -q 'rfeye-rf-series-v8' rfeye/compact_ui_controls.py
+          grep -q 'def _dump_iq_sidecar' rfeye/compact_ui_controls.py
+          for page in recordings recording_detail recording_delete_confirm recording_replay record_confirm; do
+            grep -q "def draw_${page}" rfeye/compact_ui_draw.py
+            grep -q "self.page == \"${page}\"" rfeye/app.py
+          done
           grep -q 'low_power_locked_pause_s' rfeye/sdr_backend.py rfeye/config.py
           grep -q 'last_pass_s' rfeye/sdr_backend.py rfeye/compact_ui_draw.py
           grep -q 'def _toggle_low_power' rfeye/compact_ui_controls.py

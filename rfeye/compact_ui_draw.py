@@ -7,8 +7,12 @@ SETTINGS_TOP=62
 SETTINGS_STEP=48
 SETTINGS_HEIGHT=44
 SETTINGS_COUNT=8
-BRIGHT_SLIDER_X0=118
-BRIGHT_SLIDER_X1=298
+# The slider is centred on the panel and kept clear of both edges: at
+# X1=298 the 100% end sat 22px from the glass and a finger reached the
+# enclosure wall before it reached maximum, so the row could not be driven
+# past about 95%. Everything that reads the slider derives from these two.
+BRIGHT_SLIDER_X0=60
+BRIGHT_SLIDER_X1=260
 
 def _clamp(v, lo=0.0, hi=1.0): return max(lo,min(hi,v))
 

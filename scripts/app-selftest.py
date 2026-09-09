@@ -281,6 +281,83 @@ def _check_power_flags():
         sdr_backend.subprocess.run = real_run
 
 
+def _check_recording_roundtrip(a):
+    """Capture -> file -> browser -> replay, the whole way round.
+
+    A recording is the only evidence the unit leaves behind after a drive, so
+    it is worth nothing unless every stage still works: the worker has to
+    write a v8 file with the dwell verdicts in it, the browser has to list
+    that file, and replay has to hand back the verdict that was recorded
+    rather than deciding again from the summary numbers.
+    """
+    import compact_ui_controls as ctl
+    from recording_replay import (load_recording, recording_label,
+                                  schema_mode, is_replayable, replay_recording)
+
+    out = Path(_tmp.name) / "captures"
+    keep_dir = ctl._capture_dir
+    keep_page = a.page
+    keep_duration = a.cfg.get("rf_record_duration_s")
+    real_snapshot = a.backend.snapshot
+
+    def snapshot_with_phy():
+        snap = real_snapshot()
+        snap["phy"] = [{"freq_hz": 391237500.0, "ok": True, "snr_db": 23.8,
+                        "dqpsk_m": 0.71, "role": "DOWNLINK"}]
+        return snap
+
+    # Path.home() is not redirectable through HOME on every platform this
+    # test runs on, so point the capture directory at the temp tree itself.
+    ctl._capture_dir = lambda: out
+    a.backend.snapshot = snapshot_with_phy
+    try:
+        a.cfg["rf_record_duration_s"] = 3.0
+        assert ctl._record_rf_sample(a) is True
+        assert a.rf_recording is True
+        assert ctl._record_rf_sample(a) is None, "one recorder at a time"
+        for _ in range(200):
+            if not a.rf_recording:
+                break
+            time.sleep(0.1)
+        assert a.rf_recording is False, "the recorder thread has to finish"
+        assert str(a.rf_record_message).startswith("SAVED"), a.rf_record_message
+
+        files = sorted(out.glob("*.json"))
+        assert len(files) == 1, files
+        data = load_recording(files[0])
+        assert data["schema"] == "rfeye-rf-series-v8", data["schema"]
+        assert data["sample_count"] >= 2, data["sample_count"]
+        # The acceptance limits in force at capture time travel with the file;
+        # without them a recording cannot be re-judged later.
+        assert "phy_min_snr_db" in data["capture_settings"]
+        assert "phy_max_centre_error_hz" in data["capture_settings"]
+        assert schema_mode(data) == "PHY v8", schema_mode(data)
+        assert is_replayable(data) is True
+        assert recording_label(data).startswith("20"), recording_label(data)
+
+        entries = ctl._refresh_recordings(a)
+        assert len(entries) == 1, entries
+        assert entries[0]["path"] == str(files[0]), entries
+        assert entries[0]["mode"] == "PHY v8", entries[0]
+
+        _d, mode, results, _alerts = replay_recording(a.cfg, files[0])
+        assert mode == "PHY v8", mode
+        assert len(results) == data["sample_count"], (len(results),
+                                                      data["sample_count"])
+        assert results[0]["replayable"] is True
+        assert results[0]["phy"] and results[0]["phy"][0]["ok"] is True
+        assert results[0]["network_locked"] is True
+    finally:
+        a.backend.snapshot = real_snapshot
+        ctl._capture_dir = keep_dir
+        a.page = keep_page
+        a.recording_entries = []
+        if keep_duration is None:
+            a.cfg.pop("rf_record_duration_s", None)
+        else:
+            a.cfg["rf_record_duration_s"] = keep_duration
+
+
 def main():
     _check_config_migration()
 
@@ -341,6 +418,23 @@ def main():
              "wifi", "update", "debug"]
     def _row_y(name):
         return SETTINGS_TOP + _ROWS.index(name) * SETTINGS_STEP + SETTINGS_HEIGHT // 2
+    # Brightness slider: both ends have to be reachable with a finger inside
+    # the enclosure. At X1=298 the 100% end sat 22px from the glass, the
+    # bezel stopped the finger first and the row topped out around 95%, so
+    # the track is now centred with a margin on both sides.
+    from compact_ui_draw import BRIGHT_SLIDER_X0, BRIGHT_SLIDER_X1
+    assert BRIGHT_SLIDER_X0 >= 40, BRIGHT_SLIDER_X0
+    assert BRIGHT_SLIDER_X1 <= 280, BRIGHT_SLIDER_X1
+    assert BRIGHT_SLIDER_X0 + BRIGHT_SLIDER_X1 == 320, "the track stays centred"
+    keep_brightness = a.cfg.get("brightness", 1.0)
+    time.sleep(0.15)
+    a._tap(BRIGHT_SLIDER_X1, _row_y("brightness"))
+    assert abs(float(a.cfg["brightness"]) - 1.0) < 1e-6, a.cfg["brightness"]
+    time.sleep(0.15)
+    a._tap(BRIGHT_SLIDER_X0, _row_y("brightness"))
+    assert abs(float(a.cfg["brightness"]) - 0.4) < 1e-6, a.cfg["brightness"]
+    a.cfg["brightness"] = keep_brightness
+
     # Power mode: the row flips the setting, the frame rate follows it live,
     # and the same tap goes looking for the SDR again -- the reason to reach
     # for this setting is a dongle that has dropped off a marginal supply, so
@@ -435,6 +529,7 @@ def main():
     _check_power_flags()
     _check_display_profile_fallback()
     _check_frame_guard(a)
+    _check_recording_roundtrip(a)
 
     a.running=False
     a.backend.stop()
