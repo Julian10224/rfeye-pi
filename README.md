@@ -613,10 +613,15 @@ sitting at full speed indefinitely.
 Since 0.9.14 the economical mode draws the main page at 3 fps rather than 8
 whenever nobody is looking at it. The appliance spends nearly its whole life in
 exactly that state -- main page, no touches, nothing changing -- so this is the
-largest remaining saving that costs nothing. The two measurements above put the
-app at roughly `8 % + 3.8 %` of a core per frame per second, which puts an idle
-unit near **20 %** rather than 39 %; that figure is an extrapolation from those
-two points and not yet a measurement of its own.
+largest remaining saving that costs nothing. Measured on the reference unit
+afterwards, twice over 12 s: **8.8 % of a core**, against the 39 % in the table,
+under the same conditions (main page, no touches, no dongle on the bus).
+
+That is a larger saving than the frame rate alone accounts for, and the reason
+is the wait itself. `pygame.time.Clock.tick` spins out the last part of its
+interval to hit the target exactly, so the idle frame rate was being paid for
+twice: once to draw and once to wait. Waiting on an event instead removes the
+spin as well as the frames.
 
 The active rate comes back instantly, for four seconds, on any of:
 
