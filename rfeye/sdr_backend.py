@@ -782,27 +782,31 @@ class SDRBackend:
             self._site_verify_at=now
 
         if not self._site_queue:
+            # A TETRA site runs several carriers and a vehicle can be keyed up
+            # on any of them. Locking the first one and then never sweeping
+            # again left the uplink watch list one channel wide for the rest
+            # of the session, so a handset on any other carrier of the same
+            # site was invisible -- the detector was not deaf, it had simply
+            # stopped looking.
+            #
+            # The refill is on a timer and is deliberately NOT gated behind an
+            # empty priority list, in either state. 0.9.11 removed that gate
+            # for a locked site and left it standing for an unlocked one, and
+            # it is the same trap: one half-verified candidate is enough to
+            # keep priority non-empty for ever, and a unit that had heard
+            # something once then stopped sweeping the band entirely. Observed
+            # on a real unit, 31 minutes without a single band pass while it
+            # chased two candidates that could not reach a lock on their own.
+            #
+            # Nothing is starved by this. The queue rides along behind the
+            # priority list, so candidates and due re-proofs are still served
+            # first; the refill only decides what gets swept up alongside them.
             if locked:
-                # A TETRA site runs several carriers and a vehicle can be keyed
-                # up on any of them. Locking the first one and then never
-                # sweeping again left the uplink watch list one channel wide
-                # for the rest of the session, so a handset on any other
-                # carrier of the same site was invisible -- the detector was
-                # not deaf, it had simply stopped looking.
-                #
-                # Rediscovery keeps its own slow timer and is deliberately not
-                # gated behind an empty priority list. With a carrier locked
-                # there is nearly always something in priority -- a candidate,
-                # or the carrier that is due to be re-proved -- and hanging the
-                # refill on that is precisely how the band pass came to a
-                # permanent stop.
                 interval=max(30.,float(self.cfg.get('site_rescan_s',300.0)))
-                if self._survey_at and now-self._survey_at>=interval:
-                    self._refill_site_queue(now)
-            elif not priority:
+            else:
                 interval=max(5.,float(self.cfg.get('survey_idle_interval_s',15.0)))
-                if not self._survey_at or now-self._survey_at>=interval:
-                    self._refill_site_queue(now)
+            if not self._survey_at or now-self._survey_at>=interval:
+                self._refill_site_queue(now)
 
         # The queue rides along behind the priority list, so a dwell aimed at
         # a candidate also sweeps up whichever queued neighbours fit the same

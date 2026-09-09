@@ -1,4 +1,4 @@
-name: RF Eye 0.9.17 appliance checks
+name: RF Eye 0.9.18 appliance checks
 
 on:
   push:
@@ -144,6 +144,11 @@ jobs:
           # used to mean one watched uplink channel for the whole session.
           grep -q 'Max power switched off' rfeye/app.py
           grep -q 'site_rescan_s' rfeye/sdr_backend.py rfeye/config.py
+          # 0.9.18: the queue refill is gated on its timer only, never on
+          # an empty priority list -- in either state. One stale candidate
+          # was enough to stop the band being swept at all.
+          ! grep -q 'elif not priority' rfeye/sdr_backend.py
+          grep -q 'def check_rescan_with_candidates' scripts/detector-selftest.py
           ! grep -q 'if locked:\\n                return \\[\\]' rfeye/sdr_backend.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py

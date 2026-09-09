@@ -281,6 +281,55 @@ def check_health_carrier():
     os.environ.pop("RFEYE_SITE_STATE", None)
 
 
+def check_rescan_with_candidates():
+    """One half-verified candidate must not stop the band being swept.
+
+    0.9.11 took the "only refill when nothing is pending" gate off the locked
+    path and left it standing on the unlocked one. It is the same trap either
+    way: `candidates()` returns every carrier below the lock threshold with no
+    age limit, so a single channel that passed the waveform test once keeps
+    the priority list non-empty for ever and the refill never fires. Seen on a
+    real unit -- 31 minutes without a single band pass while it chased two
+    candidates that could not reach a lock by themselves, and could not find
+    the carriers that would have corroborated them because it had stopped
+    looking.
+    """
+    print(chr(10) + "14. rediscovery with a candidate but no lock")
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=DOWNLINKS)
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            now = time.time()
+            # Exactly the state the field unit was stuck in: heard once,
+            # nowhere near a lock, and stale.
+            b.sites.entries[int(round(DOWNLINKS[0]))] = {
+                "hits": 1, "misses": 0, "quality": 0.4,
+                "last_ok": now - 1800.0, "first_seen": now - 1800.0}
+            assert not b.sites.locked(now), "test setup: nothing may be locked"
+            assert b.sites.candidates(now), "test setup: the candidate must survive"
+            b._site_queue = []
+            b._survey_at = now - 3600.0
+            b._site_work(now)
+            check("sweeps the band with a candidate pending",
+                  len(b._site_queue) > 0,
+                  "queue refilled to %d channels" % len(b._site_queue))
+
+            # The candidate still goes first: the refill decides what is swept
+            # up alongside it, it does not push it aside.
+            check("and still serves the candidate first",
+                  b.sites.candidates(now)[0]["freq_hz"] == DOWNLINKS[0],
+                  "%.4f MHz" % (b.sites.candidates(now)[0]["freq_hz"] / 1e6))
+
+            # Not on every round, or the idle interval would mean nothing.
+            b._site_queue = []
+            b._survey_at = time.time()
+            b._site_work(time.time())
+            check("but not on every round", len(b._site_queue) == 0,
+                  "queue %d" % len(b._site_queue))
+        finally:
+            b.running = False
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -431,6 +480,7 @@ def main():
     check_queue_order()
     check_rescan_while_locked()
     check_health_carrier()
+    check_rescan_with_candidates()
 
     print()
     if FAILURES:
