@@ -506,6 +506,52 @@ def _check_dim_overlay_cached(a):
         a._dim_alpha = -1
 
 
+def _check_driver_selection():
+    """The library is picked on what it supports, not on load order.
+
+    Debian's librtlsdr 2.0.2 carries no "Blog V4L" code path, so on that
+    dongle it never switches the tuner input or the upconverter GPIO and the
+    whole UHF band reads as noise -- a fault with no symptom except an empty
+    band. Measured on the reference unit, same dongle and air, alternating
+    rounds at 390.7375 MHz: snr 0.5-0.8 dB / duty 0.00 / FAIL on the distro
+    build, snr 11.7-13.4 / duty 1.00 / TETRA on the RTL-SDR Blog build. So
+    which one gets loaded may not be left to the loader cache.
+    """
+    import ctypes.util
+
+    d = Path(_tmp.name) / "libs"
+    d.mkdir(exist_ok=True)
+    plain = d / "librtlsdr-plain.so"
+    blog = d / "librtlsdr-blog.so"
+    plain.write_bytes(b"ELF Blog V4 RTLSDRBlog no newer model here")
+    blog.write_bytes(b"ELF Blog V4 Blog V4L RTLSDRBlog")
+
+    assert sdr_backend._library_knows_model(str(blog)) is True
+    assert sdr_backend._library_knows_model(str(plain)) is False
+    # A name that is not a path, or a file that is not there, must not throw.
+    assert sdr_backend._library_knows_model("librtlsdr.so.0") is False
+    assert sdr_backend._library_knows_model(str(d / "absent.so")) is False
+
+    keep = os.environ.get("RFEYE_RTLSDR_LIB")
+    keep_find = ctypes.util.find_library
+    try:
+        os.environ["RFEYE_RTLSDR_LIB"] = str(blog)
+        first = sdr_backend.rtlsdr_library_candidates()[0]
+        assert first == str(blog), first
+        # /usr/local comes before whatever the loader cache answers, because
+        # both are installed and the order there is not ours to rely on.
+        ctypes.util.find_library = lambda n: "/usr/lib/librtlsdr.so.0"
+        order = sdr_backend.rtlsdr_library_candidates()
+        assert order.index("/usr/local/lib/librtlsdr.so.0") <             order.index("/usr/lib/librtlsdr.so.0"), order
+        assert len(order) == len(set(order)), "no candidate is offered twice"
+    finally:
+        ctypes.util.find_library = keep_find
+        if keep is None:
+            os.environ.pop("RFEYE_RTLSDR_LIB", None)
+        else:
+            os.environ["RFEYE_RTLSDR_LIB"] = keep
+
+
 def main():
     _check_config_migration()
 
@@ -681,6 +727,7 @@ def main():
     _check_idle_frame_rate(a)
     _check_dim_overlay_cached(a)
     _check_demo_reopens_sdr()
+    _check_driver_selection()
 
     a.running=False
     a.backend.stop()

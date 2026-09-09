@@ -1,6 +1,6 @@
-# RF Eye 0.9.19 for Raspberry Pi
+# RF Eye 0.9.20 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.19 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.20 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.19 appliance path:
+The installer reproduces the working 0.9.20 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.19
+## User interface in 0.9.20
 
 The compact profile contains:
 
@@ -191,7 +191,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.19)
+### How the band is searched (0.9.20)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -496,7 +496,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.19 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.20 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -623,7 +623,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.19**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.20**.
 
 Build the OTA package with:
 
@@ -839,6 +839,54 @@ vcgencmd get_throttled
 `0x0` is healthy. Bit 0 set means under-voltage right now; bit 16 means it has
 happened since boot. An RTL-SDR draws around 300 mA, so a Pi 3 B+ needs a real
 5 V / 3 A supply with a short, thick cable, or the dongle on a powered hub.
+
+## The SDR driver decides whether there is a band at all
+
+Raspberry Pi OS ships **librtlsdr 2.0.2**. Its binary contains `Blog V4`,
+`RTL-SDR Blog V4 Detected` and `RTLSDRBlog` -- and no `Blog V4L` anywhere. The
+tuners it knows are E4000, FC0012, FC0013, R820T and R828D.
+
+The RTL-SDR Blog V4L carries an RF switch on a GPIO that routes the antenna
+either into the HF upconverter or straight to the tuner, and the tuner input
+has to be selected per band:
+
+```c
+band = (freq <= MHZ(28.8)) ? HF : UHF;
+rtlsdr_set_bias_tee_gpio(priv->rtl_dev, 5, !cable_1_in);   /* the RF switch */
+r82xx_write_reg_mask(priv, 0x05, air_in, 0x20);            /* the UHF input */
+```
+
+A driver with no code path for the model throws neither switch. The antenna
+stays on the wrong branch and the whole UHF band reads as noise -- which is
+indistinguishable from "there is no C2000 in range", and presents as a unit
+that searches for hours and finds nothing.
+
+Measured on the reference unit, same dongle, same antenna, same air, four
+rounds alternating between the two builds, on 390.7375 MHz:
+
+| | Debian 2.0.2 | RTL-SDR Blog |
+|---|---|---|
+| SNR | 0.5 - 0.8 dB | **11.7 - 13.4 dB** |
+| occupied bandwidth | 39.7 kHz (at the cap) | **22.2 kHz** |
+| boundary rejection | 0.3 - 0.6 dB | **11.9 - 13.8 dB** |
+| duty | 0.00 | **1.00** |
+| verdict | FAIL:bandwidth, 4 of 4 | **TETRA, 3 of 4** |
+| ADC drive (RMS) | 20.7 | 33.3 |
+
+Since 0.9.20 `install.sh` builds and installs the RTL-SDR Blog driver into
+`/usr/local`, leaving the packaged one alone so an apt upgrade cannot take it
+back. The build is refused if the source does not carry the model, and again
+if the installed library does not -- a driver that silently lacks it is the
+whole failure being fixed.
+
+The runtime then picks its library on **what it supports**, not on what the
+loader cache returns first: `RFEYE_RTLSDR_LIB`, then `/usr/local/lib`, then
+`ctypes.util.find_library`, preferring the first build that carries the model
+marker. The Debug page names the library in use and whether it knows the
+dongle (`BLOG librtlsdr.so.0` against `PLAIN librtlsdr.so.0`), because this
+fault has no other symptom.
+
+Skip it with `RFEYE_KEEP_DISTRO_RTLSDR=1` at install time.
 
 ## When the panel says SDR NOT CONNECTED
 

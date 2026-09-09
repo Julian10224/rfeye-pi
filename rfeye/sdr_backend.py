@@ -35,7 +35,7 @@ false positives after the fact, and with a real waveform test they are not
 only unnecessary but harmful: each one could also suppress a genuine
 detection.
 """
-import math, shutil, subprocess, threading, time, ctypes, ctypes.util
+import math, os, shutil, subprocess, threading, time, ctypes, ctypes.util
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +50,80 @@ except Exception:
     RtlSdr = None
 
 
+# A driver that does not know this dongle is indistinguishable from a dead
+# band, so the marker for the newest model is what a library is judged on.
+RTLSDR_MODEL_MARKER = b'Blog V4L'
+
+
+def rtlsdr_library_candidates():
+    """Where to look for librtlsdr, best first."""
+    out=[]
+    override=os.environ.get('RFEYE_RTLSDR_LIB','').strip()
+    if override:
+        out.append(override)
+    # Where install.sh puts the RTL-SDR Blog build. Ahead of find_library on
+    # purpose: both are in the loader cache and which one it returns is not
+    # something to leave to chance.
+    out.extend(['/usr/local/lib/librtlsdr.so.0','/usr/local/lib/librtlsdr.so'])
+    found=ctypes.util.find_library('rtlsdr')
+    if found:
+        out.append(found)
+    out.append('librtlsdr.so.0')
+    seen=set(); uniq=[]
+    for x in out:
+        if x and x not in seen:
+            seen.add(x); uniq.append(x)
+    return uniq
+
+
+def _library_knows_model(path):
+    """Does this build carry the newest dongle's code path?
+
+    Read as bytes rather than probed through the API: the model check is
+    internal to librtlsdr and not exported, and a file is cheap to look at.
+    """
+    try:
+        p=Path(path)
+        if not p.is_absolute() or not p.is_file():
+            return False
+        return RTLSDR_MODEL_MARKER in p.read_bytes()
+    except Exception:
+        return False
+
+
+def open_rtlsdr_library():
+    """Load a librtlsdr that knows this hardware, not just the first one found.
+
+    Debian's librtlsdr 2.0.2 has no code path for the RTL-SDR Blog V4L. That
+    dongle carries an RF switch on a GPIO that routes the antenna either into
+    the HF upconverter or straight to the tuner, and the tuner input has to be
+    selected per band. A driver that does not know the model never throws
+    either switch, so the antenna stays on the wrong branch and the whole UHF
+    band reads as noise -- which looks exactly like no C2000 in range.
+
+    Measured on the reference unit, same dongle and same air, four rounds
+    alternating, 390.7375 MHz:
+
+        Debian 2.0.2   snr 0.5-0.8 dB   bw 39.7 kHz   duty 0.00   FAIL
+        RTL-SDR Blog   snr 11.7-13.4    bw 22.2 kHz   duty 1.00   TETRA
+
+    Returns (handle, path, knows_model).
+    """
+    first=None
+    for path in rtlsdr_library_candidates():
+        try:
+            lib=ctypes.CDLL(path)
+        except OSError:
+            continue
+        if _library_knows_model(path):
+            return lib,str(path),True
+        if first is None:
+            first=(lib,str(path))
+    if first is None:
+        raise RuntimeError('no usable librtlsdr found')
+    return first[0],first[1],False
+
+
 class _PersistentRTL:
     """Persistent librtlsdr wrapper using only stable C API calls.
 
@@ -57,8 +131,7 @@ class _PersistentRTL:
     systems while keeping one USB device handle open across tuning windows.
     """
     def __init__(self, index=0):
-        name=ctypes.util.find_library('rtlsdr') or 'librtlsdr.so.0'
-        self.lib=ctypes.CDLL(name)
+        self.lib,self.lib_path,self.lib_knows_model=open_rtlsdr_library()
         self.dev=ctypes.c_void_p()
         self.lib.rtlsdr_open.argtypes=[ctypes.POINTER(ctypes.c_void_p),ctypes.c_uint32]
         self.lib.rtlsdr_open.restype=ctypes.c_int
@@ -157,6 +230,8 @@ class SDRBackend:
         self._demo_forced=bool(cfg.get('demo_mode',False))
         # Set by set_demo, acted on by the scan thread: see _reopen_sdr.
         self._sdr_reopen=False
+        self.driver_path=''
+        self.driver_knows_model=False
         # Alternates candidate work with the band pass; see _site_work.
         self._priority_turn=0
         self.last_good_scan=0.; self.scan_failures=0; self.last_usb_reset=0.
@@ -320,6 +395,8 @@ class SDRBackend:
                 'mobile_confirmed':bool(self.mobile_confirmed),
                 'freqs':self.spectrum_freqs.copy(),'spectrum':self.spectrum_db.copy(),
                 'noise':float(self.noise_floor_db),
+                'driver_path':str(self.driver_path),
+                'driver_knows_model':bool(self.driver_knows_model),
                 'last_update':float(self.last_update),'demo':bool(self.demo_active),
                 'network_locked':bool(self.site_peaks),
                 'site_locked_count':len(self.site_peaks),
@@ -468,6 +545,11 @@ class SDRBackend:
             if self.sdr is None:
                 self.sdr=_PersistentRTL(int(self.cfg.get('sdr_device_index',0)))
                 self.sdr_path='CTYPES PERSISTENT'
+                # Which librtlsdr actually got loaded is not a detail: a build
+                # that does not know the dongle reports a silent, empty band.
+                self.driver_path=str(getattr(self.sdr,'lib_path',''))
+                self.driver_knows_model=bool(
+                    getattr(self.sdr,'lib_knows_model',False))
             self.sdr.configure(int(sr),int(self.cfg.get('ppm',0)),self.cfg.get('gain','auto'))
             self.sdr.tune(int(center))
             self.sdr.reset()

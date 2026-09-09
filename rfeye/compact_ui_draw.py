@@ -30,6 +30,12 @@ def draw_gear(app,cx,cy,size=42):
     app.ui.blit(icon,icon.get_rect(center=(int(cx),int(cy))))
 
 
+def _driver_name(snap):
+    """Just the file name of the loaded librtlsdr; the path will not fit."""
+    p=str(snap.get("driver_path") or "")
+    return p.rsplit("/",1)[-1] if p else "?"
+
+
 def _sdr_fault(error):
     """The one word that separates a missing dongle from a silent one.
 
@@ -193,6 +199,11 @@ def draw_debug(app,snap):
           ("Verify",f"{float(snap.get('verify_ms',0)):.0f} ms  age {age_ms:.0f} ms"),
           ("Last band pass",(f"{float(snap.get('last_pass_s',0)):.0f} s"
                              if float(snap.get("last_pass_s",0)) else "-")),
+          # Which librtlsdr is loaded. A build with no code path for the
+          # dongle never throws its RF switch and the whole band reads as
+          # noise -- a fault with no other symptom at all.
+          ("Driver",("BLOG %s" % _driver_name(snap)) if snap.get("driver_knows_model")
+                    else ("PLAIN %s" % _driver_name(snap))),
           ("Supply",str(snap.get("power_warning") or snap.get("power_history") or "OK")),
           # When the radio is unhappy its own words are worth more than the
           # code path it was opened through.
@@ -201,9 +212,11 @@ def draw_debug(app,snap):
                       else f"{snap.get('status','?')} {str(snap.get('sdr_path','?'))[:9]}"))]
     y=64
     for label,value in rows:
-        pygame.draw.rect(app.ui,(9,13,18),(8,y,304,25),border_radius=6); app._text(label,16,y+5,app.font_s,DIM)
+        # 14 rows now, so the step tightened again. 64 + 14*25 = 414, which
+        # keeps the calibrate button at y=420 clear.
+        pygame.draw.rect(app.ui,(9,13,18),(8,y,304,23),border_radius=6); app._text(label,16,y+4,app.font_s,DIM)
         shown=value if len(value)<=22 else value[:21]+"…"; col=GREEN if label=="Backend" and value=="LIVE" else BLUE_BRIGHT
-        surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(304-surf.get_width(),y+5)); y+=27
+        surf=app.font_s.render(shown,True,col); app.ui.blit(surf,(304-surf.get_width(),y+4)); y+=25
     pygame.draw.rect(app.ui,(12,24,32),(8,420,304,30),border_radius=8)
     app._text("Touch calibration",18,427,app.font_s,WHITE)
     surf=app.font_s.render("CALIBRATE",True,BLUE_BRIGHT); app.ui.blit(surf,(302-surf.get_width(),427))

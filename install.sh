@@ -207,6 +207,18 @@ loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
 
 bash "$SRC_ROOT/scripts/optimize-rpi-appliance.sh" "$TARGET_USER"
 
+# The SDR driver. Debian's librtlsdr 2.0.2 has no code path for the RTL-SDR
+# Blog V4L -- no "Blog V4L" string in the binary at all -- so it never throws
+# that dongle's RF switch and the whole UHF band reads as noise. Measured on
+# the reference unit, same dongle, same air, alternating rounds at
+# 390.7375 MHz: snr 0.5-0.8 dB and FAIL on Debian's build, snr 11.7-13.4 and
+# TETRA on the RTL-SDR Blog build. That is the difference between finding a
+# C2000 site and reporting an empty band, so it belongs in every install.
+# Skip with RFEYE_KEEP_DISTRO_RTLSDR=1.
+if [[ "${RFEYE_KEEP_DISTRO_RTLSDR:-0}" != "1" ]]; then
+  bash "$SRC_ROOT/scripts/install-rtlsdr-blog.sh" ||     echo "WARNING: RTL-SDR Blog driver not installed; a V4L dongle will read as an empty band" >&2
+fi
+
 # Power profile. Measured on the reference unit: the application used 13.4% of
 # one core while the CPU sat at 1400 MHz for 18 of 20 sampled seconds, because
 # `ondemand` jumps to maximum on any burst of work and stays there. The core

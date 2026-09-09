@@ -1,4 +1,4 @@
-name: RF Eye 0.9.19 appliance checks
+name: RF Eye 0.9.20 appliance checks
 
 on:
   push:
@@ -154,6 +154,15 @@ jobs:
           # the band pass never reaches the rest of the band.
           grep -q '_priority_turn' rfeye/sdr_backend.py
           grep -q 'def check_candidate_does_not_starve_the_pass' scripts/detector-selftest.py
+          # 0.9.20: the distro librtlsdr has no V4L code path, so it never
+          # throws that dongle's RF switch and the band reads as noise.
+          test -x scripts/install-rtlsdr-blog.sh
+          bash -n scripts/install-rtlsdr-blog.sh
+          grep -q 'install-rtlsdr-blog.sh' install.sh
+          grep -q 'RFEYE_KEEP_DISTRO_RTLSDR' install.sh
+          grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
+          grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py
+          grep -q 'driver_knows_model' rfeye/sdr_backend.py rfeye/compact_ui_draw.py
           ! grep -q 'if locked:\\n                return \\[\\]' rfeye/sdr_backend.py
           ! grep -q 'Sensitivity' rfeye/compact_ui_draw.py
           ! grep -q 'threshold_db' rfeye/compact_ui_draw.py rfeye/compact_ui_controls.py rfeye/app.py
