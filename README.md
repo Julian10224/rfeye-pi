@@ -701,9 +701,41 @@ sudo RFEYE_KEEP_ONDEMAND=1 ./install.sh                      # install without i
 ```
 
 `conservative` is the default rather than `powersave`. `powersave` pins 600 MHz
-permanently, which slows a verification dwell's FFT work by about the same
-factor it saves; `conservative` ramps up under load and drops back quickly, so
-the detector still gets the clock when it is actually working.
+permanently; `conservative` ramps up under load and drops back quickly, so the
+detector still gets the clock when it is actually working. Measured on a unit
+running `conservative` with no ceiling, sampled once a second over 30 s of
+normal operation: 600 MHz for 18 s, and above 900 MHz for only 5 s. Under
+`ondemand` the same unit had been at 1400 MHz for 18 of 20 sampled seconds.
+Most of the saving is the governor; the ceiling below is what puts a hard lid
+on the worst case.
+
+### What the 900 MHz ceiling costs
+
+Measured on two units of the same model and release, one capped at 900 MHz and
+one left at 1400, running the same synthetic 2^18 dwell through the real
+`Channelizer` and `analyse`:
+
+| | 1400 MHz | 900 MHz | |
+|---|---|---|---|
+| full analysis of one channel | 301 ms | 433 ms | +44 % |
+| bare 2^18 FFT | 157 ms | 211 ms | +35 % |
+| dwell capture | 910 ms | 910 ms | fixed |
+| band pass, 200 channels | 138-154 s | 141-146 s | no change |
+| application CPU | 19.3 % | 19.6 % | no change |
+| SoC temperature | 51.5 C | 39.7 C | **-11.8 C** |
+
+The slowdown is smaller than the 1.56x clock ratio because the Pi 3's memory
+clock does not scale with the core.
+
+In the appliance it costs almost nothing, because a band pass is not compute
+bound: a dwell listens for 910 ms of real time whatever the CPU does, most
+channels fail their first test in a few milliseconds, and the economical mode
+adds a 1.5 s pause on top. Only a channel that passes every test pays the full
+432 ms, which makes the worst case 1211 ms -> 1343 ms for that one dwell, about
++11 %.
+
+Against that, nearly 12 C less in the same enclosure. When the failure mode is
+a rail that sags until the RTL-SDR drops off the bus, that is the right trade.
 
 **None of this makes a Pi 3 B+ run on a supply that cannot hold 5 V.** The
 board wants 5.1 V at up to 2.5 A, and the RTL-SDR on top of it draws roughly
