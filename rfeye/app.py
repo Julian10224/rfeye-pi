@@ -143,6 +143,8 @@ class App:
         self.ui_wake = threading.Event()
         self.ui_wake_at = 0.0
         self.ui_signature = None
+        self._dim_overlay = None
+        self._dim_alpha = -1
         self.last_beep = 0.0
         # One supply warning per session, shown over whatever page is up and
         # dismissed with a button. Scanning runs in its own thread and is not
@@ -1260,12 +1262,26 @@ class App:
         self._text("tap top or bottom to return", 240, 758, self.font_s, DIM, center=True)
 
     def _apply_brightness(self):
+        """Dim the picture. Note: the picture, not the backlight.
+
+        This panel exposes no backlight device -- /sys/class/backlight is
+        empty and the overlay's led-gpios line is left as an unclaimed input,
+        so the lamp is on whenever the unit is -- and a darker screen
+        therefore saves no power at all. It only has to be cheap. Rebuilding
+        a 320x480 SRCALPHA surface every frame was not: the surface is now
+        made once per brightness setting and kept.
+        """
         br = clamp(float(self.cfg.get("brightness", 1.0)), 0.35, 1.0)
-        if br < 0.999:
-            alpha = int((1.0 - br) * 220)
+        if br >= 0.999:
+            return
+        alpha = int((1.0 - br) * 220)
+        overlay = getattr(self, "_dim_overlay", None)
+        if overlay is None or self._dim_alpha != alpha or                 overlay.get_size() != (self.uw, self.uh):
             overlay = pygame.Surface((self.uw, self.uh), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, alpha))
-            self.ui.blit(overlay, (0, 0))
+            self._dim_overlay = overlay
+            self._dim_alpha = alpha
+        self.ui.blit(overlay, (0, 0))
 
 def _search_best_text(snap):
     """One line saying what the current band pass has actually found."""

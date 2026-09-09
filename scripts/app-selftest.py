@@ -472,6 +472,40 @@ def _check_idle_frame_rate(a):
         a.rf_recording = False
 
 
+def _check_dim_overlay_cached(a):
+    """Dimming must be cheap, because it is not a saving.
+
+    This panel has no backlight device -- /sys/class/backlight is empty and
+    the overlay's led-gpios line sits unclaimed as an input -- so brightness
+    is a black surface over the picture and the lamp burns the same either
+    way. A setting that saves nothing must at least not cost a full-screen
+    SRCALPHA allocation on every frame, which is what it did until 0.9.15.
+    """
+    keep = a.cfg.get("brightness", 1.0)
+    try:
+        a.cfg["brightness"] = 0.6
+        a._apply_brightness()
+        first = a._dim_overlay
+        assert first is not None, "a dimmed screen still needs its overlay"
+        a._apply_brightness()
+        assert a._dim_overlay is first, "the overlay is built once, not per frame"
+        # A new brightness has to produce a new overlay, not the stale one.
+        a.cfg["brightness"] = 0.4
+        a._apply_brightness()
+        second = a._dim_overlay
+        assert second is not first, "a changed setting has to be visible"
+        assert a._dim_alpha == int((1.0 - 0.4) * 220), a._dim_alpha
+        # Full brightness draws nothing at all.
+        a.cfg["brightness"] = 1.0
+        a._dim_overlay = None
+        a._apply_brightness()
+        assert a._dim_overlay is None, "no overlay when there is nothing to dim"
+    finally:
+        a.cfg["brightness"] = keep
+        a._dim_overlay = None
+        a._dim_alpha = -1
+
+
 def main():
     _check_config_migration()
 
@@ -645,6 +679,7 @@ def main():
     _check_frame_guard(a)
     _check_recording_roundtrip(a)
     _check_idle_frame_rate(a)
+    _check_dim_overlay_cached(a)
     _check_demo_reopens_sdr()
 
     a.running=False

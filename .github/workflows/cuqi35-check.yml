@@ -1,4 +1,4 @@
-name: RF Eye 0.9.14 appliance checks
+name: RF Eye 0.9.15 appliance checks
 
 on:
   push:
@@ -82,6 +82,14 @@ jobs:
           # away a working lock.
           grep -q 'def health_carrier' rfeye/tetra_detector.py
           grep -q 'self.sites.health_carrier' rfeye/sdr_backend.py
+          # 0.9.15: dimming is not a power saving on this panel -- there is
+          # no backlight device -- so it must at least not rebuild a
+          # full-screen surface on every frame.
+          grep -q '_dim_overlay' rfeye/app.py
+          ! grep -q 'overlay = pygame.Surface((self.uw, self.uh), pygame.SRCALPHA)$' rfeye/app.py
+          test -x scripts/rfeye-power-profile.sh
+          bash -n scripts/rfeye-power-profile.sh
+          grep -q 'scaling_governor' scripts/rfeye-power-profile.sh
           # 0.9.14: leaving demo mode has to give the radio a clean start,
           # and the close has to happen on the scan thread -- closing a
           # librtlsdr handle from the UI thread while that thread may be
