@@ -1,6 +1,6 @@
-# RF Eye 0.9.16 for Raspberry Pi
+# RF Eye 0.9.17 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.16 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.17 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.16 appliance path:
+The installer reproduces the working 0.9.17 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.16
+## User interface in 0.9.17
 
 The compact profile contains:
 
@@ -191,7 +191,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.16)
+### How the band is searched (0.9.17)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -451,7 +451,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.16 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.17 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -578,7 +578,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.16**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.17**.
 
 Build the OTA package with:
 
@@ -693,12 +693,19 @@ The `[MHS35 8/8]` summary prints the governor that ended up in force, and warns
 if it is still `ondemand`.
 
 ```bash
-sudo ./scripts/rfeye-power-profile.sh                        # conservative
-sudo RFEYE_MAX_FREQ_KHZ=900000 ./scripts/rfeye-power-profile.sh
+sudo ./scripts/rfeye-power-profile.sh                        # conservative, 900 MHz
+sudo RFEYE_MAX_FREQ_KHZ=0 ./scripts/rfeye-power-profile.sh    # no ceiling
+sudo RFEYE_MAX_FREQ_KHZ=1200000 ./scripts/rfeye-power-profile.sh
 sudo RFEYE_ETH_OFF=1 ./scripts/rfeye-power-profile.sh
 sudo ./scripts/rfeye-power-profile.sh --off                  # undo
 sudo RFEYE_KEEP_ONDEMAND=1 ./install.sh                      # install without it
 ```
+
+Since 0.9.17 the 900 MHz ceiling is the **default**, on the measurements in the
+table below. It is clamped to what the board can actually do -- never below its
+minimum, never above its maximum, and snapped to a step the driver lists -- so
+a different Raspberry Pi model gets a sensible ceiling rather than a nonsensical
+one.
 
 `conservative` is the default rather than `powersave`. `powersave` pins 600 MHz
 permanently; `conservative` ramps up under load and drops back quickly, so the
@@ -709,7 +716,7 @@ normal operation: 600 MHz for 18 s, and above 900 MHz for only 5 s. Under
 Most of the saving is the governor; the ceiling below is what puts a hard lid
 on the worst case.
 
-### What the 900 MHz ceiling costs
+### What the 900 MHz ceiling costs (and why it is the default)
 
 Measured on two units of the same model and release, one capped at 900 MHz and
 one left at 1400, running the same synthetic 2^18 dwell through the real

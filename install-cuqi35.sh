@@ -271,7 +271,7 @@ Touch:    XPT2046 (Linux ADS7846 driver), direct calibrated RF Eye input
 Native:   480x320 physical / 320x480 portrait UI
 SPI:      ${SPI_HZ} Hz
 Branch:   ${REPO_BRANCH}
-Power:    CPU governor $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown), status LEDs off
+Power:    CPU governor $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown), ceiling $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || echo ?) kHz, status LEDs off
 
 Reboot now:
   sudo reboot

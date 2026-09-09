@@ -15,11 +15,20 @@ set -euo pipefail
 #
 # `conservative` is the default here rather than `powersave`: it ramps up
 # under load instead of jumping, and drops back quickly, so a verification
-# dwell still gets the clock it needs. Pin a hard ceiling with
-# RFEYE_MAX_FREQ_KHZ if the supply is the binding constraint.
+# dwell still gets the clock it needs.
 #
-#   sudo ./scripts/rfeye-power-profile.sh              # apply
-#   sudo RFEYE_MAX_FREQ_KHZ=900000 ./scripts/rfeye-power-profile.sh
+# The clock ceiling defaults to 900 MHz because it was measured A/B on two
+# Rev 1.3 Pi 3 B+ units of the same release. Compute does get slower -- the
+# full analysis of one channel went 301 -> 433 ms and a bare 2^18 FFT
+# 157 -> 211 ms -- but a band pass is not compute bound: every dwell listens
+# for 910 ms of real time whatever the CPU does, most channels fail their
+# first test in milliseconds, and the economical mode adds 1.5 s on top. Pass
+# duration was 138-154 s uncapped against 141-146 s capped, and application
+# CPU 19.3% against 19.6%. The capped unit ran 11.8 C cooler.
+#
+#   sudo ./scripts/rfeye-power-profile.sh              # apply, 900 MHz
+#   sudo RFEYE_MAX_FREQ_KHZ=0 ./scripts/rfeye-power-profile.sh   # no ceiling
+#   sudo RFEYE_MAX_FREQ_KHZ=1200000 ./scripts/rfeye-power-profile.sh
 #   sudo RFEYE_GOVERNOR=powersave ./scripts/rfeye-power-profile.sh
 #   sudo RFEYE_ETH_OFF=1 ./scripts/rfeye-power-profile.sh
 #   sudo ./scripts/rfeye-power-profile.sh --off        # undo
@@ -51,7 +60,9 @@ if [[ "${1:-}" == "--off" ]]; then
 fi
 
 GOVERNOR="${RFEYE_GOVERNOR:-conservative}"
-MAX_FREQ="${RFEYE_MAX_FREQ_KHZ:-}"
+# 900 MHz by default; 0 / none / max means leave the ceiling alone.
+MAX_FREQ="${RFEYE_MAX_FREQ_KHZ-900000}"
+case "$MAX_FREQ" in 0|none|max|NONE|MAX) MAX_FREQ="" ;; esac
 ETH_OFF="${RFEYE_ETH_OFF:-0}"
 
 available=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null || echo "")
@@ -98,7 +109,26 @@ set -u
 for c in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do
   [[ -w "$c/scaling_governor" ]] && echo "${RFEYE_GOVERNOR:-conservative}" > "$c/scaling_governor" 2>/dev/null || true
   if [[ -n "${RFEYE_MAX_FREQ_KHZ:-}" && -w "$c/scaling_max_freq" ]]; then
-    echo "${RFEYE_MAX_FREQ_KHZ}" > "$c/scaling_max_freq" 2>/dev/null || true
+    want="${RFEYE_MAX_FREQ_KHZ}"
+    # A ceiling is only meaningful inside what this board can actually do.
+    # Another Raspberry Pi model has a different frequency table, and a
+    # ceiling below its minimum would be nonsense rather than economical.
+    hw_min="$(cat "$c/cpuinfo_min_freq" 2>/dev/null || echo "")"
+    hw_max="$(cat "$c/cpuinfo_max_freq" 2>/dev/null || echo "")"
+    [[ -n "$hw_min" && "$want" -lt "$hw_min" ]] && want="$hw_min"
+    [[ -n "$hw_max" && "$want" -gt "$hw_max" ]] && want="$hw_max"
+    # Snap to a step the driver actually offers, where it lists them.
+    steps="$(cat "$c/scaling_available_frequencies" 2>/dev/null || echo "")"
+    if [[ -n "$steps" ]]; then
+      best=""
+      for f in $steps; do
+        if [[ "$f" -le "$want" ]] && { [[ -z "$best" ]] || [[ "$f" -gt "$best" ]]; }; then
+          best="$f"
+        fi
+      done
+      [[ -n "$best" ]] && want="$best"
+    fi
+    echo "$want" > "$c/scaling_max_freq" 2>/dev/null || true
   fi
 done
 # The activity and power LEDs are of no use in a sealed enclosure in a car.
@@ -122,6 +152,6 @@ systemctl enable --now rfeye-power.service >/dev/null
 
 echo "RF Eye power profile applied."
 echo "  governor : $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)"
-echo "  max freq : $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq) kHz"
+echo "  max freq : $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq) kHz${MAX_FREQ:+ (requested ${MAX_FREQ})}"
 echo "  now at   : $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq) kHz"
 echo "Undo with: sudo $0 --off"

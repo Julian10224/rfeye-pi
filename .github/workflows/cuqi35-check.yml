@@ -1,4 +1,4 @@
-name: RF Eye 0.9.16 appliance checks
+name: RF Eye 0.9.17 appliance checks
 
 on:
   push:
@@ -90,6 +90,11 @@ jobs:
           test -x scripts/rfeye-power-profile.sh
           bash -n scripts/rfeye-power-profile.sh
           grep -q 'scaling_governor' scripts/rfeye-power-profile.sh
+          # 0.9.17: the 900 MHz ceiling ships as the default, clamped to
+          # what the board can actually do.
+          grep -q 'RFEYE_MAX_FREQ_KHZ-900000' scripts/rfeye-power-profile.sh
+          grep -q 'cpuinfo_min_freq' scripts/rfeye-power-profile.sh
+          grep -q 'scaling_available_frequencies' scripts/rfeye-power-profile.sh
           # 0.9.16: a fresh install has to apply the power profile by itself.
           # An OTA update replaces the runtime only, so this is the one path
           # that can set a root-owned sysfs value.
