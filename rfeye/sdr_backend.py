@@ -155,6 +155,8 @@ class SDRBackend:
         self.spectrum_db=np.array([],dtype=np.float32)
         self.noise_floor_db=-100.; self.last_update=0.; self.demo_active=False
         self._demo_forced=bool(cfg.get('demo_mode',False))
+        # Set by set_demo, acted on by the scan thread: see _reopen_sdr.
+        self._sdr_reopen=False
         self.last_good_scan=0.; self.scan_failures=0; self.last_usb_reset=0.
         self._usb_resets=0; self._usb_backoff=0.
         self._power_checked=0.; self._power_flag=''
@@ -183,7 +185,17 @@ class SDRBackend:
     def set_demo(self,v):
         v=bool(v)
         with self.lock:
+            if v==self._demo_forced:
+                return
             self._demo_forced=v; self.cfg['demo_mode']=v
+            # Demo must not hold the radio while it is not reading it, and
+            # coming back out of demo must not inherit the failure counters
+            # and back-off of whatever went wrong before it was switched on.
+            # Both are the scan thread's job: closing a librtlsdr handle from
+            # the UI thread while that thread may be inside rtlsdr_read_sync()
+            # is the race stop() already goes out of its way to avoid, and it
+            # can wedge the V4 on the bus. So ask, do not do.
+            self._sdr_reopen=True
             if not v:
                 self.peaks=[]; self.mobile_peaks=[]; self.site_peaks=[]
                 self.mobile_level=0.; self.site_level=0.
@@ -235,6 +247,22 @@ class SDRBackend:
             self.error = '' if present else 'SDR not on the USB bus'
         return {'present': bool(present), 'reset': bool(did_reset)}
 
+    def _reopen_sdr(self):
+        """Start the radio from scratch, on the thread that owns the handle.
+
+        Only ever called from the scan loop. Everything that can make the
+        next open fail for a reason that no longer applies is cleared here:
+        the handle itself, the USB reset counter and its back-off, and the
+        run of failures that decides whether the panel says NO SDR.
+        """
+        self._close_direct_sdr()
+        self._usb_resets=0
+        self._usb_backoff=0.
+        self.last_usb_reset=0.
+        with self.lock:
+            self.scan_failures=0
+            self.last_good_scan=0.
+
     def _low_power_pause(self):
         """Idle between cycles so the CPU can clock back down.
 
@@ -260,7 +288,12 @@ class SDRBackend:
     def _run(self):
         try:
             while self.running:
-                with self.lock: demo=self._demo_forced
+                with self.lock:
+                    demo=self._demo_forced
+                    reopen=self._sdr_reopen
+                    self._sdr_reopen=False
+                if reopen:
+                    self._reopen_sdr()
                 if demo:
                     self._demo_once(); continue
                 if not self._scan_cycle():

@@ -157,6 +157,7 @@ DEFAULTS = {
     # it is the user's call, so it lives in the settings menu.
     "low_power_mode": True,
     "low_power_ui_fps": 8,
+    "low_power_idle_ui_fps": 3,
     "low_power_scan_pause_s": 1.5,
     # Once a network is locked the uplink watch is the job, and a TETRA slot
     # is 14.2 ms. Idling for a second and a half between cycles then costs
@@ -185,7 +186,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.13",
+    "app_version": "0.9.14",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

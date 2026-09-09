@@ -1,4 +1,4 @@
-name: RF Eye 0.9.13 appliance checks
+name: RF Eye 0.9.14 appliance checks
 
 on:
   push:
@@ -82,6 +82,23 @@ jobs:
           # away a working lock.
           grep -q 'def health_carrier' rfeye/tetra_detector.py
           grep -q 'self.sites.health_carrier' rfeye/sdr_backend.py
+          # 0.9.14: leaving demo mode has to give the radio a clean start,
+          # and the close has to happen on the scan thread -- closing a
+          # librtlsdr handle from the UI thread while that thread may be
+          # inside rtlsdr_read_sync() can wedge the V4 on the bus.
+          grep -q 'def _reopen_sdr' rfeye/sdr_backend.py
+          grep -q '_sdr_reopen' rfeye/sdr_backend.py
+          ! grep -q '_close_direct_sdr' rfeye/compact_ui_controls.py rfeye/app.py
+          # STARTING and SCANNING are the scan thread on its way to work, not
+          # a missing dongle.
+          grep -q '"STARTING SCAN"' rfeye/compact_ui_draw.py
+          grep -q 'def _sdr_fault' rfeye/compact_ui_draw.py
+          # The idle frame rate, and the event that keeps it responsive.
+          grep -q 'low_power_idle_ui_fps' rfeye/app.py rfeye/config.py
+          grep -q 'def _ui_busy' rfeye/app.py
+          grep -q 'UI_WAKE_S' rfeye/app.py
+          grep -q 'ui_wake' rfeye/compact_touch.py
+          ! grep -q 'clock.tick' rfeye/app.py
           # 0.9.13: both ends of the brightness slider must be reachable
           # with a finger inside the enclosure. The old 118..298 track put
           # 100% under the bezel and the row topped out around 95%.

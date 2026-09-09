@@ -85,6 +85,11 @@ def install(app):
                             slider_drag=(touching and dirty and getattr(app,'page',None)=='settings' and _in_brightness_row(mapped[1]) and now-last_emit>=0.06)
                             if pending or slider_drag:
                                 app._direct_touch_queue.append((raw_x,raw_y,mapped[0],mapped[1])); last_emit=now
+                                # Cut the idle wait short so a slower idle
+                                # frame rate never costs response time.
+                                app.ui_wake_at=now
+                                wake=getattr(app,'ui_wake',None)
+                                if wake is not None: wake.set()
                             pending=False; dirty=False
             except Exception:
                 if getattr(app,'running',True):

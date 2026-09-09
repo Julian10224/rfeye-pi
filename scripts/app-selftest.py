@@ -358,6 +358,120 @@ def _check_recording_roundtrip(a):
             a.cfg["rf_record_duration_s"] = keep_duration
 
 
+def _check_demo_reopens_sdr():
+    """Leaving demo mode has to give the radio a clean start.
+
+    Demo used to hold the librtlsdr handle it was not reading and, on the way
+    back out, inherit the USB reset counter, its back-off and the run of
+    failures from whatever went wrong before demo was switched on. The panel
+    then said SDR NOT CONNECTED with no way back except restarting the app.
+    The close itself belongs to the scan thread -- closing a handle from the
+    UI thread while the scan thread may be inside rtlsdr_read_sync() is the
+    race stop() already avoids -- so the toggle only raises a request.
+    """
+    b = _REAL_BACKEND(dict(appmod.load_config()))
+    b.sdr = object()
+    b.sdr_path = "CTYPES PERSISTENT"
+    b._usb_resets = 3
+    b._usb_backoff = 60.0
+    b.last_usb_reset = time.time()
+    b.scan_failures = 9
+    b.last_good_scan = time.time()
+
+    assert b._sdr_reopen is False
+    b.set_demo(True)
+    assert b._sdr_reopen is True, "demo must not keep a radio it is not reading"
+    assert b.sdr is not None, "and must not close it from this thread"
+    b._sdr_reopen = False
+    b.set_demo(True)
+    assert b._sdr_reopen is False, "an unchanged setting asks for nothing"
+
+    b.set_demo(False)
+    assert b._sdr_reopen is True
+    # What the scan loop does with the request.
+    b._reopen_sdr()
+    assert b.sdr is None and b.sdr_path == "UNOPENED"
+    assert b._usb_resets == 0 and b._usb_backoff == 0.0
+    assert b.last_usb_reset == 0.0
+    assert b.scan_failures == 0
+    assert b.cfg["demo_mode"] is False
+    assert b.status == "SCANNING"
+
+    # SCANNING is the scan thread on its way to its first dwell, at boot and
+    # for the second after demo goes off. Reporting that as a broken dongle
+    # was the first thing seen on leaving demo.
+    from compact_ui_draw import _network_line, _sdr_fault
+    for state in ("STARTING", "SCANNING"):
+        text, _col = _network_line({}, state)
+        assert text == "STARTING SCAN", (state, text)
+    assert _network_line({}, "NO SDR")[0] == "SDR NOT CONNECTED"
+    assert _network_line({"power_warning": "UNDER-VOLTAGE"},
+                         "NO SDR")[0] == "SDR LOST - USB POWER LOW"
+    # And the debug page separates a dongle that is gone from one that is
+    # present and silent, which need opposite actions.
+    assert _sdr_fault("SDR not on the USB bus") == "not on bus"
+    assert _sdr_fault("librtlsdr read failed: rtlsdr_open failed") == "not on bus"
+    assert _sdr_fault("librtlsdr read failed: read timeout") == "read timeout"
+    assert _sdr_fault("") == ""
+
+
+def _check_idle_frame_rate(a):
+    """The idle rate is only for a screen nobody is looking at.
+
+    Almost all of this appliance's life is the main page with nobody
+    touching it, and drawing it is the largest single load on the Pi. Every
+    reason someone might be watching -- a recent touch, another page, a
+    notice, a recording, the detector changing its mind -- has to hold the
+    active rate, or the saving is bought with response time.
+    """
+    keep_page = a.page
+    keep_wake = a.ui_wake_at
+    keep_mode = a.cfg.get("low_power_mode", True)
+    keep_notice = a.power_notice_open
+    try:
+        a.cfg["low_power_mode"] = True
+        active = int(a.cfg["low_power_ui_fps"])
+        idle = int(a.cfg["low_power_idle_ui_fps"])
+        assert 1 <= idle < active, (idle, active)
+
+        a.page = "main"
+        a.power_notice_open = False
+        a.rf_recording = False
+        a.ui_wake_at = time.monotonic() - appmod.UI_WAKE_S - 1.0
+        assert a._fps() == idle, a._fps()
+
+        a.ui_wake_at = time.monotonic()
+        assert a._fps() == active, "a touch has to bring the rate back at once"
+
+        a.ui_wake_at = time.monotonic() - appmod.UI_WAKE_S - 1.0
+        a.page = "settings"
+        assert a._fps() == active, "a menu is being read"
+        a.page = "main"
+        a.power_notice_open = True
+        assert a._fps() == active, "a notice is waiting to be dismissed"
+        a.power_notice_open = False
+        a.rf_recording = True
+        assert a._fps() == active, "a recording is counting down"
+        a.rf_recording = False
+        assert a._fps() == idle
+
+        # An alert must not have to wait out an idle frame: the change in the
+        # snapshot is itself the wake-up.
+        a.ui_signature = None
+        a._frame()
+        assert a._fps() == active, "a change on screen wakes the loop"
+
+        # Max power is unchanged by any of this.
+        a.cfg["low_power_mode"] = False
+        assert a._fps() == int(a.cfg["ui_fps"])
+    finally:
+        a.cfg["low_power_mode"] = keep_mode
+        a.page = keep_page
+        a.ui_wake_at = keep_wake
+        a.power_notice_open = keep_notice
+        a.rf_recording = False
+
+
 def main():
     _check_config_migration()
 
@@ -530,6 +644,8 @@ def main():
     _check_display_profile_fallback()
     _check_frame_guard(a)
     _check_recording_roundtrip(a)
+    _check_idle_frame_rate(a)
+    _check_demo_reopens_sdr()
 
     a.running=False
     a.backend.stop()

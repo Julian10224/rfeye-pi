@@ -30,10 +30,37 @@ def draw_gear(app,cx,cy,size=42):
     app.ui.blit(icon,icon.get_rect(center=(int(cx),int(cy))))
 
 
+def _sdr_fault(error):
+    """The one word that separates a missing dongle from a silent one.
+
+    "not on bus" is a cable, a port or a supply; "read timeout" is a dongle
+    that is enumerated and has stopped answering. They need opposite actions
+    and the panel used to show neither.
+    """
+    low=str(error or "").lower()
+    if not low:
+        return ""
+    if "not on the usb bus" in low or "open failed" in low:
+        return "not on bus"
+    if "timeout" in low:
+        return "read timeout"
+    if "short read" in low:
+        return "short read"
+    if "no complete fft" in low:
+        return "no samples"
+    return str(error)[:12]
+
+
 def _network_line(snap, status):
     """Headline status: what the detector is actually able to do right now."""
     if status=="DEMO":
         return "SDR DEMO",BLUE_BRIGHT
+    if status in ("STARTING","SCANNING"):
+        # Both mean the scan thread is on its way to the first dwell -- at
+        # boot, and for the second or two after demo is switched off. Calling
+        # that "SDR NOT CONNECTED" accused the hardware of a fault that had
+        # not happened, and it was the first thing seen after leaving demo.
+        return "STARTING SCAN",YELLOW
     if status!="LIVE":
         # A sagging 5 V rail and a broken dongle look identical on screen but
         # need completely different fixes, so say which one it is. This is the
@@ -167,7 +194,11 @@ def draw_debug(app,snap):
           ("Last band pass",(f"{float(snap.get('last_pass_s',0)):.0f} s"
                              if float(snap.get("last_pass_s",0)) else "-")),
           ("Supply",str(snap.get("power_warning") or snap.get("power_history") or "OK")),
-          ("Backend",f"{snap.get('status','?')} {str(snap.get('sdr_path','?'))[:9]}")]
+          # When the radio is unhappy its own words are worth more than the
+          # code path it was opened through.
+          ("Backend",(f"{snap.get('status','?')} {_sdr_fault(snap.get('error'))}"
+                      if _sdr_fault(snap.get("error"))
+                      else f"{snap.get('status','?')} {str(snap.get('sdr_path','?'))[:9]}"))]
     y=64
     for label,value in rows:
         pygame.draw.rect(app.ui,(9,13,18),(8,y,304,25),border_radius=6); app._text(label,16,y+5,app.font_s,DIM)

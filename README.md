@@ -1,6 +1,6 @@
-# RF Eye 0.9.13 for Raspberry Pi
+# RF Eye 0.9.14 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.13 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.14 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.13 appliance path:
+The installer reproduces the working 0.9.14 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.13
+## User interface in 0.9.14
 
 The compact profile contains:
 
@@ -191,7 +191,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.13)
+### How the band is searched (0.9.14)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -451,7 +451,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.13 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.14 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -578,7 +578,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.13**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.14**.
 
 Build the OTA package with:
 
@@ -595,16 +595,42 @@ economical setting.
 
 |  | Max power OFF (default) | Max power ON |
 |---|---|---|
-| UI frame rate | 8 fps | 20 fps |
+| UI frame rate, in use | 8 fps | 20 fps |
+| UI frame rate, idle | 3 fps | 20 fps |
 | Pause between dwells, searching | 1.5 s | none |
 | Pause between dwells, locked | 0.25 s | none |
 | Measured app CPU (Pi 3 B+) | **~39 % of a core** | **~85 %** |
 
 The measurement above was taken on the reference unit over an 8 second average,
-twice each way. Most of that load is the UI, not the detector: every frame
-rotates and rescales a 320x480 surface for the panel, so the frame rate is the
-biggest single lever. The dwell pause is the second one, and it is what lets the
-governor clock back down instead of sitting at full speed indefinitely.
+twice each way, before the idle rate existed. Most of that load is the UI, not
+the detector: every frame redraws the whole page and rotates a 320x480 surface
+for the panel, so the frame rate is the biggest single lever. The dwell pause is
+the second one, and it is what lets the governor clock back down instead of
+sitting at full speed indefinitely.
+
+### The idle frame rate
+
+Since 0.9.14 the economical mode draws the main page at 3 fps rather than 8
+whenever nobody is looking at it. The appliance spends nearly its whole life in
+exactly that state -- main page, no touches, nothing changing -- so this is the
+largest remaining saving that costs nothing. The two measurements above put the
+app at roughly `8 % + 3.8 %` of a core per frame per second, which puts an idle
+unit near **20 %** rather than 39 %; that figure is an extrapolation from those
+two points and not yet a measurement of its own.
+
+The active rate comes back instantly, for four seconds, on any of:
+
+- a touch, including the one that wakes the unit up
+- any page other than the main screen
+- the supply notice being open, or a recording counting down
+- a change the screen would show: status, detector state, the number of locked
+  carriers, an alert, or the under-voltage flag
+
+The last one is what keeps an alert immediate. The wait between frames is an
+event, not a sleep, so the touch thread cuts it short the moment a finger lands
+rather than the UI discovering it up to a third of a second later. A drag
+therefore runs at the full rate, and the fastest rate the appliance ever uses is
+still the floor.
 
 A live under-voltage switches Max power back off by itself and says so on the
 panel, even if the supply notice has already been dismissed once this session.
@@ -668,6 +694,39 @@ vcgencmd get_throttled
 `0x0` is healthy. Bit 0 set means under-voltage right now; bit 16 means it has
 happened since boot. An RTL-SDR draws around 300 mA, so a Pi 3 B+ needs a real
 5 V / 3 A supply with a short, thick cable, or the dongle on a powered hub.
+
+## When the panel says SDR NOT CONNECTED
+
+The headline reports what the scan thread can do right now, and until 0.9.14 it
+was wrong twice over.
+
+`STARTING` and `SCANNING` both mean the scan thread is on its way to its first
+dwell -- at boot, and for the second or two after demo mode is switched off.
+Neither is a fault, and calling both of them `SDR NOT CONNECTED` accused the
+hardware of something that had not happened. They now read `STARTING SCAN`.
+
+Worse, leaving demo mode really could strand the radio. Demo held the librtlsdr
+handle it was not reading, and on the way out inherited the USB reset counter,
+its back-off and the run of failures from before demo was switched on, so a
+dongle that had had one bad moment earlier in the session never got a clean
+attempt. There was no way back except restarting the app. Since 0.9.14 the demo
+toggle asks the scan thread to start the radio again from scratch -- the handle
+is dropped and every counter cleared -- in the same way the Max power row
+already did. The request is deferred to the scan thread on purpose: closing a
+librtlsdr handle from the UI thread while the scan thread may be inside
+`rtlsdr_read_sync()` can wedge the RTL-SDR Blog V4 on the bus.
+
+When the message is real, the Debug page now says which kind of real:
+
+| Backend row | Meaning | Where to look |
+|---|---|---|
+| `NO SDR not on bus` | the dongle is not enumerated at all | cable, port, supply |
+| `NO SDR read timeout` | present on the bus, stopped answering | supply dip, or a wedged dongle |
+| `NO SDR short read` | answering, but not delivering a full dwell | supply, USB contention |
+
+`not on bus` is never a software fault: no userspace program can stop a device
+enumerating. `read timeout` on a unit that also shows the supply warning is the
+5 V rail, which is the failure this appliance sees most.
 
 ## Diagnostics
 

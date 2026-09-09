@@ -29,6 +29,9 @@ YELLOW = (243, 192, 56)
 ORANGE = (243, 128, 32)
 RED = (230, 54, 54)
 
+# How long a touch or a visible change keeps the UI at the active frame rate.
+UI_WAKE_S = 4.0
+
 # A frame that keeps failing is handed back to systemd rather than sat in;
 # see App._guarded_frame.
 FRAME_ERROR_RESTART_FRAMES = 60
@@ -132,6 +135,14 @@ class App:
 
         self.page = "main"
         self.running = True
+        # Idle pacing. The appliance spends almost all of its life on the main
+        # page with nobody touching it, and drawing that page eight times a
+        # second is the largest single load on the Pi. ui_wake lets the touch
+        # thread cut the wait short, so a slower idle rate does not become a
+        # slower response.
+        self.ui_wake = threading.Event()
+        self.ui_wake_at = 0.0
+        self.ui_signature = None
         self.last_beep = 0.0
         # One supply warning per session, shown over whatever page is up and
         # dismissed with a button. Scanning runs in its own thread and is not
@@ -206,22 +217,57 @@ class App:
         except Exception:
             return None
 
+    def _ui_busy(self):
+        """Is anything happening that a slower frame rate would spoil?
+
+        Everything here is a reason a person is either looking at the screen
+        or about to: a recent touch, a page that is not the passive one, a
+        notice waiting to be dismissed, a recording counting down, or the
+        detector changing its mind. Outside those the panel shows the same
+        picture frame after frame.
+        """
+        if time.monotonic() - float(getattr(self, "ui_wake_at", 0.0)) < UI_WAKE_S:
+            return True
+        if self.page != "main":
+            return True
+        if getattr(self, "power_notice_open", False):
+            return True
+        if bool(getattr(self, "rf_recording", False)):
+            return True
+        return False
+
     def _fps(self):
         """Frame rate for this frame, so the low power setting applies at once."""
-        if bool(self.cfg.get("low_power_mode", False)):
-            return max(1, int(self.cfg.get("low_power_ui_fps", 8)))
-        return max(1, int(self.cfg.get("ui_fps", 20)))
+        if not bool(self.cfg.get("low_power_mode", False)):
+            return max(1, int(self.cfg.get("ui_fps", 20)))
+        active = max(1, int(self.cfg.get("low_power_ui_fps", 8)))
+        idle = max(1, int(self.cfg.get("low_power_idle_ui_fps", 3)))
+        if idle >= active or self._ui_busy():
+            return active
+        return idle
 
     def run(self):
-        clock = pygame.time.Clock()
-
         boot_note("ui-loop v%s profile=%s %dx%d" % (
             self.cfg.get("app_version", "?"),
             getattr(self, "display_profile", "default"), self.uw, self.uh))
 
         while self.running:
+            started = time.monotonic()
             self._guarded_frame()
-            clock.tick(self._fps())
+            # Waiting on an event rather than sleeping a fixed slice is what
+            # makes a low idle rate usable: a touch wakes the loop at once
+            # instead of up to a third of a second later. The floor is the
+            # fastest rate the appliance ever runs at, so a drag cannot spin
+            # this into a busy loop.
+            floor = 1.0 / float(max(1, int(self.cfg.get("ui_fps", 20))))
+            target = 1.0 / float(max(1, self._fps()))
+            while self.running:
+                left = target - (time.monotonic() - started)
+                if left <= 0:
+                    break
+                if self.ui_wake.wait(left):
+                    self.ui_wake.clear()
+                    target = floor
 
         boot_note("exit faults=%d streak=%d last=%s" % (
             self.frame_error_count, self.frame_error_streak,
@@ -281,6 +327,15 @@ class App:
             pygame.mouse.set_visible(False)
             self.last_mouse_motion = 0.0
         snap = self.backend.snapshot()
+        # A change the screen would show is a reason to be quick again --
+        # an alert above all, which must not wait out an idle frame.
+        signature = (snap.get("status"), snap.get("detector_state"),
+                     int(snap.get("site_locked_count", 0) or 0),
+                     bool(snap.get("mobile_confirmed")),
+                     bool(snap.get("power_warning")))
+        if signature != self.ui_signature:
+            self.ui_signature = signature
+            self.ui_wake_at = time.monotonic()
         sound_snap = snap
         if self.page == "recording_replay":
             replay_snap = getattr(self, "recording_replay_snapshot", None)
@@ -398,6 +453,7 @@ class App:
 
     def _events(self):
         for e in pygame.event.get():
+            self.ui_wake_at = time.monotonic()
             if e.type == pygame.QUIT:
                 self.running = False
             elif e.type == pygame.KEYDOWN:
