@@ -34,8 +34,16 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 echo "[rtl-sdr] Installing build dependencies..."
-DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y \
-  cmake build-essential pkg-config libusb-1.0-0-dev git >/dev/null
+# Also runnable on its own, without reinstalling the appliance:
+#   curl -fsSL .../scripts/install-rtlsdr-blog.sh | sudo bash
+# so it cannot assume install.sh has just refreshed the package lists.
+DEPS="cmake build-essential pkg-config libusb-1.0-0-dev git"
+if ! DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 \
+     install -y $DEPS >/dev/null 2>&1; then
+  apt-get -o DPkg::Lock::Timeout=300 update >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 \
+    install -y $DEPS >/dev/null
+fi
 
 SRC="$(mktemp -d /tmp/rtlsdr-blog.XXXXXX)"
 cleanup() { rm -rf "$SRC"; }
@@ -78,3 +86,17 @@ fi
 echo "[rtl-sdr] Installed $LIB"
 echo "[rtl-sdr] Models known to this build:"
 strings "$LIB" | grep -a '^Blog V' | sort -u | sed 's/^/           /'
+
+# The running appliance keeps whichever library it opened with. Nudge it, so
+# the person who just ran this does not have to work out why nothing changed.
+for home in /home/*; do
+  user="$(basename "$home")"
+  id -u "$user" >/dev/null 2>&1 || continue
+  uid="$(id -u "$user")"
+  if runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+       systemctl --user is-active rfeye-user.service >/dev/null 2>&1; then
+    echo "[rtl-sdr] Restarting RF Eye for $user so it picks up the new driver"
+    runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+      systemctl --user restart rfeye-user.service || true
+  fi
+done

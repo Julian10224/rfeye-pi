@@ -1,6 +1,6 @@
-# RF Eye 0.9.20 for Raspberry Pi
+# RF Eye 0.9.21 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.20 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.21 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.20 appliance path:
+The installer reproduces the working 0.9.21 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.20
+## User interface in 0.9.21
 
 The compact profile contains:
 
@@ -191,7 +191,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.20)
+### How the band is searched (0.9.21)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -496,7 +496,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.20 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.21 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -623,7 +623,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.20**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.21**.
 
 Build the OTA package with:
 
@@ -887,6 +887,39 @@ dongle (`BLOG librtlsdr.so.0` against `PLAIN librtlsdr.so.0`), because this
 fault has no other symptom.
 
 Skip it with `RFEYE_KEEP_DISTRO_RTLSDR=1` at install time.
+
+### An OTA update cannot fix this
+
+The updater replaces `/opt/rfeye/rfeye` and nothing else, so a unit that took
+0.9.20 through Settings -> Update still has the distro driver and still reads
+an empty band. Either reinstall, or run the driver step on its own:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/scripts/install-rtlsdr-blog.sh | sudo bash
+```
+
+That form is supported deliberately: it refreshes the package lists if the
+dependency install fails, and restarts RF Eye afterwards so the new library is
+picked up without anyone having to work out why nothing changed.
+
+### Confirmed on both reference units
+
+Two Pi 3 B+ on the same supply, same place, same antenna model, same release,
+one carrying a Blog V4 and the other a Blog V4L, both still on the distro
+driver. The V4 held a lock; the V4L found nothing at all. Alternating the two
+libraries on the V4L unit, two rounds over four carriers:
+
+| MHz | Debian 2.0.2 | RTL-SDR Blog |
+|---|---|---|
+| 390.0375 | 1.0 - 1.2 dB, FAIL | **22.3 - 22.9 dB, TETRA** |
+| 390.7375 | 0.6 - 0.7 dB, FAIL | **25.0 - 25.2 dB, TETRA** |
+| 391.1875 | 1.5 - 1.9 dB, FAIL | **25.9 dB, TETRA** |
+| 391.7625 | 1.4 - 2.3 dB, FAIL | **26.2 - 26.3 dB, TETRA** |
+
+Eight failures out of eight against eight TETRA verdicts out of eight, on the
+same dongle and the same air, with `duty 1.00` and an occupied bandwidth of
+21.7 kHz -- four continuously transmitting base station carriers that one
+library simply does not deliver.
 
 ## When the panel says SDR NOT CONNECTED
 
