@@ -246,7 +246,7 @@ class SDRBackend:
         self.alarm=UplinkAlarm(cfg)
         self.detector_state='SEARCHING'
         self.survey_shortlist=[]
-        self._survey_at=0.; self._survey_idx=0
+        self._survey_at=0.; self._survey_idx=0; self._site_maint_idx=0
         self._site_queue=[]; self._sweep_cursor=0.; self._alt_cycle=False
         self._survey_scores=[]
         self._pass_best=None; self._pass_started=0.; self._pass_index=0
@@ -870,21 +870,19 @@ class SDRBackend:
         # putting it behind the queue was trying to achieve.
         reverify=self._reverify_interval(locked)
         if locked and now-self._site_verify_at>=reverify:
-            # Site health: "does this C2000 site still exist?" -- always the
-            # health carrier, every tick, because that is the question the
-            # network lock depends on.
-            health=self.sites.health_carrier(now)
-            health_key=int(round(health['freq_hz'])) if health else None
-            if health:
-                priority.insert(0,health['freq_hz'])
-            # Carrier maintenance: "is this particular downlink still active?"
-            # -- the rest in rotation. Failing this ages one carrier out; it
-            # says nothing about the site.
-            rest=[x['freq_hz'] for x in locked
-                  if int(round(x['freq_hz']))!=health_key]
-            if rest:
-                priority.insert(1 if health else 0,rest[self._survey_idx%len(rest)])
-                self._survey_idx+=1
+            # Every locked carrier takes its turn, evenly. There used to be a
+            # designated "health" carrier that was re-tested on every tick and
+            # whose silence condemned the whole site -- which gave one channel
+            # a veto over every other, and made itself the health carrier for
+            # ever by being the one that got re-tested. A site that was plainly
+            # still there came back with nothing locked because of it.
+            #
+            # Nothing needs designating now: each carrier keeps its own lock
+            # and loses it on its own evidence, and _reverify_interval already
+            # shortens the tick as more carriers are found so a full turn stays
+            # well inside site_lock_stale_s.
+            priority.insert(0,locked[self._site_maint_idx%len(locked)]['freq_hz'])
+            self._site_maint_idx+=1
             self._site_verify_at=now
 
         if not self._site_queue:
@@ -934,17 +932,6 @@ class SDRBackend:
             # idle, not disproved -- traffic carriers are idle most of the time.
             silent=(not r.ok and r.failed()==['snr'])
             self.sites.observe(r.freq_hz,r.ok,r.quality,now,silent=silent)
-
-        # Only the health carrier can answer whether the site is still there.
-        # A band-pass dwell across empty spectrum proves nothing, and neither
-        # does a traffic carrier that happens to be idle -- it is idle most of
-        # the time by design, and letting that count cost working locks.
-        health=self.sites.health_carrier(now)
-        if health is not None:
-            key=int(round(health['freq_hz']))
-            seen=[r for r in results if int(round(r.freq_hz))==key]
-            if seen and self.sites.note_round(bool(seen[0].ok),now):
-                self.alarm.reset()
 
         covered={int(round(x)) for x in self.dwell_channels}
         if covered:

@@ -1,6 +1,6 @@
-# RF Eye 0.9.23 for Raspberry Pi
+# RF Eye 0.9.24 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.23 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.24 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.23 appliance path:
+The installer reproduces the working 0.9.24 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.23
+## User interface in 0.9.24
 
 The compact profile contains:
 
@@ -193,7 +193,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.23)
+### How the band is searched (0.9.24)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -282,31 +282,44 @@ what gets swept up alongside them.
 
 ### Which carrier decides the site is gone
 
-Not every locked carrier can answer "does this C2000 site still exist?". ETSI
-requires the *main* carrier to transmit continuously; traffic carriers are
-discontinuous by design and idle most of the time. Judging the site by whichever
-carrier happened to come round in the rotation meant three quiet traffic
-carriers in a row read as a site that had disappeared, and threw away a working
-lock -- the same silence that the per-carrier logic correctly declines to hold
-against the carrier itself.
+None of them, on its own.
 
-The main carrier is not announced anywhere the detector can read without
-demodulating the network, so it is inferred: of the locked carriers, the one
-that has verified successfully the most times has been on the air most
-consistently. That one is the **health carrier**, and it alone feeds the
-site-lost counter. It is re-tested on every reverify tick; the others rotate
-behind it as maintenance, where a failure ages out that one carrier and says
-nothing about the site.
+0.9.12 designated a "health" carrier -- of the locked carriers, the one with
+the most lifetime successes -- re-tested it on every tick, and dropped the
+whole site after three silent re-tests of that one channel. It was meant to
+separate "this carrier is idle" from "this receiver has gone deaf", which no
+single-carrier measurement can do.
 
-Pulling the antenna off still drops the lock, because the health carrier goes
-silent with everything else.
+It gave one channel a veto over every other, and it was self-selecting: the
+carrier being re-tested every tick was the carrier accumulating successes
+fastest, so it kept the job. Worse, `save()` wrote `ok_total` and `_load()` did
+not read it back, so after every restart every carrier scored zero and the
+choice fell through to `quality` -- signal strength. A loud traffic carrier
+could become the health carrier, and traffic carriers are idle most of the time
+by design. Three of those idle re-tests set `hits = 0` on every entry.
 
-Each locked carrier also has to come round again well inside
-`site_lock_stale_s`, or it ages out while perfectly healthy. At a fixed 60 s
-tick, ten carriers took 600 s for a full rotation -- exactly the stale limit,
-before any scan work or low-power pause. The tick now shortens as more carriers
-are found, so a full rotation stays at half the stale window whatever the site
-size.
+Seen in the field at 0.9.23:
+
+```
+pass=3 ch=209 phy=24 locked=0 cand=7 best=392.9875MHz snr=37.6 TETRA
+```
+
+Twenty-four channels through the full waveform test, the best at 37.6 dB, and
+nothing locked -- every proven carrier demoted at once and the site rebuilt
+from scratch.
+
+Since 0.9.24 there is no designated carrier. Locked carriers rotate evenly
+through maintenance, each keeps its own lock, and each loses it on its own
+evidence: `site_unlock_misses` failures, or `site_lock_stale_s` without a
+success. `_reverify_interval` already shortens the tick as more carriers are
+found, so a full turn stays well inside the stale window.
+
+The liveness condition the silence exemption needs is still there, but it is
+collective. `SiteRegistry.heard_recently` asks whether *any* proven carrier has
+verified within `site_silence_window_s` (180 s). One quiet carrier is a quiet
+carrier; silence everywhere at once is a deaf receiver, and only then does an
+idle channel start counting misses against itself. `ok_total` now survives a
+restart as well, so what the state file records is what comes back.
 
 ### One lock is not the whole site
 
@@ -498,7 +511,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.23 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.24 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -625,7 +638,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.23**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.24**.
 
 Build the OTA package with:
 

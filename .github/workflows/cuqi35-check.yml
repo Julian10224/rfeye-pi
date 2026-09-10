@@ -1,4 +1,4 @@
-name: RF Eye 0.9.23 appliance checks
+name: RF Eye 0.9.24 appliance checks
 
 on:
   push:
@@ -80,8 +80,6 @@ jobs:
           # Site health is one carrier's question, not every carrier's: a
           # traffic carrier is idle by design and its silence must not throw
           # away a working lock.
-          grep -q 'def health_carrier' rfeye/tetra_detector.py
-          grep -q 'self.sites.health_carrier' rfeye/sdr_backend.py
           # 0.9.15: dimming is not a power saving on this panel -- there is
           # no backlight device -- so it must at least not rebuild a
           # full-screen surface on every frame.
@@ -173,6 +171,16 @@ jobs:
           grep -q 'def draw_demo_confirm' rfeye/compact_ui_draw.py
           grep -q '_draw_demo_confirm' rfeye/app.py rfeye/compact_display_patch.py
           grep -q 'demo_confirm_opened' rfeye/compact_ui_controls.py
+          # 0.9.24: no single carrier decides whether the site exists.
+          # One designated carrier's silence used to set hits=0 on every
+          # entry, wiping a site that 24 verified channels said was there.
+          ! grep -q 'note_round\|network_alive\|health_carrier\|lost_rounds' rfeye/tetra_detector.py rfeye/sdr_backend.py
+          grep -q 'def heard_recently' rfeye/tetra_detector.py
+          grep -q 'site_silence_window_s' rfeye/config.py rfeye/tetra_detector.py
+          grep -q '_site_maint_idx' rfeye/sdr_backend.py
+          grep -q "'ok_total': int" rfeye/tetra_detector.py
+          grep -q 'def check_one_quiet_carrier_costs_nothing' scripts/detector-selftest.py
+          grep -q 'def check_ok_total_survives_a_restart' scripts/detector-selftest.py
           grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
           grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py
           grep -q 'driver_knows_model' rfeye/sdr_backend.py rfeye/compact_ui_draw.py
@@ -215,7 +223,6 @@ jobs:
           # receiver kept reporting a locked network for an hour.
           grep -q 'def note_round' rfeye/tetra_detector.py
           grep -q 'def network_alive' rfeye/tetra_detector.py
-          grep -q 'self.sites.note_round' rfeye/sdr_backend.py
           grep -q 'rfeye-rf-series-v8' rfeye/compact_ui_controls.py
           # The USB recovery discipline of 0.9.1. Resetting on any error text
           # containing 'read failed' also reset when the dongle was simply
@@ -323,7 +330,7 @@ jobs:
           assert c['site_rescan_s']==300.0
           assert c['low_power_locked_pause_s']==0.25
           assert 'display_sweep_interval' not in c
-          assert c['site_lost_rounds']==3
+          assert c['site_silence_window_s']==180.0
           assert c['site_lock_stale_s']==600.0
           assert c['site_state_persist'] is True
           assert c['survey_min_snr_db']==6.0

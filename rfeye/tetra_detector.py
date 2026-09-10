@@ -73,47 +73,24 @@ class SiteRegistry:
         self.cfg = cfg
         self.entries = {}
         self.loaded_from_disk = False
-        # Consecutive rounds in which a locked carrier was re-tested and none
-        # of them verified. This is the difference between "that carrier is
-        # idle" and "this receiver has stopped hearing anything", which no
-        # single-carrier measurement can tell apart.
-        self.lost_rounds = 0
         self._load()
 
-    def network_alive(self):
-        """Has anything verified recently, anywhere on the locked site?"""
-        return self.lost_rounds == 0
+    def heard_recently(self, now=None):
+        """Has *any* proven carrier verified lately?
 
-    def note_round(self, health_ok, now=None):
-        """Record what the health carrier did when it was last re-tested.
-
-        A base station's main carrier is continuous by definition, so a health
-        carrier that produces nothing is not a quiet site -- it is a receiver
-        that has lost it. Without this, pulling the antenna off left the
-        display reporting a locked network for the best part of an hour,
-        because every channel then failed only on SNR and each carrier's
-        silence was individually excusable.
-
-        Only the health carrier feeds this. A traffic carrier is idle most of
-        the time by design, and counting its silence here meant three quiet
-        traffic carriers in a row could throw away a working lock -- the same
-        silence that ``observe`` correctly declines to hold against the
-        carrier itself.
+        The liveness condition behind the silence exemption in ``observe``,
+        and it has to be collective. Hanging it on one designated carrier gave
+        that channel a veto over every other: three quiet re-tests of it set
+        ``hits = 0`` on all of them, and a site that was plainly still there --
+        24 channels through the full waveform test, the best at 37.6 dB -- came
+        back reporting nothing locked and everything demoted to a candidate.
+        Silence is evidence of a deaf receiver only when it is everywhere at
+        once; one quiet carrier is just a quiet carrier.
         """
         now = time.time() if now is None else float(now)
-        if health_ok:
-            self.lost_rounds = 0
-            return False
-        self.lost_rounds += 1
-        if self.lost_rounds < max(1, int(self.cfg.get('site_lost_rounds', 3))):
-            return False
-        # The site is gone. Drop the locks rather than letting them age out.
-        for e in self.entries.values():
-            e['hits'] = 0
-            e['misses'] = 0
-        self.lost_rounds = 0
-        self.save()
-        return True
+        window = max(30.0, float(self.cfg.get('site_silence_window_s', 180.0)))
+        return any(now - float(e['last_ok']) <= window
+                   for e in self.entries.values() if int(e['hits']) > 0)
 
     # -- persistence -------------------------------------------------------
     def _path(self):
@@ -148,6 +125,10 @@ class SiteRegistry:
                     'quality': float(v.get('quality', 0.0)),
                     'last_ok': last,
                     'first_seen': float(v.get('first_seen', last)),
+                    # save() writes this; not reading it back meant every
+                    # carrier came out of a restart with a lifetime score of
+                    # zero, so anything ranking on it ranked on nothing.
+                    'ok_total': int(v.get('ok_total', 0)),
                 }
             if not out:
                 return False
@@ -188,7 +169,7 @@ class SiteRegistry:
         That excuse only holds while the receiver is demonstrably still
         hearing the site. Once nothing verifies anywhere, silence stops being
         evidence of an idle carrier and becomes evidence of a deaf receiver,
-        so the exemption is withdrawn -- see ``note_round``.
+        so the exemption is withdrawn -- see ``heard_recently``.
         """
         now = time.time() if now is None else float(now)
         f = int(round(float(freq_hz)))
@@ -213,7 +194,7 @@ class SiteRegistry:
             # than how it is doing this minute.
             e['ok_total'] = int(e.get('ok_total', 0)) + 1
             e['quality'] = float(e['quality'] * 0.6 + float(quality) * 0.4)
-        elif silent and int(e['hits']) > 0 and self.network_alive():
+        elif silent and int(e['hits']) > 0 and self.heard_recently(now):
             # Known carrier, nothing on air, and the site is still audible
             # elsewhere: no information either way.
             return e
@@ -251,30 +232,6 @@ class SiteRegistry:
                for f, e in self.entries.items() if int(e['hits']) < need]
         out.sort(key=lambda x: (x['hits'], x['last_ok']), reverse=True)
         return out
-
-    def health_carrier(self, now=None):
-        """The locked carrier that decides whether this site still exists.
-
-        ETSI EN 300 392-2 requires a site's *main* carrier to transmit
-        continuously; its traffic carriers are discontinuous by design and are
-        idle most of the time. Judging the site by whichever carrier happened
-        to come round in the rotation therefore let three quiet traffic
-        carriers in a row read as a site that had disappeared, and dropped a
-        perfectly good lock.
-
-        The main carrier is not announced anywhere the detector can read
-        without demodulating the network, so it is inferred: of the locked
-        carriers, the one that has verified successfully the most times is the
-        one that has been on the air most consistently. That is the carrier
-        site health is judged on; the rest are maintained separately.
-        """
-        locked = self.locked(now)
-        if not locked:
-            return None
-        def rank(entry):
-            e = self.entries.get(int(round(entry['freq_hz'])), {})
-            return (int(e.get('ok_total', 0)), float(entry.get('quality', 0.0)))
-        return max(locked, key=rank)
 
     def uplink_partners(self, now=None):
         """Uplink frequencies to watch, from the locked downlink carriers."""

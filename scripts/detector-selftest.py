@@ -236,49 +236,89 @@ def check_rescan_while_locked():
             b.running = False
 
 
-def check_health_carrier():
-    """A quiet traffic carrier must not throw away a working lock.
+def check_one_quiet_carrier_costs_nothing():
+    """A single quiet carrier may not cost the other carriers their locks.
 
-    ETSI requires only the *main* carrier to be continuous; traffic carriers
-    are idle most of the time by design. Judging the site by whichever carrier
-    came round in the rotation meant three quiet ones in a row read as a site
-    that had gone, and dropped every lock -- the same silence that observe()
-    correctly refuses to hold against the carrier itself.
+    Until 0.9.24 one designated carrier decided whether the site existed, and
+    three quiet re-tests of it set ``hits = 0`` on every entry. Reported from
+    the field and visible in the log: a pass with 24 channels through the full
+    waveform test, the best at 37.6 dB TETRA, coming out as locked=0 cand=7 --
+    every proven carrier demoted at once and the whole site rebuilt from
+    scratch.
+
+    Silence is evidence of a deaf receiver only when it is everywhere. One
+    carrier going quiet is a traffic carrier being a traffic carrier.
     """
-    print("\n13. site health rests on one carrier")
+    print(chr(10) + "13. one quiet carrier costs the others nothing")
     from tetra_detector import SiteRegistry
     with tempfile.TemporaryDirectory() as d:
         os.environ["RFEYE_SITE_STATE"] = os.path.join(d, "sites.json")
-        cfg = dict(DEFAULTS)
-        reg = SiteRegistry(cfg)
-        now = time.time()
-        main_c, traffic = int(DOWNLINKS[0]), int(DOWNLINKS[1])
-        reg.entries[main_c] = {"hits": 9, "misses": 0, "quality": 0.7,
-                               "last_ok": now, "first_seen": now, "ok_total": 40}
-        reg.entries[traffic] = {"hits": 9, "misses": 0, "quality": 0.9,
-                                "last_ok": now, "first_seen": now, "ok_total": 3}
-        health = reg.health_carrier(now)
-        check("picks the most consistently present carrier, not the loudest",
-              health is not None and int(health["freq_hz"]) == main_c,
-              "%.4f MHz (quality favoured %.4f)" % (
-                  (health["freq_hz"] if health else 0) / 1e6, traffic / 1e6))
+        try:
+            cfg = dict(DEFAULTS)
+            cfg["site_silence_window_s"] = 180.0
+            reg = SiteRegistry(cfg)
+            now = time.time()
+            for f in (391_212_500.0, 391_237_500.0, 391_262_500.0):
+                for _ in range(4):
+                    reg.observe(f, True, 0.7, now)
+            assert len(reg.locked(now)) == 3, "test setup: three locked"
 
-        # Round after round of the traffic carrier being idle: the site stands.
-        for _ in range(6):
-            reg.observe(traffic, False, 0.0, now, silent=True)
-        check("a silent traffic carrier never reaches the site counter",
-              reg.lost_rounds == 0 and len(reg.locked(now)) == 2,
-              "lost_rounds=%d locked=%d" % (reg.lost_rounds, len(reg.locked(now))))
+            # One of them goes quiet for round after round. The others keep
+            # verifying, so the receiver is demonstrably fine.
+            quiet = 391_262_500.0
+            for i in range(8):
+                t = now + 10.0 * (i + 1)
+                reg.observe(quiet, False, 0.0, t, silent=True)
+                for f in (391_212_500.0, 391_237_500.0):
+                    reg.observe(f, True, 0.7, t)
+            end = now + 80.0
+            check("the carriers that are still heard keep their locks",
+                  len(reg.locked(end)) >= 2,
+                  "%d of 3 still locked" % len(reg.locked(end)))
+            check("and the quiet one is not held against itself either",
+                  reg.entries[int(quiet)]["hits"] > 0,
+                  "hits=%d" % reg.entries[int(quiet)]["hits"])
 
-        # The health carrier going quiet is a different matter entirely.
-        dropped = False
-        for _ in range(int(cfg["site_lost_rounds"])):
-            dropped = reg.note_round(False, now) or dropped
-        check("the health carrier going quiet does drop the site",
-              dropped and not reg.locked(now),
-              "locked=%d after %d silent rounds" % (
-                  len(reg.locked(now)), int(cfg["site_lost_rounds"])))
-    os.environ.pop("RFEYE_SITE_STATE", None)
+            # Now the receiver really does go deaf: nothing verifies anywhere.
+            # Past the silence window the excuse lapses and misses count.
+            deaf = end + float(cfg["site_silence_window_s"]) + 10.0
+            assert not reg.heard_recently(deaf), "nothing may still count as heard"
+            for i in range(int(cfg["site_unlock_misses"]) + 1):
+                for f in (391_212_500.0, 391_237_500.0, 391_262_500.0):
+                    reg.observe(f, False, 0.0, deaf + i, silent=True)
+            check("but silence everywhere at once does drop the site",
+                  len(reg.locked(deaf + 10.0)) == 0,
+                  "%d still locked" % len(reg.locked(deaf + 10.0)))
+        finally:
+            os.environ.pop("RFEYE_SITE_STATE", None)
+
+
+def check_ok_total_survives_a_restart():
+    """save() wrote the lifetime score; _load() threw it away.
+
+    Every carrier therefore came out of a restart with ok_total = 0, so
+    anything ranking on it ranked on nothing at all.
+    """
+    print(chr(10) + "13b. the state file round-trips")
+    from tetra_detector import SiteRegistry
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["RFEYE_SITE_STATE"] = os.path.join(d, "sites.json")
+        try:
+            cfg = dict(DEFAULTS)
+            reg = SiteRegistry(cfg)
+            now = time.time()
+            for _ in range(5):
+                reg.observe(391_212_500.0, True, 0.8, now)
+            reg.save()
+            before = reg.entries[391_212_500]["ok_total"]
+            assert before == 5, before
+            again = SiteRegistry(cfg)
+            check("ok_total survives a restart",
+                  again.entries[391_212_500].get("ok_total") == before,
+                  "%r after reload, %d before"
+                  % (again.entries[391_212_500].get("ok_total"), before))
+        finally:
+            os.environ.pop("RFEYE_SITE_STATE", None)
 
 
 def check_rescan_with_candidates():
@@ -506,7 +546,11 @@ def main():
     air = FakeAir(downlinks=DOWNLINKS)
     log = scenario("9. antenna removed after the network is locked",
                    air, cycles=34, at={12: air.silence},
-                   site_reverify_s=0.0, site_lost_rounds=3)
+                   # The lock is now lost by ageing rather than by one
+                   # carrier's verdict, so the windows have to be short enough
+                   # to expire inside a test that runs in wall-clock seconds.
+                   site_reverify_s=0.0, site_silence_window_s=30.0,
+                   site_lock_stale_s=60.0)
     before = [s for s in log[:12] if s["site_locked_count"]]
     after = log[12:]
     check("was locked before the antenna came off", bool(before),
@@ -539,7 +583,8 @@ def main():
 
     check_queue_order()
     check_rescan_while_locked()
-    check_health_carrier()
+    check_one_quiet_carrier_costs_nothing()
+    check_ok_total_survives_a_restart()
     check_rescan_with_candidates()
     check_candidate_does_not_starve_the_pass()
 

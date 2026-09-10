@@ -124,7 +124,10 @@ DEFAULTS = {
     # runs several carriers and each one carries its own uplink partner, so a
     # single locked carrier watches a single uplink channel.
     "site_rescan_s": 300.0,
-    "site_lost_rounds": 3,
+    # How long silence everywhere at once stops being an idle carrier and
+    # starts being a deaf receiver. Collective on purpose: see
+    # SiteRegistry.heard_recently.
+    "site_silence_window_s": 180.0,
     "site_state_persist": True,
 
     # Uplink alarm smoothing. Everything reaching this has already passed the
@@ -187,7 +190,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.23",
+    "app_version": "0.9.24",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
