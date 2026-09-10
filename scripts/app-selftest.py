@@ -573,6 +573,10 @@ def _check_power_notice_countdown(a):
         left = a._power_notice_left()
         limit = float(a.cfg.get("power_notice_timeout_s", appmod.POWER_NOTICE_TIMEOUT_S))
         assert limit - 1.0 <= left <= limit, (left, limit)
+        # It has to open on the full number. Rounded down it opened on 29,
+        # which is not what a countdown from 30 looks like.
+        import math as _math
+        assert _math.ceil(left) == int(limit), _math.ceil(left)
 
         # Halfway through it is still up and still counting.
         a.power_notice_at = time.monotonic() - (limit / 2.0)

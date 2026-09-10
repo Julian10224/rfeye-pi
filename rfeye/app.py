@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import math
 import os
 import time
 import threading
@@ -577,7 +578,10 @@ class App:
         pygame.draw.rect(self.ui, BLUE_BRIGHT, btn, 1, border_radius=9)
         # The count is on the button, not beside it: it is the same promise --
         # this goes away, either because you said so or because it ran out.
-        self._text("BEGREPEN (%d)" % int(self._power_notice_left()),
+        # Rounded up, so it opens on the full 30 rather than on 29; reaching
+        # zero and the notice closing are the same moment.
+        left = self._power_notice_left()
+        self._text("BEGREPEN (%d)" % math.ceil(left),
                    btn.centerx, btn.centery, self.font_m, WHITE, center=True)
 
     def _power_notice_tap(self, x, y):
