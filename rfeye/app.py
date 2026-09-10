@@ -32,6 +32,11 @@ RED = (230, 54, 54)
 # How long a touch or a visible change keeps the UI at the active frame rate.
 UI_WAKE_S = 4.0
 
+# The supply notice closes itself. It reports something the user cannot do
+# anything about from the passenger seat, and a modal left standing over a
+# detector in a moving car is worse than the warning is useful.
+POWER_NOTICE_TIMEOUT_S = 30.0
+
 # A frame that keeps failing is handed back to systemd rather than sat in;
 # see App._guarded_frame.
 FRAME_ERROR_RESTART_FRAMES = 60
@@ -153,6 +158,7 @@ class App:
         self.power_notice_open = False
         self.power_notice_done = False
         self.power_notice_lines = []
+        self.power_notice_at = 0.0
         # A frame that raises must not be able to take the appliance down.
         self.frame_error = None
         self.frame_error_logged = ""
@@ -360,6 +366,8 @@ class App:
             self._draw_calibration()
         elif self.page == "record_confirm":
             self._draw_record_confirm()
+        elif self.page == "demo_confirm":
+            self._draw_demo_confirm()
         elif self.page == "recordings":
             self._draw_recordings()
         elif self.page == "recording_detail":
@@ -505,6 +513,9 @@ class App:
         the notice comes back to say so even if it has already been dismissed
         once this session.
         """
+        if self.power_notice_open and self._power_notice_left() <= 0.0:
+            self.power_notice_open = False
+            self.power_notice_done = True
         if not snap.get("power_warning"):
             return
         reverted = False
@@ -526,6 +537,13 @@ class App:
             else "Scanning continues in the background",
         ]
         self.power_notice_open = True
+        self.power_notice_at = time.monotonic()
+
+    def _power_notice_left(self):
+        """Seconds still on the clock, never below zero."""
+        limit = max(1.0, float(self.cfg.get("power_notice_timeout_s",
+                                            POWER_NOTICE_TIMEOUT_S)))
+        return max(0.0, limit - (time.monotonic() - float(self.power_notice_at)))
 
     def _power_notice_rect(self):
         w = int(self.uw * 0.88)
@@ -557,8 +575,10 @@ class App:
         btn = self._power_notice_button()
         pygame.draw.rect(self.ui, (0, 96, 142), btn, border_radius=9)
         pygame.draw.rect(self.ui, BLUE_BRIGHT, btn, 1, border_radius=9)
-        self._text("BEGREPEN", btn.centerx, btn.centery, self.font_m, WHITE,
-                   center=True)
+        # The count is on the button, not beside it: it is the same promise --
+        # this goes away, either because you said so or because it ran out.
+        self._text("BEGREPEN (%d)" % int(self._power_notice_left()),
+                   btn.centerx, btn.centery, self.font_m, WHITE, center=True)
 
     def _power_notice_tap(self, x, y):
         """Swallow the tap while the notice is up; return True if handled."""

@@ -371,6 +371,32 @@ def draw_record_confirm(app):
     app._text("JA",160,388,app.font_l,WHITE,center=True)
     app._text("Opname starten",160,421,app.font_s,WHITE,center=True)
 
+def draw_demo_confirm(app):
+    """Ask before switching demo on -- and only before switching it on.
+
+    Demo is the first row in Settings, one tap away from the gear, and it
+    replaces the whole display with synthetic traffic. Catching it by accident
+    means the appliance sits there inventing signals while a real drive goes
+    unwatched. Switching it back off needs no ceremony: that direction can only
+    make the display more honest.
+
+    Same layout as the recording dialog on purpose -- NEE is the large upper
+    button and the default for every tap outside the separated lower JA, which
+    is what makes it safe on a resistive panel with imperfect calibration.
+    """
+    import pygame
+    app.ui.fill(BG)
+    app._text("DEMO MODUS",160,54,app.font_l,YELLOW,center=True)
+    app._text("Weet je het zeker?",160,112,app.font_m,WHITE,center=True)
+    app._text("Het scherm toont dan verzonnen signalen.",160,151,app.font_s,DIM,center=True)
+    app._text("Er wordt niet meer naar C2000 geluisterd.",160,177,app.font_s,DIM,center=True)
+    pygame.draw.rect(app.ui,(34,39,46),(12,215,296,112),border_radius=16)
+    pygame.draw.rect(app.ui,(96,74,12),(12,350,296,105),border_radius=16)
+    app._text("NEE",160,258,app.font_l,WHITE,center=True)
+    app._text("Annuleren",160,292,app.font_s,DIM,center=True)
+    app._text("JA",160,388,app.font_l,WHITE,center=True)
+    app._text("Demo aanzetten",160,421,app.font_s,WHITE,center=True)
+
 def draw_calibration(app):
     import pygame
     from compact_ui_controls import CALIBRATION_TARGETS

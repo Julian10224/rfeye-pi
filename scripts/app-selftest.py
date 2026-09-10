@@ -552,6 +552,119 @@ def _check_driver_selection():
             os.environ["RFEYE_RTLSDR_LIB"] = keep
 
 
+def _check_power_notice_countdown(a):
+    """The notice closes itself, and says how long that will take.
+
+    It reports something nobody can act on from the passenger seat, so a modal
+    left standing over a detector in a moving car is worse than the warning is
+    worth. The count sits on the button because it is the same promise: this
+    goes away, either because you said so or because it ran out.
+    """
+    keep_open = a.power_notice_open
+    keep_done = a.power_notice_done
+    keep_at = a.power_notice_at
+    keep_lines = list(a.power_notice_lines)
+    try:
+        a.power_notice_done = False
+        a.power_notice_open = False
+        a._power_notice_update({"power_warning": "UNDER-VOLTAGE",
+                                "power_detail": "core 1.2563V, throttled 0x50005"})
+        assert a.power_notice_open is True
+        left = a._power_notice_left()
+        limit = float(a.cfg.get("power_notice_timeout_s", appmod.POWER_NOTICE_TIMEOUT_S))
+        assert limit - 1.0 <= left <= limit, (left, limit)
+
+        # Halfway through it is still up and still counting.
+        a.power_notice_at = time.monotonic() - (limit / 2.0)
+        a._power_notice_update({"power_warning": "UNDER-VOLTAGE"})
+        assert a.power_notice_open is True, "it may not close early"
+        half = a._power_notice_left()
+        assert 0 < half < limit, half
+        assert int(half) < int(left), "the number has to move"
+
+        # Run the clock out. It closes even though the rail is still sagging,
+        # and it stays closed.
+        a.power_notice_at = time.monotonic() - (limit + 0.5)
+        a._power_notice_update({"power_warning": "UNDER-VOLTAGE"})
+        assert a.power_notice_open is False, "the clock has to close it"
+        assert a.power_notice_done is True
+        assert a._power_notice_left() == 0.0
+        a._power_notice_update({"power_warning": "UNDER-VOLTAGE"})
+        assert a.power_notice_open is False, "and it must not come straight back"
+
+        # A tap still closes it at once, whatever the clock says.
+        a.power_notice_done = False
+        a.power_notice_open = False
+        a._power_notice_update({"power_warning": "UNDER-VOLTAGE"})
+        assert a.power_notice_open is True
+        btn = a._power_notice_button()
+        assert a._power_notice_tap(btn.centerx, btn.centery) is True
+        assert a.power_notice_open is False and a.power_notice_done is True
+    finally:
+        a.power_notice_open = keep_open
+        a.power_notice_done = keep_done
+        a.power_notice_at = keep_at
+        a.power_notice_lines = keep_lines
+
+
+def _check_demo_needs_confirming(a):
+    """Switching demo ON asks; switching it OFF does not.
+
+    Demo is the first row in Settings, one tap from the gear, and it replaces
+    the display with synthetic traffic -- caught by accident it means the
+    appliance sits inventing signals while a real drive goes unwatched. The
+    other direction can only make the display more honest, so it stays a
+    single tap.
+    """
+    from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_HEIGHT
+    rows = ["demo_mode", "brightness", "low_power", "record_rf", "recordings",
+            "wifi", "update", "debug"]
+    demo_y = SETTINGS_TOP + rows.index("demo_mode") * SETTINGS_STEP + SETTINGS_HEIGHT // 2
+    keep = a.cfg.get("demo_mode", False)
+    try:
+        # OFF -> asks first, and does not switch anything yet.
+        a.cfg["demo_mode"] = False
+        a.page = "settings"
+        time.sleep(0.15)
+        a._tap(40, demo_y)
+        assert a.page == "demo_confirm", a.page
+        assert a.cfg.get("demo_mode") is False, "nothing may change before the answer"
+
+        # NEE goes back and leaves it alone.
+        a.demo_confirm_opened = time.monotonic() - 1.0
+        time.sleep(0.15)
+        a._tap(160, 260)
+        assert a.page == "settings", a.page
+        assert a.cfg.get("demo_mode") is False
+
+        # The opening tap cannot also answer the question.
+        time.sleep(0.15)
+        a._tap(40, demo_y)
+        assert a.page == "demo_confirm"
+        a._last_compact_tap = 0.0
+        a._tap(160, 400)
+        assert a.page == "demo_confirm", "the opening press may not confirm it"
+        assert a.cfg.get("demo_mode") is False
+
+        # JA switches it on.
+        a.demo_confirm_opened = time.monotonic() - 1.0
+        time.sleep(0.15)
+        a._tap(160, 400)
+        assert a.cfg.get("demo_mode") is True, "JA has to switch it on"
+        assert a.page == "main", a.page
+
+        # And switching it off again asks nothing at all.
+        a.page = "settings"
+        time.sleep(0.15)
+        a._tap(40, demo_y)
+        assert a.cfg.get("demo_mode") is False, "off is one tap"
+        assert a.page == "main", a.page
+    finally:
+        a.cfg["demo_mode"] = keep
+        a.backend.set_demo(bool(keep))
+        a.page = "main"
+
+
 def main():
     _check_config_migration()
 
@@ -728,6 +841,8 @@ def main():
     _check_dim_overlay_cached(a)
     _check_demo_reopens_sdr()
     _check_driver_selection()
+    _check_power_notice_countdown(a)
+    _check_demo_needs_confirming(a)
 
     a.running=False
     a.backend.stop()

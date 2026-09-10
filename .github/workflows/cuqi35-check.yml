@@ -1,4 +1,4 @@
-name: RF Eye 0.9.22 appliance checks
+name: RF Eye 0.9.23 appliance checks
 
 on:
   push:
@@ -164,6 +164,15 @@ jobs:
           # not take, because the symptom is an empty band and nothing else.
           grep -q 'RTL-SDR Blog driver is NOT installed' install-cuqi35.sh
           grep -q 'install-rtlsdr-blog.sh | sudo bash' install-cuqi35.sh
+          # 0.9.23: the supply notice counts itself out, and demo asks
+          # before it is switched on but not before it is switched off.
+          grep -q 'POWER_NOTICE_TIMEOUT_S' rfeye/app.py
+          grep -q 'def _power_notice_left' rfeye/app.py
+          grep -q 'BEGREPEN (%d)' rfeye/app.py
+          grep -q 'power_notice_timeout_s' rfeye/config.py
+          grep -q 'def draw_demo_confirm' rfeye/compact_ui_draw.py
+          grep -q '_draw_demo_confirm' rfeye/app.py rfeye/compact_display_patch.py
+          grep -q 'demo_confirm_opened' rfeye/compact_ui_controls.py
           grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
           grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py
           grep -q 'driver_knows_model' rfeye/sdr_backend.py rfeye/compact_ui_draw.py

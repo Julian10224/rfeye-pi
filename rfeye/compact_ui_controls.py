@@ -410,7 +410,13 @@ def tap(app, x, y):
         if not 0 <= idx < min(SETTINGS_COUNT, len(keys)): return
         key = keys[idx]
         if key == "demo_mode":
-            app._toggle_demo(); app.page = "main"
+            # Only switching it ON asks. Switching it off can only make the
+            # display more honest, and a confirmation there would just be one
+            # more tap between someone and a working detector.
+            if app.cfg.get("demo_mode"):
+                app._toggle_demo(); app.page = "main"
+            else:
+                app.demo_confirm_opened=time.monotonic(); app.page="demo_confirm"
         elif key == "brightness":
             if x >= BRIGHT_SLIDER_X0-10:
                 lo,hi,step=0.4,1.0,0.05
@@ -475,6 +481,19 @@ def tap(app, x, y):
         if y < 62 or y >= 408:
             _stop_recording_replay(app)
             app.page="recording_detail"
+        return
+
+    if app.page == "demo_confirm":
+        # Same guard as the recording dialog: ignore the opening tap for a
+        # moment so one press on a noisy resistive panel cannot both open and
+        # confirm.
+        if now-float(getattr(app,"demo_confirm_opened",0.0)) < 0.35: return
+        if 350 <= y <= 455:
+            if not app.cfg.get("demo_mode"):
+                app._toggle_demo()
+            app.page="main"
+        elif 205 <= y < 350 or y < 80:
+            app.page="settings"
         return
 
     if app.page == "record_confirm":

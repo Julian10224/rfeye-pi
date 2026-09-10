@@ -1,6 +1,6 @@
-# RF Eye 0.9.22 for Raspberry Pi
+# RF Eye 0.9.23 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.22 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.23 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.22 appliance path:
+The installer reproduces the working 0.9.23 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.22
+## User interface in 0.9.23
 
 The compact profile contains:
 
@@ -105,6 +105,8 @@ The compact profile contains:
 - Debug performance page
 - touch calibration available only from Debug
 - RF recording with an explicit large **NEE / JA** confirmation page
+- Demo mode behind the same **NEE / JA** page when switching it *on*; switching
+  it off stays one tap
 - Recordings browser with replay, replay alert sound and guarded delete confirmation
 - `Made by: Julian` in Settings/startup artwork
 
@@ -191,7 +193,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.22)
+### How the band is searched (0.9.23)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -496,7 +498,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.22 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.23 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -623,7 +625,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.22**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.23**.
 
 Build the OTA package with:
 
@@ -681,6 +683,12 @@ event, not a sleep, so the touch thread cuts it short the moment a finger lands
 rather than the UI discovering it up to a third of a second later. A drag
 therefore runs at the full rate, and the fastest rate the appliance ever uses is
 still the floor.
+
+The supply notice counts itself out. The button reads `BEGREPEN (30)` and the
+number falls to 0, at which point the notice closes on its own; tapping it
+closes it at once as before. It reports something nobody can act on from the
+passenger seat, and a modal left standing over a detector in a moving car is
+worse than the warning is worth. The timeout is `power_notice_timeout_s`.
 
 A live under-voltage switches Max power back off by itself and says so on the
 panel, even if the supply notice has already been dismissed once this session.
