@@ -247,6 +247,21 @@ assert (cfg.get('ui_width'),cfg.get('ui_height')) == (320,480)
 assert (cfg.get('physical_width'),cfg.get('physical_height')) == (480,320)
 PY
 
+# The SDR driver is applied by install.sh. Say so loudly if it did not take:
+# a unit on the distro librtlsdr with a V4L dongle reads an empty band and has
+# no other symptom at all -- it looks exactly like being out of coverage, and
+# it cost a full day of searching before it was found.
+if [[ "${RFEYE_KEEP_DISTRO_RTLSDR:-0}" != "1" ]]; then
+  if ! ls /usr/local/lib/librtlsdr.so.* >/dev/null 2>&1; then
+    echo "" >&2
+    echo "WARNING: the RTL-SDR Blog driver is NOT installed." >&2
+    echo "         An RTL-SDR Blog V4L will report an empty band on this unit." >&2
+    echo "         Fix it with:" >&2
+    echo "           curl -fsSL https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/scripts/install-rtlsdr-blog.sh | sudo bash" >&2
+    echo "" >&2
+  fi
+fi
+
 # The power profile is applied by install.sh; fail loudly if it did not take,
 # because a unit that silently kept ondemand is the one that browns out in a
 # car and looks like a software fault.

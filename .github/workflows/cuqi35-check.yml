@@ -1,4 +1,4 @@
-name: RF Eye 0.9.21 appliance checks
+name: RF Eye 0.9.22 appliance checks
 
 on:
   push:
@@ -160,6 +160,10 @@ jobs:
           bash -n scripts/install-rtlsdr-blog.sh
           grep -q 'install-rtlsdr-blog.sh' install.sh
           grep -q 'RFEYE_KEEP_DISTRO_RTLSDR' install.sh
+          # 0.9.22: and the MHS35 installer says so at the end if it did
+          # not take, because the symptom is an empty band and nothing else.
+          grep -q 'RTL-SDR Blog driver is NOT installed' install-cuqi35.sh
+          grep -q 'install-rtlsdr-blog.sh | sudo bash' install-cuqi35.sh
           grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
           grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py
           grep -q 'driver_knows_model' rfeye/sdr_backend.py rfeye/compact_ui_draw.py
