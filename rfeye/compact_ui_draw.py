@@ -48,6 +48,8 @@ def _sdr_fault(error):
         return ""
     if "not on the usb bus" in low or "open failed" in low:
         return "not on bus"
+    if "stuck" in low:
+        return "stuck capture"
     if "timeout" in low:
         return "read timeout"
     if "short read" in low:

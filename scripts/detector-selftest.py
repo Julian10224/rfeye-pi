@@ -430,6 +430,87 @@ def check_candidate_does_not_starve_the_pass():
             b.running = False
 
 
+def check_stuck_capture_is_refused():
+    """A dongle handing back the same buffer must be caught, not believed.
+
+    Recorded in the field on 11 September, next to an undercover police car:
+    every channel of every dwell, uplink and downlink, anywhere in the band,
+    returned identical numbers -- snr 34.3, bw 32344, boundary -13.4, centre
+    10039 -- for six minutes, with zero downlink verifications, while the
+    panel reported a live and locked network. The samples had stopped being
+    new. A receiver in that state cannot detect anything, and must not look
+    as though it can.
+    """
+    print(chr(10) + "16. a stuck capture is refused, not analysed")
+    import numpy as np
+
+    class FakeRTL:
+        rate_changed = False
+        def __init__(self, frozen):
+            self.frozen = frozen
+            self.rng = np.random.default_rng(3)
+            self.buf = None
+            self.closed = False
+        def configure(self, *a): pass
+        def tune(self, *a): pass
+        def reset(self): pass
+        def close(self): self.closed = True
+        def read_complex(self, count, abort=None):
+            if self.frozen and self.buf is not None and count == len(self.buf):
+                return self.buf
+            out = (self.rng.standard_normal(count)
+                   + 1j * self.rng.standard_normal(count)).astype(np.complex64) * 12
+            if count > 10000:
+                self.buf = out
+            return out
+
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["RFEYE_SITE_STATE"] = os.path.join(d, "sites.json")
+        b = SDRBackend(dict(DEFAULTS))
+        b.running = True
+        try:
+            # Live air: two dwells never agree, so both are accepted.
+            b.sdr = FakeRTL(frozen=False)
+            b._samples(391_000_000.0, 288_000, 262_144)
+            b._samples(391_000_000.0, 288_000, 262_144)
+            check("live captures pass, even on the same frequency",
+                  b.stuck_captures == 0, "stuck=%d" % b.stuck_captures)
+
+            # A frozen dongle: the second dwell is a byte-for-byte repeat.
+            fake = FakeRTL(frozen=True)
+            b.sdr = fake
+            b._last_capture_sig = None
+            b._samples(390_500_000.0, 288_000, 262_144)
+            refused = False
+            try:
+                b._samples(392_000_000.0, 288_000, 262_144)
+            except RuntimeError as e:
+                refused = "stuck" in str(e)
+            check("an identical repeat is refused as a stuck capture", refused,
+                  "stuck=%d" % b.stuck_captures)
+            check("and the handle is dropped so the next dwell reopens it",
+                  b.sdr is None and fake.closed,
+                  "sdr=%r closed=%s" % (b.sdr, fake.closed))
+
+            # The scan cycle treats it as a wedged dongle worth a USB reset,
+            # the same as a read timeout.
+            calls = []
+            b._recover_sdr_usb = lambda: calls.append(1) or False
+            def frozen_samples(centre, sr, count):
+                raise RuntimeError("librtlsdr read failed: capture stuck: "
+                                   "identical to the previous dwell")
+            b._samples = frozen_samples
+            b._scan_cycle()
+            check("the scan cycle asks for a USB recovery", bool(calls),
+                  "%d recovery call(s)" % len(calls))
+            check("and reports the fault instead of a live network",
+                  "stuck" in str(b.error) and b.status != "LIVE",
+                  "status=%s error=%s" % (b.status, str(b.error)[:40]))
+        finally:
+            b.running = False
+            os.environ.pop("RFEYE_SITE_STATE", None)
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -587,6 +668,7 @@ def main():
     check_ok_total_survives_a_restart()
     check_rescan_with_candidates()
     check_candidate_does_not_starve_the_pass()
+    check_stuck_capture_is_refused()
 
     print()
     if FAILURES:

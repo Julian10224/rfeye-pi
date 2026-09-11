@@ -1,6 +1,6 @@
-# RF Eye 0.9.24 for Raspberry Pi
+# RF Eye 0.9.25 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.24 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.25 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.24 appliance path:
+The installer reproduces the working 0.9.25 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.24
+## User interface in 0.9.25
 
 The compact profile contains:
 
@@ -193,7 +193,7 @@ C2000 coverage there is nothing to be near, so any alert would be wrong. The
 main screen shows `SEARCHING FOR C2000 NETWORK` rather than an implied
 all-clear.
 
-### How the band is searched (0.9.24)
+### How the band is searched (0.9.25)
 
 Ranking downlink candidates by raw power does not survive contact with real
 hardware. On the reference unit the ten strongest channels in 390-395 MHz sat
@@ -511,7 +511,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.24 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.25 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -638,7 +638,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.24**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.25**.
 
 Build the OTA package with:
 
@@ -860,6 +860,43 @@ vcgencmd get_throttled
 `0x0` is healthy. Bit 0 set means under-voltage right now; bit 16 means it has
 happened since boot. An RTL-SDR draws around 300 mA, so a Pi 3 B+ needs a real
 5 V / 3 A supply with a short, thick cable, or the dongle on a powered hub.
+
+## A receiver that has stopped receiving
+
+On 11 September a unit was driven alongside an undercover police car and did
+not alert. The recording shows why, and it was not the car:
+
+```
+14:46:01 UPLINK   381.1875  snr 34.3  bw 32344  bnd -13.4  ctr 10039
+14:46:03 UPLINK   381.3375  snr 34.3  bw 32344  bnd -13.4  ctr 10039
+14:46:03 DOWNLINK 390.3125  snr -8.7  bw 36000  bnd  -1.5  ctr     0
+14:46:03 DOWNLINK 390.3375  snr 13.2  bw 39656  bnd  -3.4  ctr  3830
+14:46:03 DOWNLINK 390.3625  snr 20.6  bw 39656  bnd  -5.4  ctr  5634
+14:46:03 DOWNLINK 390.3875  snr 34.3  bw 32344  bnd -13.4  ctr 10039
+14:46:06 DOWNLINK 390.9375  snr -8.7  bw 36000  bnd  -1.5  ctr     0    <- same four
+...                                                                         numbers,
+```
+
+Every channel of every dwell, uplink and downlink, anywhere in the band,
+returned the same numbers to the decimal, and each four-channel downlink dwell
+the same four in the same order. That is not RF; it is the same buffer being
+analysed again and again. The dongle had stopped delivering new samples. It
+lasted at least six minutes -- a whole 266-channel band pass at `phy=0` -- with
+zero downlink verifications, while the panel kept reporting a live, locked
+network.
+
+A receiver in that state cannot detect anything, and the one thing it must not
+do is look as though it can. Since 0.9.25 every capture is checked against the
+one before it. Live air is noise-limited: two captures never agree byte for
+byte, on the same frequency or any other, so an exact repeat is proof and
+needs no threshold. A repeat is refused, the handle is dropped so the next
+dwell reopens the device, the scan cycle asks for a USB reset exactly as it
+does for a read timeout, and the Debug page's Backend row says `stuck capture`.
+
+Recordings now carry the raw dwell every time, not only when there was an
+alert. The recording that most needed it had no alert and so no IQ, and the
+frozen buffer had to be inferred from identical summary numbers. They also
+record the backend's error text and the running count of refused captures.
 
 ## The SDR driver decides whether there is a band at all
 

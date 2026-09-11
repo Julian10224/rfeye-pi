@@ -1,4 +1,4 @@
-name: RF Eye 0.9.24 appliance checks
+name: RF Eye 0.9.25 appliance checks
 
 on:
   push:
@@ -181,6 +181,14 @@ jobs:
           grep -q "'ok_total': int" rfeye/tetra_detector.py
           grep -q 'def check_one_quiet_carrier_costs_nothing' scripts/detector-selftest.py
           grep -q 'def check_ok_total_survives_a_restart' scripts/detector-selftest.py
+          # 0.9.25: a dongle that keeps handing back the same buffer is
+          # refused, recovered and reported -- not analysed as if it were air.
+          grep -q 'def _check_capture' rfeye/sdr_backend.py
+          grep -q 'self._check_capture(iq)' rfeye/sdr_backend.py
+          grep -q "'stuck' in low" rfeye/sdr_backend.py
+          grep -q 'stuck capture' rfeye/compact_ui_draw.py
+          grep -q 'def check_stuck_capture_is_refused' scripts/detector-selftest.py
+          ! grep -q 'if alerted and bool(cfg.get("rf_record_iq"' rfeye/compact_ui_controls.py
           grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
           grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py
           grep -q 'driver_knows_model' rfeye/sdr_backend.py rfeye/compact_ui_draw.py

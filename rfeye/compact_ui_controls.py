@@ -40,7 +40,8 @@ def _record_payload_snapshot(app):
             "dwell_centre_hz","dwell_role","survey_shortlist",
             "site_queue_remaining",
             "confirm_streak","clear_streak","cycle_ms","dwell_ms","verify_ms",
-            "survey_ms","capture_ms","scan_windows","sdr_path")},
+            "survey_ms","capture_ms","scan_windows","sdr_path",
+            "error","stuck_captures","driver_path","driver_knows_model")},
         "spectrum":{
             "freq_hz":_plain(snap.get("freqs",[])),
             "power_db":_plain(snap.get("spectrum",[])),
@@ -280,7 +281,12 @@ def _record_rf_worker(app, duration):
         suffix=2
         while path.exists():
             path=out/(f"{stem}_{suffix}.json"); suffix+=1
-        if alerted and bool(cfg.get("rf_record_iq",True)):
+        # The raw dwell goes with every recording, not only with an alert.
+        # The recording that most needed it -- next to an undercover police
+        # car, receiver frozen, nothing detected -- had no alert and so no IQ,
+        # and the frozen buffer had to be inferred from identical summary
+        # numbers instead of being looked at.
+        if bool(cfg.get("rf_record_iq",True)):
             iq_meta=_dump_iq_sidecar(app,path.stem)
             if iq_meta:
                 data["iq_sidecar"]=iq_meta

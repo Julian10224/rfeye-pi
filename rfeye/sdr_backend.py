@@ -232,6 +232,9 @@ class SDRBackend:
         self._sdr_reopen=False
         self.driver_path=''
         self.driver_knows_model=False
+        # See _check_capture.
+        self._last_capture_sig=None
+        self.stuck_captures=0
         # Alternates candidate work with the band pass; see _site_work.
         self._priority_turn=0
         self.last_good_scan=0.; self.scan_failures=0; self.last_usb_reset=0.
@@ -396,6 +399,7 @@ class SDRBackend:
                 'freqs':self.spectrum_freqs.copy(),'spectrum':self.spectrum_db.copy(),
                 'noise':float(self.noise_floor_db),
                 'driver_path':str(self.driver_path),
+                'stuck_captures':int(self.stuck_captures),
                 'driver_knows_model':bool(self.driver_knows_model),
                 'last_update':float(self.last_update),'demo':bool(self.demo_active),
                 'network_locked':bool(self.site_peaks),
@@ -539,6 +543,32 @@ class SDRBackend:
             try: dev.close()
             except Exception: pass
 
+    def _check_capture(self,iq):
+        """Refuse a capture that is a copy of the previous one.
+
+        A dongle can stop streaming and keep handing back the same buffer,
+        however it is retuned. Every channel of every dwell is then analysed
+        from identical samples and returns identical numbers -- recorded in
+        the field on 11 September, next to an undercover police car, as
+
+            snr 34.3  bw 32344  bnd -13.4  ctr 10039   on 380.04, 380.74,
+            381.19, 381.34, 381.84 MHz and on the downlink, for six minutes
+
+        with zero downlink verifications, while the panel went on reporting a
+        live, locked network. A receiver in that state cannot detect anything,
+        and the one thing it must not do is look as though it can.
+
+        Live air is noise-limited: two captures of it never agree byte for
+        byte, on the same frequency or any other, so an exact repeat is proof
+        the samples are not new. No threshold to tune, so no false alarm to
+        worry about.
+        """
+        sig=hash(np.ascontiguousarray(iq[::991]).tobytes())
+        if sig==self._last_capture_sig:
+            self.stuck_captures+=1
+            raise RuntimeError('capture stuck: identical to the previous dwell')
+        self._last_capture_sig=sig
+
     def _samples(self,center,sr,count):
         """Tune and read, settling for the PLL and any sample-rate change."""
         try:
@@ -560,7 +590,9 @@ class SDRBackend:
             settle=0.030 if self.sdr.rate_changed else 0.006
             self.sdr.read_complex(max(4096,int(sr*settle)),
                                   abort=lambda: not self.running)
-            return self.sdr.read_complex(int(count),abort=lambda: not self.running)
+            iq=self.sdr.read_complex(int(count),abort=lambda: not self.running)
+            self._check_capture(iq)
+            return iq
         except Exception as e:
             self._close_direct_sdr()
             raise RuntimeError('librtlsdr read failed: '+str(e))
@@ -1027,7 +1059,7 @@ class SDRBackend:
             # every _samples() failure is wrapped as 'read failed', so matching
             # that text resets on absence too -- which is precisely what kept
             # the dongle from coming back.
-            if ('timeout' in low or 'short read' in low) and 'open failed' not in low:
+            if ('timeout' in low or 'short read' in low or 'stuck' in low) and 'open failed' not in low:
                 self._recover_sdr_usb()
             power=self._power_warning() or self._power_history
             if power:
