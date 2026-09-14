@@ -244,9 +244,12 @@ jobs:
           grep -q 'def plan_dwell' rfeye/tetra_detector.py
           grep -q 'def _refill_site_queue' rfeye/sdr_backend.py
           # A lock must keep proving itself: without this a deaf
-          # receiver kept reporting a locked network for an hour.
-          grep -q 'def note_round' rfeye/tetra_detector.py
-          grep -q 'def network_alive' rfeye/tetra_detector.py
+          # receiver kept reporting a locked network for an hour. 0.9.24
+          # replaced note_round/network_alive (one designated carrier with
+          # a veto) by heard_recently (any proven carrier), and this check
+          # kept asking for the removed functions -- red from 0.9.24 on.
+          grep -q 'def heard_recently' rfeye/tetra_detector.py
+          if grep -q 'def note_round' rfeye/tetra_detector.py; then exit 1; fi
           grep -q 'rfeye-rf-series-v8' rfeye/compact_ui_controls.py
           # The USB recovery discipline of 0.9.1. Resetting on any error text
           # containing 'read failed' also reset when the dongle was simply
@@ -303,7 +306,7 @@ jobs:
             '2876bfda5ce3a28cc6c08213ba637f34fe3c647dfdc6c23252d1e00a2d044884' 'config/systemd/rfeye-user-fast-ui.conf' \
             'b2c64ea2a80c4bf785780f8f6d2cc4cb3ee4132c90fb089e08776e8dc9625f76' 'config/labwc-autostart' \
             '9d74c1cdbd13b40c0e502a953a26ed2b9abff763b62715943796aeabc7617c96' 'config/kanshi-config' \
-            'be5c897064e26e8120f40502286fc811b4ddfbef2f2fcfbc5a56fd3fbbba813f' 'scripts/start-rfeye.sh' \
+            '67e3dcdd5202698d3d2c8dc1dc6e5c169aa4f02256189bdc735acd2dedca7f5e' 'scripts/start-rfeye.sh' \
             | sha256sum -c -
           ! grep -q 'renderD128' config/systemd/lightdm.service
           grep -q 'dev-dri-card0.device' config/systemd/lightdm.service
