@@ -62,6 +62,46 @@ def main():
             assert (backup/"app.py").read_text()=="old app\n"
             assert (backup/"obsolete.py").read_text()=="stale\n"
 
+            # Durability. A unit that lost power within ~30 s of an update came
+            # back with the runtime AND the backup at 0 bytes: both copies had
+            # returned, neither was on disk. The backup must be flushed before
+            # the live runtime is cleared, and every installed file flushed
+            # before the update reports success.
+            events=[]
+            real_fsync_path=updater._fsync_path
+            real_clear=updater._clear_runtime
+            def spy_fsync(path):
+                events.append(("fsync",Path(path)))
+                return real_fsync_path(path)
+            def spy_clear(r):
+                events.append(("clear",Path(r)))
+                return real_clear(r)
+            updater._fsync_path=spy_fsync
+            updater._clear_runtime=spy_clear
+            try:
+                (root/"app.py").write_text("durable old\n")
+                updater.install_zip_bytes(good_zip(),app_root=str(root))
+            finally:
+                updater._fsync_path=real_fsync_path
+                updater._clear_runtime=real_clear
+            def at(kind,test):
+                return [i for i,(k,p) in enumerate(events) if k==kind and test(p)]
+            clear_at=at("clear",lambda p:True)
+            backup_app=at("fsync",lambda p:p.name=="app.py" and p.parent.name==root.name+".backup")
+            live_files=[at("fsync",lambda p,n=n:p.name==n and p.parent.name in (root.name,"assets"))
+                        for n in ("app.py","config.py","icon.txt")]
+            assert clear_at and backup_app and backup_app[0]<clear_at[0], events
+            assert all(hits and hits[-1]>clear_at[0] for hits in live_files), events
+
+            # Repairing a damaged unit must not cost it its last good backup.
+            # Here the live modules are at 0 bytes, as after that power cut.
+            assert (backup/"app.py").read_text()=="durable old\n"
+            for f in root.glob("*.py"):
+                f.write_text("")
+            updater.install_zip_bytes(good_zip(),app_root=str(root))
+            assert (root/"app.py").read_text()=="new app\n"
+            assert (backup/"app.py").read_text()=="durable old\n", "good backup overwritten by a damaged runtime"
+
             bad_names=[
                 "../unpack_evil/pwn.txt",
                 "/absolute/pwn.txt",

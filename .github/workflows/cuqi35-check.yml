@@ -1,4 +1,4 @@
-name: RF Eye 0.9.26 appliance checks
+name: RF Eye 0.9.27 appliance checks
 
 on:
   push:
@@ -197,6 +197,13 @@ jobs:
           grep -q 'def check_short_transmission_alerts' scripts/detector-selftest.py
           grep -q 'def check_follow_up_is_bounded' scripts/detector-selftest.py
           grep -q 'def wide_dwell' scripts/tetra-phy-selftest.py
+          # 0.9.27: an update is on disk before it says so. A power cut
+          # right after one left runtime and backup both at 0 bytes.
+          grep -q 'def _fsync_tree' rfeye/updater.py
+          grep -q '_fsync_tree(backup)' rfeye/updater.py
+          grep -q 'os.sync()' rfeye/updater.py
+          grep -q 'def _runtime_intact' rfeye/updater.py
+          grep -q 'start-rfeye restored the runtime' scripts/start-rfeye.sh
           ! grep -q 'if alerted and bool(cfg.get("rf_record_iq"' rfeye/compact_ui_controls.py
           grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
           grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py

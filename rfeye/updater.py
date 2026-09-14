@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import shutil
 import stat
 import tempfile
@@ -44,6 +45,71 @@ def _remove_path(path):
         path.unlink()
     elif path.exists():
         shutil.rmtree(path)
+
+
+def _fsync_path(path):
+    """Flush one file, or one directory's entries, to the storage medium."""
+    path = Path(path)
+    is_dir = path.is_dir()
+    if os.name == "nt":
+        # Windows commits a file only through a writable handle and cannot
+        # open a directory at all. The units run Linux; this keeps the test
+        # suite honest on a development machine.
+        if is_dir:
+            return
+        flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+    else:
+        flags = os.O_RDONLY | (getattr(os, "O_DIRECTORY", 0) if is_dir else 0)
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        if is_dir:
+            # Not every platform can open a directory; the file data is what
+            # matters most, and os.sync() at the end covers the rest.
+            return
+        raise
+    try:
+        os.fsync(fd)
+    except OSError:
+        if not is_dir:
+            raise
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root):
+    """Force everything under ``root`` onto the storage medium.
+
+    A copy that has returned is still only in the page cache, and ext4 can
+    leave freshly written file data there for about 30 seconds. On 14 September
+    2026 a unit lost power inside that window after an update and came back
+    with every runtime module at 0 bytes -- and every module of the backup the
+    same update had just written, so it could neither start nor roll back.
+    systemd restarted it 165 times behind a black panel.
+    """
+    root = Path(root)
+    if not root.exists():
+        return
+    items = [root] if root.is_file() else sorted(
+        p for p in root.rglob("*")
+        if "__pycache__" not in p.parts and not p.is_symlink())
+    for path in items:
+        _fsync_path(path)
+    if root.is_dir():
+        _fsync_path(root)
+
+
+def _runtime_intact(root):
+    """True when ``root`` holds a runtime that could actually start.
+
+    Every shipped module has content, so a 0-byte ``.py`` file is damage, not
+    a release -- the signature of a copy that never reached the disk.
+    """
+    root = Path(root)
+    app = root / "app.py"
+    if not app.is_file() or app.stat().st_size == 0:
+        return False
+    return all(p.stat().st_size > 0 for p in root.glob("*.py"))
 
 
 def _clear_runtime(root):
@@ -130,22 +196,35 @@ def install_zip_bytes(data, app_root="/opt/rfeye/rfeye"):
     with tempfile.TemporaryDirectory(prefix="rfeye-update-") as td:
         source = _safe_extract_runtime(data, td)
 
-        if backup.exists() or backup.is_symlink():
-            _remove_path(backup)
-        shutil.copytree(root, backup, ignore=shutil.ignore_patterns("__pycache__"))
+        if _runtime_intact(root) or not _runtime_intact(backup):
+            if backup.exists() or backup.is_symlink():
+                _remove_path(backup)
+            shutil.copytree(root, backup, ignore=shutil.ignore_patterns("__pycache__"))
+        # Otherwise keep the backup. The live runtime is the damaged one, and
+        # copying it over the last good copy destroys the only way back --
+        # which is what repairing that unit did to its backup.
+        #
+        # The backup has to be on disk, not merely copied, before the live
+        # runtime is touched.
+        _fsync_tree(backup)
+        _fsync_path(state_root)
 
         try:
             # Replace runtime contents instead of overlaying them so files
             # removed by a release cannot survive as stale executable modules.
             _clear_runtime(root)
             _copy_runtime(source, root)
+            _fsync_tree(root)
         except Exception:
             # Best-effort in-process rollback for copy/delete failures.
             try:
                 _clear_runtime(root)
                 _copy_runtime(backup, root)
+                _fsync_tree(root)
             except Exception:
                 pass
             raise
 
+    if hasattr(os, "sync"):
+        os.sync()
     return str(backup)

@@ -1,6 +1,6 @@
-# RF Eye 0.9.26 for Raspberry Pi
+# RF Eye 0.9.27 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.26 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.27 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.26 appliance path:
+The installer reproduces the working 0.9.27 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.26
+## User interface in 0.9.27
 
 The compact profile contains:
 
@@ -587,7 +587,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.26 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.27 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -613,6 +613,28 @@ https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/rfeye-update.
 The updater downloads the ZIP, requires and verifies its SHA-256, validates every archive path before extraction, makes a backup and replaces the RF Eye application contents. Starting with 0.7.37, replacement is a real content replacement rather than an overlay, so a file deliberately removed by a release cannot survive as a stale Python module. A copy/delete failure triggers best-effort restoration from the backup. Starting with 0.7.30, a successful OTA install automatically exits the running app after showing `RESTARTING`; the `rfeye-user.service` (`Restart=always`) then relaunches RF Eye from the newly installed files. The visible `RESTART` action is also a real manual restart fallback.
 
 Application-only OTA updates update `/opt/rfeye/rfeye`. Device Tree, systemd, Plymouth and boot-service changes are applied by `install-cuqi35.sh` and therefore require root.
+
+### An update is on disk before it says so (0.9.27)
+
+On 14 September 2026 a unit was updated and unplugged moments later. It came
+back with all sixteen runtime modules at **0 bytes** -- and all sixteen in the
+backup the same update had just written. It could neither start nor roll
+back, and systemd restarted it 165 times behind a black panel. A copy that
+has returned is only in the page cache; ext4 may leave new file data there
+for about 30 seconds, and up to 0.9.26 the updater never forced it out.
+
+Since 0.9.27 the updater flushes the backup to storage before it clears the
+live runtime, flushes every installed file before it reports success, and
+finishes with a full `sync`. It also refuses to copy a damaged runtime (any
+0-byte module) over an intact backup, which is what repairing that unit did.
+`/opt/rfeye/start-rfeye.sh` restores the backup by itself when `app.py` is
+empty; that script belongs to the installer, so a unit gets it from a fresh
+install or a re-run of `install-cuqi35.sh`, not from an OTA update.
+
+The update that *installs* 0.9.27 still runs the previous release's updater.
+**Leave the unit powered for a minute after updating to 0.9.27.**
+
+To see whether a black unit is this: `find /opt/rfeye/rfeye -size 0`.
 
 ### A mouse cursor on a black panel
 
@@ -714,7 +736,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.26**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.27**.
 
 Build the OTA package with:
 
