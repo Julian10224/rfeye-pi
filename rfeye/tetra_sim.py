@@ -94,16 +94,36 @@ def _burst_gate(n_symbols, sps, slot_pattern, ramp_symbols=6):
 def tetra_carrier(duration_s, sample_rate, role='DOWNLINK', seed=0,
                   slot_pattern=(1,), freq_offset_hz=0.0):
     """Baseband TETRA carrier of unit average power while transmitting."""
-    rng = np.random.default_rng(int(seed))
     sps = float(sample_rate) / SYMBOL_RATE_HZ
     if abs(sps - round(sps)) > 1e-6:
         raise ValueError('sample_rate must be an integer multiple of 18000')
     sps = int(round(sps))
-    n_sym = int(math.ceil(float(duration_s) * SYMBOL_RATE_HZ)) + 64
-    sig = _pulse_shape(dqpsk_symbols(n_sym, rng), sps)
-    if role.upper() == 'UPLINK':
-        sig = sig * _burst_gate(n_sym, sps, slot_pattern)[:len(sig)]
     n = int(round(float(duration_s) * float(sample_rate)))
+    if sps > 32 and sps % 16 == 0:
+        # The shipping 2.016 MS/s dwell is 112 samples per symbol, and an RRC
+        # convolution that long costs seconds per carrier. Shape at 16 samples
+        # per symbol and interpolate in the frequency domain instead: the
+        # pulse is band-limited to 12.15 kHz, far inside 288 kS/s, so zero
+        # padding the spectrum reproduces the same waveform rather than an
+        # approximation of it.
+        base = tetra_carrier(duration_s, 16 * SYMBOL_RATE_HZ, role=role,
+                             seed=seed, slot_pattern=slot_pattern)
+        k = sps // 16
+        m = len(base)
+        spec = np.fft.fft(base)
+        big = np.zeros(m * k, dtype=np.complex128)
+        h = (m + 1) // 2
+        big[:h] = spec[:h]
+        big[m * k - (m - h):] = spec[h:]
+        sig = (np.fft.ifft(big) * k).astype(np.complex64)
+        if len(sig) < n:
+            sig = np.concatenate([sig, np.zeros(n - len(sig), np.complex64)])
+    else:
+        rng = np.random.default_rng(int(seed))
+        n_sym = int(math.ceil(float(duration_s) * SYMBOL_RATE_HZ)) + 64
+        sig = _pulse_shape(dqpsk_symbols(n_sym, rng), sps)
+        if role.upper() == 'UPLINK':
+            sig = sig * _burst_gate(n_sym, sps, slot_pattern)[:len(sig)]
     sig = sig[:n]
     if freq_offset_hz:
         t = np.arange(len(sig), dtype=np.float64) / float(sample_rate)

@@ -243,42 +243,50 @@ def plan_dwell(freqs, sample_rate, max_offset_hz=100_000.0,
                dc_guard_hz=20_000.0, spacing_hz=CHANNEL_SPACING_HZ):
     """Choose a tuner centre covering as many of ``freqs`` as possible.
 
-    One 288 kHz dwell holds several 25 kHz channels, so a group of nearby
-    carriers is checked in a single capture.
+    One dwell holds many 25 kHz channels -- +-600 kHz of them at 2.016 MS/s --
+    so a group of nearby carriers is checked in a single capture.
 
-    The tuner is parked ``dc_guard_hz`` clear of the *highest* member rather
-    than in the middle of the group.  The RTL-SDR's DC spike sits exactly at
-    the tuner centre, and channels are on a 25 kHz grid, so a centred tuner
-    lands on one of the very carriers being measured -- there is no gap in a
-    contiguous run to hide in.  Parking outside the run is the only placement
-    that keeps the spike off every channel, and it bounds the group to what
-    still fits inside ``max_offset_hz``.
+    The RTL-SDR's DC spike sits exactly at the tuner centre, so no member may
+    be closer to it than ``dc_guard_hz``.  The centre is therefore always
+    parked ``dc_guard_hz`` to one side of some member, and of all those
+    placements the one covering the most members wins.  In a contiguous run
+    that costs the one channel next to the spike, which simply stays in the
+    caller's list for the next dwell.  When the old one-sided placement was
+    the only option -- a dwell barely wider than the group -- this finds it
+    too.
 
-    The **first** entry of ``freqs`` anchors the group.  That is what lets a
-    caller work through a long list: sorting the input and always starting
-    from the lowest frequency would pin the window to one end of the band.
+    The **first** entry of ``freqs`` anchors the group: it is always a member.
+    That is what lets a caller work through a long list: sorting the input and
+    always starting from the lowest frequency would pin the window to one end
+    of the band.  Ties go to the centre nearest the anchor.
 
     Returns ``(centre_hz, [(freq_hz, offset_hz), ...])``.
     """
     seq = [float(f) for f in freqs]
     if not seq:
         return None, []
-    ordered = sorted(set(seq))
-    i = ordered.index(seq[0])
-    room = max(0.0, float(max_offset_hz) - float(dc_guard_hz))
-    lo = hi = i
-    while True:
-        grew = False
-        if hi + 1 < len(ordered) and ordered[hi + 1] - ordered[lo] <= room:
-            hi += 1
-            grew = True
-        if lo - 1 >= 0 and ordered[hi] - ordered[lo - 1] <= room:
-            lo -= 1
-            grew = True
-        if not grew:
-            break
-    group = ordered[lo:hi + 1]
-    centre = group[-1] + float(dc_guard_hz)
+    anchor = seq[0]
+    lim = float(max_offset_hz)
+    guard = float(dc_guard_hz)
+    eps = 1e-6
+    near = sorted({f for f in seq if abs(f - anchor) <= 2.0 * lim + eps})
+
+    def fits(f, c):
+        return guard - eps <= abs(f - c) <= lim + eps
+
+    best = None
+    for f in near:
+        for c in (f - guard, f + guard):
+            if not fits(anchor, c):
+                continue
+            group = [g for g in near if fits(g, c)]
+            key = (len(group), -abs(c - anchor))
+            if best is None or key > best[0]:
+                best = (key, c, group)
+    if best is None:
+        centre, group = anchor + guard, [anchor]
+    else:
+        _, centre, group = best
     return centre, [(f, f - centre) for f in group]
 
 

@@ -1,4 +1,4 @@
-name: RF Eye 0.9.25 appliance checks
+name: RF Eye 0.9.26 appliance checks
 
 on:
   push:
@@ -188,6 +188,15 @@ jobs:
           grep -q "'stuck' in low" rfeye/sdr_backend.py
           grep -q 'stuck capture' rfeye/compact_ui_draw.py
           grep -q 'def check_stuck_capture_is_refused' scripts/detector-selftest.py
+          # 0.9.26: verification left 288 kS/s, where the RTL2832U hands back
+          # carriers from 1.15 MHz away as if they were on the channel, and a
+          # verified uplink hit is followed up so a short push-to-talk confirms.
+          grep -q '"phy_sample_rate": 2_016_000' rfeye/config.py
+          grep -q 'uplink_follow_dwells' rfeye/sdr_backend.py rfeye/config.py
+          grep -q 'rep = max(1, len(bb) // max(1, len(m)))' rfeye/tetra_phy.py
+          grep -q 'def check_short_transmission_alerts' scripts/detector-selftest.py
+          grep -q 'def check_follow_up_is_bounded' scripts/detector-selftest.py
+          grep -q 'def wide_dwell' scripts/tetra-phy-selftest.py
           ! grep -q 'if alerted and bool(cfg.get("rf_record_iq"' rfeye/compact_ui_controls.py
           grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
           grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py
@@ -307,15 +316,15 @@ jobs:
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['detector_profile_version']==9
+          assert c['detector_profile_version']==10
           # Detector profile v8 acceptance limits. A fresh install must ship
           # the calibrated values from scripts/tetra-phy-selftest.py, so a
           # silent drift here is a build failure rather than a field surprise.
-          assert c['phy_sample_rate']==288000
-          assert c['phy_dwell_log2']==18
-          assert c['phy_decimation']==8
+          assert c['phy_sample_rate']==2016000
+          assert c['phy_dwell_log2']==20
+          assert c['phy_decimation']==56
           assert c['phy_timing_phases']==8
-          assert c['phy_max_offset_hz']==100000.0
+          assert c['phy_max_offset_hz']==600000.0
           assert c['phy_min_snr_db']==8.0
           assert c['phy_min_occupied_bw_hz']==14000.0
           assert c['phy_max_occupied_bw_hz']==30000.0
@@ -347,6 +356,7 @@ jobs:
           assert c['uplink_confirm_visits']==4
           assert c['survey_flatness_weight']==0.5
           assert c['uplink_alert_hold_s']==12.0
+          assert c['uplink_follow_dwells']==3
           assert c['tetra_channel_spacing_hz']==25000.0
           assert c['tetra_raster_offset_hz']==12500.0
           assert c['sample_rate']==2048000

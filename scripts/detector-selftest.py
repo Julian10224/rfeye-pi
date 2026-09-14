@@ -85,7 +85,11 @@ class FakeAir:
         self.seed += 1
         n = int(count)
         dur = n / float(sr)
-        wide = sr > 500_000
+        # Survey captures are short and only have to notice that something is
+        # there. Verification dwells run at a wide rate too since profile 10,
+        # but they are long, and what they measure is what is under test, so
+        # they get real generated TETRA.
+        wide = sr > 500_000 and n < 400_000
         parts = []
         for freq, kind in self._emitters():
             off = float(freq) - float(centre)
@@ -408,7 +412,10 @@ def check_candidate_does_not_starve_the_pass():
             # not the interesting ones -- they come along for free and then
             # run out. What matters is whether the pass reaches the rest of
             # the band afterwards.
-            near = lambda f: min(abs(f - 391_187_500.0), abs(f - 391_762_500.0)) <= 150_000.0
+            # "Near" is whatever one dwell anchored on a candidate can reach,
+            # which is the dwell's own half-width plus a channel of margin.
+            reach = float(DEFAULTS["phy_max_offset_hz"]) + 50_000.0
+            near = lambda f: min(abs(f - 391_187_500.0), abs(f - 391_762_500.0)) <= reach
             far_before = [f for f in b._site_queue if not near(f)]
             for i in range(40):
                 b._site_work(now + 1.0 + i)
@@ -509,6 +516,90 @@ def check_stuck_capture_is_refused():
         finally:
             b.running = False
             os.environ.pop("RFEYE_SITE_STATE", None)
+
+
+SHORT_PTT_SITE = [390_737_500.0, 390_912_500.0, 391_187_500.0,
+                  391_512_500.0, 391_762_500.0]
+
+
+def check_short_transmission_alerts(**overrides):
+    """A push-to-talk of a few seconds, on a site with several carriers.
+
+    Every alert scenario above keeps its handset keyed for the whole test, so
+    all of them passed while the field units never once alerted. Measured on
+    rfeye at 0.9.25 with five locked carriers: each uplink channel came round
+    every 9 s, one channel per dwell, and confirmation needs a second hit on
+    the same channel -- so a transmission had to outlast two visits, 18 s, to
+    be reported at all. Real traffic is a few seconds of speech.
+
+    Here the handset is keyed for three scan cycles, three to five seconds on
+    a Pi, and the alert has to come while it is still on air. Returns True if
+    it did, so the old dwell can be run through it too.
+    """
+    print(chr(10) + "17. a short push-to-talk on a busy site")
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=SHORT_PTT_SITE)
+        b = make_backend(air, os.path.join(d, "sites.json"), **overrides)
+        try:
+            now = time.time()
+            for f in SHORT_PTT_SITE:
+                b.sites.entries[int(round(f))] = {
+                    "hits": 9, "misses": 0, "quality": 0.7,
+                    "last_ok": now, "first_seen": now, "ok_total": 9}
+            assert len(b.sites.locked(now)) == len(SHORT_PTT_SITE)
+            b._site_queue = []
+            b._survey_at = now
+            handset = SHORT_PTT_SITE[2] - 10_000_000.0
+            log = run(b, 9, at={3: lambda: air.uplinks.append(handset),
+                                6: lambda: air.uplinks.remove(handset)})
+            keyed = [i for i, s in enumerate(log[3:6], start=3) if s["mobile_confirmed"]]
+            check("alerts while the handset is still keyed up", bool(keyed),
+                  "alert on cycles %s" % [i for i, s in enumerate(log)
+                                          if s["mobile_confirmed"]])
+            hit = next((s for s in log if s["mobile_confirmed"] and s["peaks"]), None)
+            check("and names the handset's uplink channel",
+                  bool(hit) and abs(hit["peaks"][0]["freq_hz"] - handset) < 1000.0,
+                  ("%.4f MHz" % (hit["peaks"][0]["freq_hz"] / 1e6)) if hit else "no alert")
+            return bool(keyed)
+        finally:
+            b.running = False
+
+
+def check_follow_up_is_bounded():
+    """Following a hit may not leave the rest of the site unwatched.
+
+    A long transmission keeps verifying, and a follow-up re-armed by its own
+    hits would park the receiver on that one window for as long as the handset
+    talks, while a second handset on another carrier went unseen.
+    """
+    print(chr(10) + "18. a long transmission does not blind the other carriers")
+    site = [390_037_500.0, 391_962_500.0]     # too far apart for one dwell
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=site, uplinks=[site[0] - 10_000_000.0])
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            now = time.time()
+            for f in site:
+                b.sites.entries[int(round(f))] = {
+                    "hits": 9, "misses": 0, "quality": 0.7,
+                    "last_ok": now, "first_seen": now, "ok_total": 9}
+            b._site_queue = []
+            b._survey_at = now
+            seen = []
+            real = b._verify
+            def spy(freqs, role):
+                out = real(freqs, role)
+                if role == "UPLINK":
+                    seen.append([int(round(f)) for f in b.dwell_channels])
+                return out
+            b._verify = spy
+            run(b, 10)
+            other = int(round(site[1] - 10_000_000.0))
+            visits = sum(1 for chans in seen if other in chans)
+            check("the other carrier's uplink is still visited",
+                  visits >= 2, "%d visits in %d uplink dwells" % (visits, len(seen)))
+        finally:
+            b.running = False
 
 
 def main():
@@ -669,6 +760,8 @@ def main():
     check_rescan_with_candidates()
     check_candidate_does_not_starve_the_pass()
     check_stuck_capture_is_refused()
+    check_short_transmission_alerts()
+    check_follow_up_is_bounded()
 
     print()
     if FAILURES:

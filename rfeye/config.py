@@ -58,7 +58,7 @@ except Exception:
     pass
 
 DEFAULTS = {
-    "detector_profile_version": 9,
+    "detector_profile_version": 10,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -82,14 +82,24 @@ DEFAULTS = {
     "survey_max_candidates": 12,
     "mobile_percentile": 95.0,
 
-    # Narrowband verification dwell. 288 kS/s is 28.8 MHz / 100 exactly, and
-    # exactly 16x the 18000 baud TETRA symbol rate, so channel decimation is
-    # exact and the symbol clock needs no resampling. 2^18 samples is 0.910 s,
-    # about 16 TDMA frames, enough to measure the 17.647 Hz frame line.
-    "phy_sample_rate": 288_000,
-    "phy_dwell_log2": 18,
-    "phy_decimation": 8,
-    "phy_max_offset_hz": 100_000.0,
+    # Verification dwell. 2.016 MS/s is exactly 112x the 18000 baud TETRA
+    # symbol rate, so decimating by 56 gives the same 36 kS/s channel baseband
+    # the tests were calibrated on. 2^20 samples is 0.520 s, about 9 TDMA
+    # frames.
+    #
+    # Until profile 10 this was 288 kS/s, and at that rate the RTL2832U hands
+    # back real carriers from 1.15 MHz away as if they were on the channel
+    # being measured. Measured on rfeye, 14 September 2026: 390.0375 and
+    # 390.6125 passed the full TETRA test at 16-18 dB at 288 kS/s, and were
+    # plain noise at 250 kS/s, 1.008 MS/s, 2.016 MS/s and in rtl_power -- they
+    # are 391.1875 and 391.7625, 1150 kHz higher. So units locked phantom
+    # carriers and watched their non-existent uplinks. At 2.016 MS/s the
+    # dongle's own filter is in use, and one dwell spans +-600 kHz: a whole
+    # site's uplinks in one or two dwells instead of one channel per dwell.
+    "phy_sample_rate": 2_016_000,
+    "phy_dwell_log2": 20,
+    "phy_decimation": 56,
+    "phy_max_offset_hz": 600_000.0,
     "phy_timing_phases": 8,
 
     # TETRA acceptance limits. These mirror tetra_phy.LIMITS and are the
@@ -137,6 +147,10 @@ DEFAULTS = {
     "uplink_confirm_visits": 4,
     "uplink_state_max_age_s": 90.0,
     "uplink_alert_hold_s": 12.0,
+    # After a verified uplink hit, how many dwells go straight back to that
+    # window so the second confirmation comes while the handset is still
+    # keyed up, instead of whenever the watch rotation next comes round.
+    "uplink_follow_dwells": 3,
 
     "tetra_channel_spacing_hz": 25_000.0,
     "tetra_raster_offset_hz": 12_500.0,
@@ -190,7 +204,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.25",
+    "app_version": "0.9.26",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -263,11 +277,16 @@ def load_config():
     # also reports profile 8 and the reset above never fires. save_config()
     # no longer writes these keys unless they differ from the default, so this
     # particular fossil cannot form again.
-    if int(saved.get("detector_profile_version", 0) or 0) < 9:
+    #
+    # Profile 10 moves the verification dwell from 288 kS/s to 2.016 MS/s. The
+    # MHS35 reference config of every earlier install wrote the old dwell out
+    # explicitly, so without this reset exactly those units would keep the
+    # rate that locks phantom carriers.
+    if int(saved.get("detector_profile_version", 0) or 0) < 10:
         for key in list(DEFAULTS):
             if is_detector_key(key):
                 cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 9
+    cfg["detector_profile_version"] = 10
     for obsolete in (
         # pre-v7 leftovers
         "threshold_db", "threshold_min_db", "threshold_max_db",

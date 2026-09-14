@@ -256,6 +256,9 @@ class SDRBackend:
         self._pass_channels=0; self._pass_ok=0; self._pass_fails={}
         self.last_pass_s=0.
         self._site_verify_at=0.; self._watch_idx=0; self._display_cycle=0
+        # Uplink channels that just verified, and how many dwells are left to
+        # spend confirming them; see _watch_work.
+        self._follow=[]; self._follow_left=0
         self.last_phy=[]
         self.dwell_centre_hz=0.; self.dwell_channels=[]
         self.last_dwell_role=''
@@ -281,6 +284,7 @@ class SDRBackend:
                 self.mobile_level=0.; self.site_level=0.
                 self.activity_confidence=0.; self.mobile_confirmed=False
                 self.demo_active=False; self.alarm.reset()
+                self._follow=[]; self._follow_left=0
                 self.detector_state='SEARCHING'; self.last_phy=[]
                 self.survey_shortlist=[]; self._survey_at=0.
                 self._site_queue=[]; self._sweep_cursor=0.
@@ -796,11 +800,11 @@ class SDRBackend:
         FFT, so watching a whole site's uplink list costs barely more than
         watching one channel of it.
         """
-        sr=int(self.cfg.get('phy_sample_rate',288000))
-        n=1<<int(self.cfg.get('phy_dwell_log2',18))
+        sr=int(self.cfg.get('phy_sample_rate',2016000))
+        n=1<<int(self.cfg.get('phy_dwell_log2',20))
         centre,members=plan_dwell(
             freqs,sr,
-            max_offset_hz=float(self.cfg.get('phy_max_offset_hz',100000.)),
+            max_offset_hz=float(self.cfg.get('phy_max_offset_hz',600000.)),
             spacing_hz=float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
         if centre is None or not members:
             return []
@@ -976,15 +980,39 @@ class SDRBackend:
         return results
 
     def _watch_work(self,now):
-        """Dwell on the uplink partners of the locked base stations."""
+        """Dwell on the uplink partners of the locked base stations.
+
+        A verified hit is followed straight away: the next dwells go back to
+        the window that heard it, so the second confirmation arrives while the
+        handset is still keyed up. Without that, confirmation waited for the
+        watch rotation to come round again -- measured on rfeye at 0.9.25 with
+        five locked carriers, every 9 s per channel, and with ten over 20 s --
+        and a push-to-talk of a few seconds was over long before the second
+        look, so a car could transmit right alongside and never raise an
+        alert. The follow-up is bounded and is not re-armed by its own hits, so
+        a long transmission cannot keep every other channel unwatched.
+        """
         partners=sorted(self.sites.uplink_partners(now))
         if not partners:
+            self._follow=[]; self._follow_left=0
             return []
-        start=self._watch_idx%len(partners)
-        rotated=partners[start:]+partners[:start]
+        keys={int(round(p)) for p in partners}
+        follow=[f for f in self._follow if int(round(f)) in keys] if self._follow_left>0 else []
+        if follow:
+            rotated=[follow[0]]+[p for p in partners if int(round(p))!=int(round(follow[0]))]
+            self._follow_left-=1
+        else:
+            self._follow=[]; self._follow_left=0
+            start=self._watch_idx%len(partners)
+            rotated=partners[start:]+partners[:start]
         results=self._verify(rotated,'UPLINK')
-        covered=max(1,len(self.dwell_channels))
-        self._watch_idx=(self._watch_idx+covered)%len(partners)
+        if not follow:
+            covered=max(1,len(self.dwell_channels))
+            self._watch_idx=(self._watch_idx+covered)%len(partners)
+            hits=[r.freq_hz for r in results if r.ok]
+            if hits:
+                self._follow=[float(h) for h in hits]
+                self._follow_left=max(0,int(self.cfg.get('uplink_follow_dwells',3)))
         return results
 
     def _scan_cycle(self):
@@ -1006,7 +1034,10 @@ class SDRBackend:
                 # a pass dwell can no longer postpone the next re-proof.
                 due=(now-self._site_verify_at
                      >= self._reverify_interval(self.sites.locked(now)))
-                if (self._site_queue and self._alt_cycle) or due:
+                # While a hit is being followed up the uplink gets the whole
+                # cycle: the handset may unkey at any moment, and nothing a
+                # downlink dwell could learn is urgent by comparison.
+                if not self._follow_left and ((self._site_queue and self._alt_cycle) or due):
                     site_results=self._site_work(now)
             else:
                 site_results=self._site_work(now)

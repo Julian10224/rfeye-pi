@@ -88,6 +88,12 @@ def _check_config_migration():
                               "phy_downlink_min_duty": 0.8,
                               "phy_min_dqpsk_selectivity": 1.6,
                               "brightness": 0.42}),
+            # A 0.9.25 install: the reference config wrote the 288 kS/s
+            # dwell explicitly, and profile 10 has to replace it.
+            ("0.9.25 reference install", {"detector_profile_version": 9,
+                                          "phy_sample_rate": 288000,
+                                          "phy_decimation": 8,
+                                          "phy_max_offset_hz": 100000.0}),
             ("fresh install", {}),
         ):
             with tempfile.TemporaryDirectory() as d:

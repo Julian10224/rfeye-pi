@@ -126,8 +126,12 @@ class Channelizer:
             self._spectrum = np.fft.fft(self.iq)
         return self._spectrum
 
-    def psd(self, nfft=1024, percentile=92.0, dc_notch_hz=2500.0):
+    def psd(self, nfft=None, percentile=92.0, dc_notch_hz=2500.0):
         """Occupancy spectrum as (offset_hz, power_db).
+
+        ``nfft`` defaults to 1024 bins per 288 kS/s, so every sample rate gets
+        the ~281 Hz resolution and ~3.6 ms rows the limits were calibrated
+        with: 1024 at 288 kS/s, 7168 at 2.016 MS/s.
 
         This is a short-time spectrum reduced over time by a high percentile
         rather than a mean.  That matters for the uplink: a handset transmits
@@ -141,6 +145,8 @@ class Channelizer:
         """
         if self._psd is not None:
             return self._psd
+        if nfft is None:
+            nfft = 1024 * max(1, int(round(self.sample_rate / 288_000.0)))
         nfft = int(nfft)
         rows = self.n // nfft
         if rows < 8:
@@ -392,7 +398,13 @@ def dqpsk_moments(bb, rate, baud, mask=None, timing_phases=8,
     valid = None
     if mask is not None:
         m = np.asarray(mask, dtype=bool)
-        rep = int(math.ceil(len(bb) / max(1, len(m))))
+        # One mask entry per envelope box, and power_envelope drops the partial
+        # box at the end -- so the box is the floor of the ratio, never the
+        # ceiling. At 288 kS/s the two agree (32768 / 1024). At 2.016 MS/s the
+        # channel is 18724 samples in 585 boxes of 32, and rounding up to 33
+        # slid the mask a whole TETRA slot off the bursts by the end of the
+        # dwell, which halved the symbol-rate score of every real uplink.
+        rep = max(1, len(bb) // max(1, len(m)))
         valid = np.repeat(m, rep)[:len(bb)]
         if len(valid) < len(bb):
             valid = np.concatenate([valid, np.zeros(len(bb) - len(valid), bool)])

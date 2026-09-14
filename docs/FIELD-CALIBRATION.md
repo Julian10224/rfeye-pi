@@ -103,6 +103,42 @@ The reference unit's RTL-SDR Blog V4 has a 1 ppm TCXO and measured +105 to
 +345 Hz on good carriers, so none of this is exercised there. It matters for
 plain dongles on other units.
 
+## Phantom carriers at 288 kS/s (detector profile 10)
+
+Measured on rfeye (RTL-SDR Blog V4, R828D, Blog driver) on 14 September 2026.
+Every verification dwell up to profile 9 ran at 288 kS/s, and two of the
+carriers that unit had held locked for days did not exist.
+
+Method: for each channel a 288 kS/s capture, then a 2.016 MS/s capture, then a
+second 288 kS/s capture, back to back, three rounds, so a carrier that is
+genuinely intermittent cannot explain a difference between the rates.
+
+| channel | 288 kS/s before | 2.016 MS/s (offset) | 288 kS/s after |
+| --- | --- | --- | --- |
+| 390.0375 | TETRA 16.1-17.0 dB | noise 0.6-0.9 dB (+300, -400 kHz) | TETRA 15.7-17.1 dB |
+| 390.6125 | TETRA 17.2-18.4 dB | noise 0.3-0.4 dB (+192, -307 kHz) | TETRA 17.3-18.3 dB |
+| 390.7375 | TETRA 19.5-20.1 dB | TETRA 21.1-21.7 dB (+-617 kHz) | TETRA 19.4-20.2 dB |
+| 391.1875 | TETRA 17.4-18.0 dB | TETRA 20.1 dB (+500 kHz) | TETRA 17.6-17.7 dB |
+
+The same two channels were noise at 250 kS/s and at 1.008 MS/s, with auto gain
+and with a fixed 37.2 dB, while 390.7375 stayed TETRA at every rate. rtl_power
+(2.0 MS/s, shares no code with RF Eye) put 390.0375 at -1.9 dB and 390.6125 at
+-0.3 dB against the median, and 390.7375, 391.1875 and 391.7625 at +15.8,
++14.7 and +13.5 dB. 390.0375 and 390.6125 are 391.1875 and 391.7625 minus
+1150 kHz: at 288 kS/s the RTL2832U delivers those carriers, modulation
+included, onto channels where nothing transmits.
+
+Real carriers measured at 2.016 MS/s matched their 288 kS/s figures: occupied
+width 21.4-21.9 kHz (21.4-21.7), symbol-rate selectivity 1.5-2.2 (1.5-1.8),
+SNR 0-2 dB higher, from -682 to +617 kHz off the tuner. No limit was changed.
+
+Also found while validating the wide dwell: the burst mask that restricts the
+uplink symbol-rate test to on-air samples was stretched with a ceiling where a
+floor was needed. Harmless at 288 kS/s, where the channel length is an exact
+multiple of the envelope box; at 2.016 MS/s it slid the mask a full slot off
+the bursts and halved the score of simulated handsets (0.36 against 0.66-0.78
+after the fix).
+
 ## Caveats
 
 This is one site, one location, one receiver, one moment. The tuner-error

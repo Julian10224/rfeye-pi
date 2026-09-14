@@ -1,6 +1,6 @@
-# RF Eye 0.9.25 for Raspberry Pi
+# RF Eye 0.9.26 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.25 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.26 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.25 appliance path:
+The installer reproduces the working 0.9.26 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.25
+## User interface in 0.9.26
 
 The compact profile contains:
 
@@ -214,26 +214,49 @@ to pass the full waveform test.
 **The survey is no longer the only path.** Every channel it can score goes to
 the front of the queue, best-looking first, followed by *every* remaining
 raster channel in the band. The survey can reorder the work but cannot hide
-any of it. A full pass is about 50 dwells, roughly 70 seconds, and it keeps
-running after the first lock: a TETRA site operates several carriers and a
-handset can be on any of them, so stopping at the first would leave real
-uplink channels unwatched.
+any of it. Since 0.9.26 one dwell spans +-600 kHz, so a full pass of the band
+is a handful of dwells rather than fifty, and it keeps running after the first
+lock: a TETRA site operates several carriers and a handset can be on any of
+them, so stopping at the first would leave real uplink channels unwatched.
 
-**Queue order is the time-to-lock budget.** One dwell covers four channels and
-costs about 1.1 s, so the position of a real carrier in a 200-channel queue is
-the difference between locking in five seconds and locking in seventy. Up to
-0.9.4 only the survey's top twelve were promoted and the other 188 followed in
-frequency order, which is uncorrelated with signal strength; since 0.9.12 the
-whole ranking is used. A carrier that passes the waveform test is re-tested on
-every following cycle, so the three hits a lock needs cost three cycles, not
-three band passes.
+**Queue order still decides what is checked first**, and a carrier that passes
+the waveform test is re-tested on every following cycle, so the three hits a
+lock needs cost three cycles, not three band passes.
 
 **Where the tuner is parked matters.** The RTL-SDR's DC spike sits exactly at
-the tuner centre, and channels lie on a continuous 25 kHz grid, so a tuner
-centred on a group of carriers lands the spike on one of them -- there is no
-gap in a contiguous run to hide in. The dwell planner therefore parks the
-tuner clear of the highest member of the group, which also bounds a dwell to
-the four channels that still fit inside the usable window.
+the tuner centre. The dwell planner parks the tuner 20 kHz to one side of a
+channel it is covering and picks, of all such placements, the one that covers
+the most channels in the list. In a contiguous run that leaves out the single
+channel beside the spike, which stays queued for the next dwell.
+
+### Phantom carriers at 288 kS/s (0.9.26)
+
+Up to 0.9.25 every verification dwell ran at 288 kS/s. At that rate the
+RTL2832U hands back real carriers from 1.15 MHz away as if they were sitting
+on the channel under test -- modulation and all, so they pass every waveform
+check. Measured on the reference unit on 14 September 2026, with a narrow
+capture taken immediately before and after each wide one:
+
+| Channel | 288 kS/s | 250 kS/s | 1.008 MS/s | 2.016 MS/s | rtl_power |
+| --- | --- | --- | --- | --- | --- |
+| 390.0375 MHz | TETRA 15-17 dB | noise | noise | noise | -1.9 dB |
+| 390.6125 MHz | TETRA 15-18 dB | noise | noise | noise | -0.3 dB |
+| 390.7375 MHz | TETRA 18-20 dB | TETRA | TETRA | TETRA, +-617 kHz | +15.8 dB |
+| 391.1875 MHz | TETRA 17-19 dB | -- | -- | TETRA | +14.7 dB |
+| 391.7625 MHz | TETRA 17-18 dB | -- | -- | TETRA | +13.5 dB |
+
+390.0375 and 390.6125 are 391.1875 and 391.7625 exactly 1150 kHz lower. Both
+had been locked for days. A phantom lock is not harmless: every locked
+downlink adds an uplink channel to the watch, so the receiver spent part of
+its time listening for handsets on channels no handset uses.
+
+Since 0.9.26 (detector profile 10) every dwell runs at 2.016 MS/s -- exactly
+112 times the symbol rate, decimated by 56 to the same 36 kS/s channel
+baseband the limits were calibrated on -- over 2^20 samples, 0.52 s. The real
+carriers measured the same there as at 288 kS/s: occupied width 21.4-21.9 kHz,
+symbol-rate selectivity 1.5-2.2, SNR within 2 dB, out to 682 kHz from the
+tuner. The site state from profile 9 is discarded on upgrade, so phantom locks
+do not survive it.
 
 ### A candidate must not take every dwell either
 
@@ -365,18 +388,59 @@ traffic carrier does not slowly unlock itself.
 each verified downlink names exactly one uplink channel where handsets on that
 site transmit: a verified downlink at 391.2375 MHz means handsets transmit at
 381.2375 MHz. The uplink search is therefore a short watch list rather than a
-blind sweep of 200 channels, and one 288 kS/s dwell covers a whole site's
-worth of channels at once.
+blind sweep of 200 channels, and one dwell covers +-600 kHz of it at once.
 
 An alert means: a handset physically near this receiver is transmitting on a
 carrier belonging to a base station this device independently verified.
 
-Confirmation is counted in **visits to that channel**, not in seconds. How
-often a given uplink channel comes round depends on how many carriers the site
-runs, and on a busy site a seconds-based window can expire between two looks
-at the same channel -- silently making confirmation unreachable exactly where
-detection matters most. Counting visits makes the rule independent of cycle
-duration, hardware speed and watch-list length.
+Confirmation is counted in **visits to that channel**, not in seconds: two
+verified hits within four visits. How often a given uplink channel comes round
+depends on how many carriers the site runs, and a seconds-based window could
+expire between two looks at the same channel. Counting visits makes the rule
+independent of cycle duration, hardware speed and watch-list length.
+
+### Why no alert was ever raised before 0.9.26
+
+Counting visits made confirmation *possible*; it did not make it *quick*. Up
+to 0.9.25 one uplink dwell looked at one channel, and the watch rotated
+through the list one channel per cycle. Measured on the reference unit with
+five locked carriers: every uplink channel came round once every **9 seconds**,
+and with the ten a car picks up while driving, over 20. A second hit therefore
+needed a transmission lasting two visits -- 18 s or more -- while a real
+push-to-talk is a few seconds of speech. Units drove past police vehicles
+again and again and never alerted, and every simulated alert scenario passed,
+because every one of them kept its handset keyed for the whole test.
+
+0.9.26 changes both halves:
+
+- **A wide dwell.** One 2.016 MS/s capture covers +-600 kHz, so a site's
+  uplink channels take one or two dwells instead of one each. A quiet wide
+  dwell costs about 0.67 s to read and 0.47 s to analyse on the Pi 3 B+ at the
+  900 MHz ceiling -- the same as one narrow channel used to.
+- **Follow-up.** A verified hit sends the next three dwells straight back to
+  the window that heard it, with the downlink work set aside, so the second
+  confirmation arrives while the handset is still on air. The follow-up is not
+  re-armed by its own hits, so a long transmission cannot leave the rest of the
+  site unwatched.
+
+Measured on the reference unit with 0.9.26, from an empty site state: the
+three real carriers locked within 60 s and no phantom with them, and over the
+next three minutes every uplink channel was examined every **1.7-1.8 s**
+(never more than 4.1 s), each uplink dwell covering all three channels in
+1.28 s. At 0.9.25 the same unit visited each channel every 9 s.
+
+`scripts/detector-selftest.py` scenario 17 keys a handset for three scan
+cycles on a five-carrier site and requires the alert inside that window;
+scenario 18 keeps a handset keyed for the whole test and requires the other
+carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
+dwell and passes with this one.
+
+**What still cannot be detected.** A radio that is switched on but not
+transmitting emits nothing -- driving past a parked or patrolling vehicle
+whose crew is not talking gives nothing to find. Short control bursts
+(registration, status messages) are a single slot and do not carry the TDMA
+frame structure the uplink test requires. And a handset on a carrier this
+unit has not locked is not watched.
 
 ### Why a search found nothing
 
@@ -421,15 +485,20 @@ a physical distance.
 
 ### Sampling and timing
 
-The verification dwell runs at 288 kS/s: exactly 28.8 MHz / 100, and exactly
-16x the 18000 baud symbol rate, so channel decimation and the symbol clock are
-both exact with no resampling. Each dwell is 2^18 samples (0.910 s, about 16
-TDMA frames). The tuner is deliberately offset from every channel under test
-so the RTL-SDR DC spike never lands on a carrier being measured.
+The verification dwell runs at 2.016 MS/s: exactly 112x the 18000 baud symbol
+rate, so decimating by 56 gives a 36 kS/s channel baseband with an exact
+symbol clock and no resampling. Each dwell is 2^20 samples (0.520 s, about 9
+TDMA frames) and covers channels up to 600 kHz either side of the tuner. The
+tuner is deliberately offset from every channel under test so the RTL-SDR DC
+spike never lands on a carrier being measured. Until 0.9.26 the dwell ran at
+288 kS/s; see *Phantom carriers at 288 kS/s* for why it no longer does.
 
-On the reference Pi 3 B+ a quiet cycle costs about 1.2 s and a cycle carrying
-a real transmission about 1.7 s. Tests run cheapest first and stop at the
-first hard failure, so a dwell full of empty channels costs the same as one.
+The occupancy spectrum keeps the same ~281 Hz bins and ~3.6 ms rows at either
+rate (1024 bins per 288 kS/s), so the calibrated limits mean the same thing.
+On the reference Pi 3 B+ at the 900 MHz ceiling a quiet wide dwell costs about
+0.67 s to read and 0.47 s to analyse, and one carrying a real transmission
+about 1.7 s of analysis. Tests run cheapest first and stop at the first hard
+failure, so a dwell full of empty channels costs little more than one.
 
 ### Verifying the detector yourself
 
@@ -459,7 +528,8 @@ measurements, how they were cross-checked with `rtl_power`, and what was ruled
 out.
 
 `detector-selftest.py` drives the whole backend against a simulated air
-interface, over eight scenarios drawn from what the hardware actually did:
+interface, over scenarios drawn from what the hardware actually did, among
+them:
 
 1. empty band with clutter -- never locks, never alerts
 2. C2000 site present, nobody transmitting -- locks, stays silent
@@ -469,7 +539,13 @@ interface, over eight scenarios drawn from what the hardware actually did:
 6. a real site buried under an RTL-SDR spur comb -- locks the carriers, never
    a comb tooth
 7. a full band pass over an empty band -- makes progress, never alerts
-8. dwell planning and raster arithmetic
+8. a call on a discontinuous traffic carrier -- locks it, alerts on its uplink
+9. the antenna comes off -- drops the lock, never alerts while deaf
+10. dwell planning and raster arithmetic
+11-16. queue order, rediscovery, quiet carriers, a frozen dongle
+17. a push-to-talk of three scan cycles on a five-carrier site -- alerts
+    while the handset is still on air (fails on the 0.9.25 dwell)
+18. a handset keyed throughout -- the other carrier's uplink is still watched
 
 ## RF recording
 
@@ -511,7 +587,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.25 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.26 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -638,7 +714,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.25**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.26**.
 
 Build the OTA package with:
 

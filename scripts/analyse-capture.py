@@ -112,7 +112,9 @@ def main():
             # Every raster point that fits in the window, so a capture can be
             # searched without knowing in advance which channel was busy.
             step = float(cfg["tetra_channel_spacing_hz"])
-            limit = float(cfg["phy_max_offset_hz"])
+            # Never search beyond what this capture actually carries: a
+            # sidecar from before profile 10 is only 288 kS/s wide.
+            limit = min(float(cfg["phy_max_offset_hz"]), 0.3 * rate)
             base = centre if centre else 0.0
             offs = np.arange(-limit, limit + 1, step)
             targets = [(base + o, o) for o in offs
@@ -123,7 +125,9 @@ def main():
             try:
                 res = phy.analyse(ch, offset, role=role, limits=cfg,
                                   freq_hz=freq, full=True,
-                                  decim=int(cfg["phy_decimation"]))
+                                  # 36 kS/s channel baseband at any rate:
+                                  # 8 for 288 kS/s, 56 for 2.016 MS/s.
+                                  decim=max(1, int(round(rate / 36000.0))))
             except Exception as e:
                 print(f"    {freq/1e6:.4f} MHz: {e}")
                 continue

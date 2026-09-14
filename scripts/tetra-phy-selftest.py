@@ -218,6 +218,52 @@ def constants_sanity():
             FAILURES.append(f"constant {name}: {got} != {want}")
 
 
+def wide_dwell():
+    """The shipping dwell: 2.016 MS/s, decimated by 56, channels to 600 kHz out.
+
+    Profile 10 moved verification off 288 kS/s because the RTL2832U hands back
+    real carriers from 1.15 MHz away as if they were on the channel under test
+    at that rate. The waveform tests have to reach the same verdicts at the new
+    rate -- with several channels sharing one capture, and at the edge of the
+    window as well as near the middle.
+    """
+    sr = 2_016_000.0
+    dur = (1 << 20) / sr
+    base_snr = 15.0
+    positives_ = (
+        ("wide: uplink 15 dB at the window edge", "UPLINK", -587_500.0, 15.0),
+        ("wide: uplink 20 dB", "UPLINK", 137_500.0, 20.0),
+        ("wide: downlink 20 dB at the other edge", "DOWNLINK", 587_500.0, 20.0),
+    )
+    comps = []
+    for i, (_, role, off, snr) in enumerate(positives_):
+        s = sim.tetra_carrier(dur, sr, role=role, seed=401 + i,
+                              slot_pattern=(i % 4,), freq_offset_hz=off)
+        comps.append((s, 10.0 ** ((snr - base_snr) / 20.0)))
+    comps.append((sim.gated_noise(dur, sr, 22_000.0, 0.0142, 0.0567,
+                                  -212_500.0, 409),
+                  10.0 ** ((20.0 - base_snr) / 20.0)))
+    iq = sim.make_capture(comps, dur, sr, snr_db=base_snr, seed=411)
+    ch = phy.Channelizer(iq, sr)
+    cases = [(n, r, o, True) for n, r, o, _ in positives_] + [
+        ("wide: TDMA-gated noise on an uplink", "UPLINK", -212_500.0, False),
+        ("wide: empty uplink channel", "UPLINK", -400_000.0, False),
+    ]
+    for name, role, off, expect in cases:
+        r = phy.analyse(ch, off, role=role, freq_hz=390_000_000.0 + off,
+                        decim=56, full=True)
+        fast = phy.analyse(ch, off, role=role, freq_hz=390_000_000.0 + off,
+                           decim=56)
+        if fast.ok != r.ok:
+            FAILURES.append(f"{name}: fail-fast path disagrees with full analysis "
+                            f"({fast.reason} vs {r.reason})")
+        ROWS.append((name, role, expect, r))
+        if r.ok != expect:
+            FAILURES.append(
+                f"{name}: expected {'ACCEPT' if expect else 'REJECT'}, "
+                f"got {'ACCEPT' if r.ok else 'REJECT'} ({r.reason})")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--table", action="store_true",
@@ -227,6 +273,7 @@ def main():
     constants_sanity()
     positives()
     negatives()
+    wide_dwell()
     scores = rate_selectivity_sanity()
 
     if args.table:
