@@ -1,4 +1,4 @@
-name: RF Eye 0.9.27 appliance checks
+name: RF Eye 0.9.28 appliance checks
 
 on:
   push:
@@ -204,6 +204,9 @@ jobs:
           grep -q 'os.sync()' rfeye/updater.py
           grep -q 'def _runtime_intact' rfeye/updater.py
           grep -q 'start-rfeye restored the runtime' scripts/start-rfeye.sh
+          # 0.9.28: a band pass costs 30 s now, so the rescan after a lock
+          # no longer waits five minutes.
+          grep -q '"site_rescan_s": 120.0' rfeye/config.py
           ! grep -q 'if alerted and bool(cfg.get("rf_record_iq"' rfeye/compact_ui_controls.py
           grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
           grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py
@@ -354,7 +357,7 @@ jobs:
           assert c['site_lock_hits']==3
           assert c['site_unlock_misses']==4
           assert c['site_reverify_s']==60.0
-          assert c['site_rescan_s']==300.0
+          assert c['site_rescan_s']==120.0
           assert c['low_power_locked_pause_s']==0.25
           assert 'display_sweep_interval' not in c
           assert c['site_silence_window_s']==180.0

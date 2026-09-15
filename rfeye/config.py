@@ -133,7 +133,15 @@ DEFAULTS = {
     # How often the whole band is swept again once a network is locked. A site
     # runs several carriers and each one carries its own uplink partner, so a
     # single locked carrier watches a single uplink channel.
-    "site_rescan_s": 300.0,
+    #
+    # 300 s dated from the 288 kS/s dwell, when a pass itself took 300 s. At
+    # 2.016 MS/s a pass is about nine dwells, 30 s, so waiting five minutes
+    # after the first lock before looking for the site's other carriers was
+    # pure delay -- measured on rfeye, a second carrier locked only on the
+    # pass after next. Driving, that is kilometres of unwatched uplinks. At
+    # 120 s a pass takes about a quarter of the cycles, and each uplink
+    # channel is still examined every ~3 s while one runs.
+    "site_rescan_s": 120.0,
     # How long silence everywhere at once stops being an idle carrier and
     # starts being a deaf receiver. Collective on purpose: see
     # SiteRegistry.heard_recently.
@@ -204,7 +212,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.27",
+    "app_version": "0.9.28",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

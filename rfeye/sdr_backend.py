@@ -942,7 +942,7 @@ class SDRBackend:
             # priority list, so candidates and due re-proofs are still served
             # first; the refill only decides what gets swept up alongside them.
             if locked:
-                interval=max(30.,float(self.cfg.get('site_rescan_s',300.0)))
+                interval=max(30.,float(self.cfg.get('site_rescan_s',120.0)))
             else:
                 interval=max(5.,float(self.cfg.get('survey_idle_interval_s',15.0)))
             if not self._survey_at or now-self._survey_at>=interval:
