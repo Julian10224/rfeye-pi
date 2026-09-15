@@ -133,6 +133,37 @@ def tetra_carrier(duration_s, sample_rate, role='DOWNLINK', seed=0,
     return (sig / max(rms, 1e-9)).astype(np.complex64)
 
 
+def control_burst(duration_s, sample_rate, seed=0, n_slots=1, start_frac=0.4,
+                  freq_offset_hz=0.0):
+    """A single short uplink transmission: a few TETRA slots, then silence.
+
+    This is what a moving mobile keys up crossing a cell boundary -- a
+    registration or location update -- as opposed to a held voice call. It is
+    genuine pi/4-DQPSK in a 25 kHz channel, so it must pass the modulation and
+    shape tests, but it has no repeating frame structure, so strict mode
+    rejects it and sensitive mode accepts it. Used to prove exactly that.
+    """
+    base = tetra_carrier(duration_s, sample_rate, role='DOWNLINK', seed=seed)
+    n = len(base)
+    slot = int(round(tetra_phy.SLOT_S * sample_rate))
+    ramp = max(1, slot // 32)
+    gate = np.zeros(n, dtype=np.float32)
+    a = int(n * float(start_frac))
+    b = min(n, a + int(n_slots) * slot)
+    gate[a:b] = 1.0
+    if b - a > 2 * ramp:
+        w = 0.5 * (1.0 - np.cos(np.pi * (np.arange(ramp) + 0.5) / ramp))
+        gate[a:a + ramp] = w
+        gate[b - ramp:b] = w[::-1]
+    sig = base * gate.astype(np.float32)
+    if freq_offset_hz:
+        t = np.arange(n, dtype=np.float64) / float(sample_rate)
+        sig = sig * np.exp(2j * math.pi * float(freq_offset_hz) * t)
+    active = np.abs(sig) > 0.05 * (np.max(np.abs(sig)) + 1e-9)
+    rms = float(np.sqrt(np.mean(np.abs(sig[active]) ** 2))) if np.any(active) else 1.0
+    return (sig / max(rms, 1e-9)).astype(np.complex64)
+
+
 def dqpsk_carrier(duration_s, sample_rate, baud, seed=0, freq_offset_hz=0.0):
     """pi/4-DQPSK at an arbitrary symbol rate.
 

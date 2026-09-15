@@ -264,6 +264,71 @@ def wide_dwell():
                 f"got {'ACCEPT' if r.ok else 'REJECT'} ({r.reason})")
 
 
+def sensitive_uplink():
+    """A short control burst: rejected as a call, accepted as sensitive.
+
+    A moving mobile keys up a registration/location-update burst crossing
+    cells even with nobody talking. It is real pi/4-DQPSK in a 25 kHz channel
+    but has no repeating frame structure, so strict mode (a held call) rejects
+    it and sensitive mode accepts it -- while noise and a continuously keyed
+    carrier are rejected in both. This is the 0.9.29 behaviour the field never
+    got: eight drives past police, no held call, no alert.
+    """
+    SR = 2_016_000.0
+    dur = (1 << 20) / SR
+    sens = {"uplink_sensitive": True}
+    base = 15.0
+
+    def cap(sig, snr, seed):
+        return phy.Channelizer(
+            sim.make_capture([(sig, 1.0)], dur, SR, snr_db=snr, seed=seed), SR)
+
+    def verdict(iq, limits):
+        r = phy.analyse(iq, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
+                        limits=limits, decim=56, full=True)
+        fast = phy.analyse(iq, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
+                           limits=limits, decim=56)
+        if fast.ok != r.ok:
+            FAILURES.append(f"sensitive: fail-fast disagrees ({fast.reason} vs {r.reason})")
+        return r
+
+    cases = []
+    for n_slots, snr, seed in ((2, 30, 611), (2, 22, 613), (3, 18, 617)):
+        iq = cap(sim.control_burst(dur, SR, seed=seed, n_slots=n_slots,
+                                   freq_offset_hz=90_000.0), snr, seed + 50)
+        # Strict rejects (not a held call); sensitive accepts.
+        cases.append((f"control burst {n_slots} slots {snr} dB", iq, False, True))
+    # A held call is accepted by both.
+    call = cap(sim.tetra_carrier(dur, SR, role="UPLINK", seed=651,
+                                 freq_offset_hz=90_000.0), 20, 701)
+    cases.append(("held voice call", call, True, True))
+    # Noise, and a continuously keyed carrier (a base station bleeding into the
+    # uplink under overload), are rejected even in sensitive mode.
+    noise = cap(sim.control_burst(dur, SR, seed=1, n_slots=0), 0, 5)  # all-silent -> noise
+    cases.append(("empty uplink channel", noise, False, False))
+    cont = cap(sim.tetra_carrier(dur, SR, role="DOWNLINK", seed=661,
+                                 freq_offset_hz=90_000.0), 20, 703)
+    cases.append(("continuous carrier in the uplink band", cont, False, False))
+
+    for name, iq, want_strict, want_sens in cases:
+        rs = verdict(iq, None)
+        ROWS.append(("strict: " + name, "UPLINK", want_strict, rs))
+        if rs.ok != want_strict:
+            FAILURES.append(f"strict {name}: expected {'ACCEPT' if want_strict else 'REJECT'}, got {rs.reason}")
+        rr = verdict(iq, sens)
+        ROWS.append(("sensitive: " + name, "UPLINK", want_sens, rr))
+        if rr.ok != want_sens:
+            FAILURES.append(f"sensitive {name}: expected {'ACCEPT' if want_sens else 'REJECT'}, got {rr.reason}")
+    # The point of the mode: a short burst that strict rejects, sensitive takes.
+    burst = cap(sim.control_burst(dur, SR, seed=613, n_slots=2,
+                                  freq_offset_hz=90_000.0), 22, 663)
+    if phy.analyse(burst, 90_000.0, role="UPLINK", freq_hz=380_100_000.0, decim=56).ok:
+        FAILURES.append("sensitive: strict mode accepted a lone control burst")
+    if not phy.analyse(burst, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
+                       limits=sens, decim=56).ok:
+        FAILURES.append("sensitive: sensitive mode rejected a lone control burst")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--table", action="store_true",
@@ -274,6 +339,7 @@ def main():
     positives()
     negatives()
     wide_dwell()
+    sensitive_uplink()
     scores = rate_selectivity_sanity()
 
     if args.table:

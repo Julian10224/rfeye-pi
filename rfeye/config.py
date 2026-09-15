@@ -122,6 +122,19 @@ DEFAULTS = {
     "phy_uplink_min_slot_quantisation": 0.45,
     "phy_uplink_min_bursts": 3,
 
+    # Sensitive detection. On (the product default since 0.9.29) so the alarm
+    # also fires on a short uplink control/registration burst -- what a moving
+    # mobile keys up crossing cells even when nobody is talking -- and not only
+    # on a held voice call. It confirms on a single verified hit. This is what
+    # a car driving past emits most of the time; the trade is more false
+    # alarms, since a lone freak pass now alerts. Every hit still had to pass
+    # the full 25 kHz shape and pi/4-DQPSK / 18 kbaud / selectivity tests, so
+    # noise, the base station bleeding in under overload, and other digital
+    # systems are still rejected. Turn it off in Settings for the strict
+    # held-call-only behaviour.
+    "uplink_sensitive": True,
+    "phy_uplink_sensitive_percentile": 98.0,
+
     # C2000 network lock. Slow to acquire, slower to lose.
     "duplex_split_hz": 10_000_000.0,
     "site_lock_hits": 3,
@@ -212,7 +225,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.28",
+    "app_version": "0.9.29",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

@@ -19,8 +19,13 @@ import sdr_backend
 import buzzer
 
 
+class _FakeAlarm:
+    def __init__(self): self.confirmed=False
+    def reset(self): self.confirmed=False
+
+
 class FakeBackend:
-    def __init__(self,cfg): self.cfg=cfg
+    def __init__(self,cfg): self.cfg=cfg; self.alarm=_FakeAlarm()
     def start(self): pass
     def stop(self): pass
     def set_demo(self,value): self.cfg["demo_mode"]=bool(value)
@@ -731,8 +736,8 @@ def main():
     # Derived from the layout constants, not written out: the settings rows
     # have moved before and a hard-coded y silently taps the wrong feature.
     from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_HEIGHT
-    _ROWS = ["demo_mode", "brightness", "low_power", "record_rf", "recordings",
-             "wifi", "update", "debug"]
+    _ROWS = ["demo_mode", "brightness", "low_power", "sensitive", "record_rf",
+             "recordings", "wifi", "update", "debug"]
     def _row_y(name):
         return SETTINGS_TOP + _ROWS.index(name) * SETTINGS_STEP + SETTINGS_HEIGHT // 2
     # Brightness slider: both ends have to be reachable with a finger inside
@@ -794,6 +799,18 @@ def main():
     # Leave the notice as the later check expects to find it.
     a.power_notice_done = False
     a.power_notice_lines = []
+
+    # Sensitive toggle: strict <-> sensitive, and it clears any standing
+    # alarm confirmation so the mode change is not carried by stale state.
+    assert a.cfg.get("uplink_sensitive") is True, "sensitive is the shipped default"
+    a.backend.alarm.confirmed = True
+    time.sleep(0.15)
+    a._tap(40, _row_y("sensitive"))
+    assert a.cfg["uplink_sensitive"] is False, "the row flips the mode"
+    assert a.backend.alarm.confirmed is False, "switching mode clears the alarm"
+    time.sleep(0.15)
+    a._tap(40, _row_y("sensitive"))
+    assert a.cfg["uplink_sensitive"] is True
 
     a.page = "settings"
 

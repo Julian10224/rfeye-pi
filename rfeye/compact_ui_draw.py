@@ -4,9 +4,11 @@ WHITE=(224,229,236); DIM=(82,90,100); SEG_OFF=(34,35,31); GREEN=(57,205,91)
 YELLOW=(243,192,56); RED=(230,54,54)
 
 SETTINGS_TOP=62
-SETTINGS_STEP=48
-SETTINGS_HEIGHT=44
-SETTINGS_COUNT=8
+# Nine rows now, so a little tighter than the old 48/44 to keep the last row
+# clear of the "Made by" footer at y=463.
+SETTINGS_STEP=44
+SETTINGS_HEIGHT=40
+SETTINGS_COUNT=9
 # The slider is centred on the panel and kept clear of both edges: at
 # X1=298 the 100% end sat 22px from the glass and a finger reached the
 # enclosure wall before it reached maximum, so the row could not be driven
@@ -150,6 +152,7 @@ def draw_settings(app):
         ("Demo","ON" if app.cfg.get("demo_mode") else "OFF","toggle"),
         ("Brightness",f'{int(round(float(app.cfg.get("brightness",1.0))*100))}%',"brightness_slider"),
         ("Max power","OFF" if app.cfg.get("low_power_mode",True) else "ON","toggle"),
+        ("Gevoelig","ON" if app.cfg.get("uplink_sensitive",True) else "OFF","toggle"),
         ("Record RF",(f'REC {max(0,int(round(float(getattr(app,"rf_record_end",0.0))-time.monotonic())))}s' if bool(getattr(app,"rf_recording",False)) else (getattr(app,"rf_record_message","SAVE") if time.monotonic()<float(getattr(app,"rf_record_message_until",0.0)) else "SAVE")),"action"),
         ("Recordings","OPEN","action"),
         ("Wi-Fi",app._wifi_text(),"status"),

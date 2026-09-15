@@ -328,7 +328,16 @@ class UplinkAlarm:
         """``verified`` are the PhyResults that passed; ``watched`` is every
         channel actually examined in this dwell, hit or not."""
         now = time.time() if now is None else float(now)
-        need = max(1, int(self.cfg.get('uplink_confirm_dwells', 2)))
+        # Sensitive mode confirms on a single verified hit. A control burst is
+        # a one-off -- it will not come round twice on the same channel -- so
+        # requiring two hits would silently make it unconfirmable, which is the
+        # whole failure this mode exists to fix. Every hit reaching here has
+        # already passed the full shape and modulation verification, so one is
+        # real evidence; the trade is that a single freak pass can now alert.
+        if bool(self.cfg.get('uplink_sensitive', False)):
+            need = 1
+        else:
+            need = max(1, int(self.cfg.get('uplink_confirm_dwells', 2)))
         span = max(need, int(self.cfg.get('uplink_confirm_visits', 4)))
         hold = max(0.0, float(self.cfg.get('uplink_alert_hold_s', 12.0)))
         max_age = max(10.0, float(self.cfg.get('uplink_state_max_age_s', 90.0)))

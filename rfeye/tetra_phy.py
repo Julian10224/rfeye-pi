@@ -111,7 +111,7 @@ class Channelizer:
         self.bin_hz = self.sample_rate / self.n
         self.iq = iq[:n].astype(np.complex64)
         self._spectrum = None
-        self._psd = None
+        self._psd_cache = {}
 
     @property
     def spectrum(self):
@@ -142,12 +142,21 @@ class Channelizer:
 
         The same percentile is used for the signal and the noise reference, so
         its positive bias cancels in every ratio derived from this spectrum.
+
+        A higher percentile recovers a shorter transmission: the default 92
+        needs the channel busy for at least ~8% of the dwell, so a single
+        14 ms control burst (2-3% duty) is averaged away and reads as noise.
+        The sensitive uplink path asks for ~98 so a one-off registration burst
+        still lifts above the floor.  The result is cached per percentile, so
+        a dwell that measures both costs each FFT reduction only once.
         """
-        if self._psd is not None:
-            return self._psd
         if nfft is None:
             nfft = 1024 * max(1, int(round(self.sample_rate / 288_000.0)))
         nfft = int(nfft)
+        key = (nfft, float(percentile), float(dc_notch_hz))
+        cached = self._psd_cache.get(key)
+        if cached is not None:
+            return cached
         rows = self.n // nfft
         if rows < 8:
             raise ValueError('capture too short for spectrum analysis')
@@ -159,9 +168,10 @@ class Channelizer:
         notch = np.abs(f) <= float(dc_notch_hz)
         if np.any(notch) and not np.all(notch):
             red[notch] = float(np.median(red[~notch]))
-        self._psd = (np.fft.fftshift(f).astype(np.float64),
-                     _db(np.fft.fftshift(red)))
-        return self._psd
+        out = (np.fft.fftshift(f).astype(np.float64),
+               _db(np.fft.fftshift(red)))
+        self._psd_cache[key] = out
+        return out
 
     def extract(self, offset_hz, decim, edge_taper=0.12):
         """Return (baseband, rate) for the channel centred on ``offset_hz``.
@@ -511,6 +521,9 @@ class PhyResult:
     # True for a continuously transmitting main carrier, false for a
     # discontinuous traffic carrier. Diagnostic only; both are real.
     continuous: bool = False
+    # True when judged by the relaxed sensitive-uplink rules (a short control
+    # burst counts), rather than the strict sustained-call rules.
+    sensitive: bool = False
     checks: dict = field(default_factory=dict)
 
     def as_dict(self):
@@ -591,7 +604,23 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
     lim = limits_from(limits)
     res = PhyResult(freq_hz=float(freq_hz), role=str(role))
 
-    freqs, psd = channelizer.psd()
+    # Sensitive mode also alerts on a short control/registration burst -- a
+    # moving mobile keys those up crossing cells even when nobody is talking --
+    # not only on a held voice call. Such a burst is a few per cent duty, so
+    # the occupancy spectrum is measured at a higher percentile to see it at
+    # all. Every TETRA-proving test (the 25 kHz shape, the pi/4-DQPSK / 18 kbaud
+    # / selectivity tests) still has to pass; only the sustained-call structure
+    # tests are relaxed. See the uplink block below.
+    # Sensitive mode is a mode switch, not an acceptance limit, so it is read
+    # straight from the passed config rather than the merged LIMITS defaults
+    # (production passes the backend cfg here; the tests pass a small dict).
+    cfg_src = limits if isinstance(limits, dict) else {}
+    sensitive = bool(cfg_src.get('uplink_sensitive', False)) and str(role) == 'UPLINK'
+    pct = (float(cfg_src.get('phy_uplink_sensitive_percentile', 98.0))
+           if sensitive else 92.0)
+    res.sensitive = sensitive
+
+    freqs, psd = channelizer.psd(percentile=pct)
     shape = channel_shape(freqs, psd, centre_hz=freq_offset_hz)
 
     # An uncalibrated tuner puts the carrier somewhere near, but not on, the
@@ -660,6 +689,20 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
         # watch list is derived from locked downlinks, every call that moved
         # to a traffic carrier would have gone unwatched.
         checks['on_air'] = res.duty >= lim['phy_downlink_min_duty']
+        res.continuous = res.duty >= 0.80
+    elif sensitive:
+        # A mobile keyed up on the uplink -- long call or single control burst.
+        # The sustained-call structure (a repeating 17.647 Hz frame line, three
+        # or more slots, a clean slot grid) is not required, because a
+        # registration burst has none of it. What is required is that something
+        # really was keyed up (at least one burst, and not a continuously
+        # transmitting carrier, which on the uplink means a base station
+        # bleeding in under overload, never a handset) and that it is TETRA --
+        # the shape above and the modulation tests below, which are what keep
+        # this off noise, spurs and other digital systems.
+        checks['on_air'] = (res.burst_count >= 1
+                            and lim['phy_uplink_min_duty'] * 0.25 <= res.duty
+                            <= lim['phy_uplink_max_duty'])
         res.continuous = res.duty >= 0.80
     else:
         checks['burst_duty'] = (lim['phy_uplink_min_duty'] <= res.duty

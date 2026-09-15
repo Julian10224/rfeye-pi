@@ -411,8 +411,8 @@ def tap(app, x, y):
             app.page = "main"
             return
         idx = int((y - SETTINGS_TOP) / SETTINGS_STEP)
-        keys = ["demo_mode", "brightness", "low_power", "record_rf", "recordings",
-                "wifi", "update", "debug"]
+        keys = ["demo_mode", "brightness", "low_power", "sensitive", "record_rf",
+                "recordings", "wifi", "update", "debug"]
         if not 0 <= idx < min(SETTINGS_COUNT, len(keys)): return
         key = keys[idx]
         if key == "demo_mode":
@@ -430,6 +430,18 @@ def tap(app, x, y):
                 v=round((lo+n*(hi-lo))/step)*step; app.cfg["brightness"]=max(lo,min(hi,v)); _save(app)
         elif key == "low_power":
             _toggle_low_power(app)
+        elif key == "sensitive":
+            # Strict <-> sensitive. Sensitive also alerts on a short control
+            # burst and confirms on one hit; strict wants a held call. The
+            # alarm reads the flag live, so no reinit is needed -- but clear
+            # any standing confirmation so the mode change is not carried by
+            # stale state.
+            app.cfg["uplink_sensitive"] = not bool(app.cfg.get("uplink_sensitive", True))
+            _save(app)
+            try:
+                app.backend.alarm.reset()
+            except Exception:
+                pass
         elif key == "record_rf":
             if not bool(getattr(app,"rf_recording",False)):
                 app.record_confirm_opened=time.monotonic(); app.page="record_confirm"

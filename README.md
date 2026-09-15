@@ -1,6 +1,6 @@
-# RF Eye 0.9.28 for Raspberry Pi
+# RF Eye 0.9.29 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.28 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.29 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.28 appliance path:
+The installer reproduces the working 0.9.29 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.28
+## User interface in 0.9.29
 
 The compact profile contains:
 
@@ -93,7 +93,9 @@ The compact profile contains:
 - settings gear and large touch targets
 - Sound/Mute on the home screen, and the number of verified C2000
   downlink carriers where the spectrum button used to be
-- Settings with eight rows, including a dedicated Recordings browser
+- Settings with nine rows, including a dedicated Recordings browser
+- a **Gevoelig** (sensitive) toggle: on by default, it also alerts on a short
+  control burst and confirms on one hit; off is the strict held-call behaviour
 - no spectrum page: it cost a wide sweep every fourth cycle to draw
   something the detector never read
 - automatic soft RF sensitivity with no dB slider
@@ -442,12 +444,45 @@ scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
 
-**What still cannot be detected.** A radio that is switched on but not
-transmitting emits nothing -- driving past a parked or patrolling vehicle
-whose crew is not talking gives nothing to find. Short control bursts
-(registration, status messages) are a single slot and do not carry the TDMA
-frame structure the uplink test requires. And a handset on a carrier this
-unit has not locked is not watched.
+### Sensitive mode: short control bursts (0.9.29)
+
+0.9.26 caught a held voice call, but eight drives past police vehicles still
+raised no alert, because a car that is merely driving is not being talked on.
+The recordings proved it: the base stations came through at 15-20 dB while the
+watched uplink channels stayed empty -- there was no held call to catch. A
+moving mobile does still key up the uplink, but only in **short control
+bursts** (registration and location updates as it crosses cells, status
+messages), which the held-call test throws away: they have no repeating
+17.647 Hz frame line, one or two slots instead of many.
+
+**Sensitive mode** (the `Gevoelig` Settings toggle, on by default) alerts on
+those too. It keeps every TETRA-*proving* test -- the 25 kHz channel shape and
+the pi/4-DQPSK / 18 kbaud / selectivity tests -- and drops only the
+sustained-call structure tests, and it confirms on a single verified hit
+because a control burst does not come round twice. To see a few-per-cent-duty
+burst at all, the occupancy spectrum for the uplink is read at the 98th
+percentile rather than the 92nd. Turning the toggle off restores the strict
+held-call behaviour.
+
+The trade is real: a lone freak pass now raises an alert, so sensitive mode
+gives more false alarms than strict. What holds the line is that the shape and
+modulation tests still have to pass. Checked against the eight field
+recordings, over 192 uplink channels including two with heavy front-end
+clipping (34% and 11%), sensitive mode produced **zero** false accepts -- there
+simply was no TETRA burst on air in them.
+
+`scripts/tetra-phy-selftest.py` (`sensitive_uplink`) asserts that a simulated
+2-3 slot control burst is rejected strict and accepted sensitive, while noise
+and a continuously keyed carrier are rejected in both;
+`scripts/detector-selftest.py` scenario 19 drives one through the whole backend
+and requires an alert in sensitive mode and silence in strict.
+
+**What still cannot be detected, in either mode.** A radio switched on but not
+transmitting emits nothing -- a parked or patrolling vehicle whose crew is not
+talking and whose terminal is not registering gives nothing to find, and no
+passive receiver can change that. A handset on a carrier this unit has not
+locked is not watched. And detection is proof that *an emergency-services
+radio transmitted nearby*, never that a *specific* vehicle did.
 
 ### Why a search found nothing
 
@@ -594,7 +629,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.28 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.29 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -743,7 +778,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.28**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.29**.
 
 Build the OTA package with:
 
