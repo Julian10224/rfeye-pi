@@ -187,7 +187,12 @@ DEFAULTS = {
     "site_band_start_hz": 390_000_000,
     "site_band_end_hz": 395_000_000,
     "max_signals": 3,
-    "rf_record_duration_s": 15.0,
+    # A recording logs what the detector sees for this long. An uplink control
+    # burst is a fraction of a second and each uplink channel comes round only
+    # every few seconds, so a short window rarely catches one -- 15 s never did
+    # across fifteen field recordings. A minute gives a burst about four times
+    # the chance of falling inside a visited dwell. The worker clamps to 120 s.
+    "rf_record_duration_s": 60.0,
     "ui_fps": 20,
     # Low power mode. The detector keeps a Pi 3 B+ at its full 1.4 GHz around
     # the clock, which on a marginal supply is the difference between the
@@ -225,7 +230,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.30",
+    "app_version": "0.9.31",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

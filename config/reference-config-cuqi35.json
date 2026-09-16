@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.9.30",
+  "app_version": "0.9.31",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -50,7 +50,7 @@
   "physical_height": 320,
   "physical_width": 480,
   "ppm": 0,
-  "rf_record_duration_s": 15.0,
+  "rf_record_duration_s": 60.0,
   "rf_record_iq": true,
   "rotation": "cw",
   "sample_rate": 2048000,
