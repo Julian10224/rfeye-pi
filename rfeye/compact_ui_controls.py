@@ -401,8 +401,18 @@ def tap(app, x, y):
     if app.page == "main":
         if x <= 105 and y <= 115:
             app.page = "settings"
-        elif y >= 326 and x < 145:
-            app._toggle_mute()
+        elif y >= 364:
+            # The three bottom tiles: SOUND (left), the C2000 lock count
+            # (middle), status (right). The middle tile is a shortcut straight
+            # to the recording confirmation, so making a capture next to a
+            # vehicle does not mean diving into the settings menu first. The
+            # split follows the tile rects in draw_main (8..102, 112..208).
+            if x < 108:
+                app._toggle_mute()
+            elif x <= 212:
+                if not bool(getattr(app, "rf_recording", False)):
+                    app.record_confirm_opened = time.monotonic()
+                    app.page = "record_confirm"
         return
 
     if app.page == "settings":

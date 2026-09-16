@@ -727,6 +727,22 @@ def main():
         draw()
         assert a.ui.get_size()==(320,480),page
 
+    # Main-screen shortcuts: the middle tile (the C2000 lock count) jumps
+    # straight to the recording confirmation, so a capture next to a vehicle
+    # needs no menu; the left tile still toggles mute.
+    a.page="main"
+    a._last_compact_tap=0.0
+    a._tap(160,420)
+    assert a.page=="record_confirm", a.page
+    a.page="main"
+    keep_muted=bool(a.cfg.get("muted"))
+    a._last_compact_tap=0.0
+    a._tap(40,420)
+    assert bool(a.cfg.get("muted")) != keep_muted, "left tile toggles mute"
+    a._last_compact_tap=0.0
+    a._tap(40,420)
+    assert bool(a.cfg.get("muted")) == keep_muted
+
     # Compact touch route: main -> settings -> record confirmation -> cancel.
     a.page="main"
     a._last_compact_tap=0.0

@@ -1,4 +1,4 @@
-name: RF Eye 0.9.29 appliance checks
+name: RF Eye 0.9.30 appliance checks
 
 on:
   push:
@@ -214,6 +214,9 @@ jobs:
           grep -q 'def check_sensitive_control_burst' scripts/detector-selftest.py
           grep -q 'def sensitive_uplink' scripts/tetra-phy-selftest.py
           grep -q 'key == "sensitive"' rfeye/compact_ui_controls.py
+          # 0.9.30: the middle home tile (the C2000 lock count) is a
+          # shortcut straight to the recording confirmation.
+          grep -q 'x <= 212' rfeye/compact_ui_controls.py
           ! grep -q 'if alerted and bool(cfg.get("rf_record_iq"' rfeye/compact_ui_controls.py
           grep -q 'RTLSDR_MODEL_MARKER' rfeye/sdr_backend.py
           grep -q 'def open_rtlsdr_library' rfeye/sdr_backend.py
