@@ -531,11 +531,14 @@ def tap(app, x, y):
         # Fail-safe layout: NEE is the large upper button and is the default for
         # every tap outside the deliberately separated lower JA button.  This is
         # robust against horizontal calibration error on the resistive panel.
+        # Both JA and NEE return to the main screen: a started recording shows
+        # its countdown there in place of the lock count, and cancelling drops
+        # you back to watching rather than into the menu.
         if 350 <= y <= 455:
             _record_rf_sample(app)
-            app.page="settings"
+            app.page="main"
         elif 205 <= y < 350 or y < 80:
-            app.page="settings"
+            app.page="main"
         return
 
     if app.page == "wifi":

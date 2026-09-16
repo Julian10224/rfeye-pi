@@ -138,9 +138,18 @@ def draw_main(app, snap):
     for rect in [(8,374,94,90),(112,374,96,90),(218,374,94,90)]: pygame.draw.rect(app.ui,(17,20,25),rect,border_radius=11)
     app._text("MUTED" if app.cfg.get("muted") else "SOUND",55,405,app.font_m,RED if app.cfg.get("muted") else BLUE_BRIGHT,center=True)
     app._text("tap",55,438,app.font_s,DIM,center=True)
-    nlock=int(snap.get("site_locked_count",0) or 0)
-    app._text(str(nlock),160,402,app.font_l,GREEN if nlock else DIM,center=True)
-    app._text("LOCKED",160,438,app.font_s,DIM,center=True)
+    import math, time
+    rec_left=(float(getattr(app,"rf_record_end",0.0))-time.monotonic()
+              if bool(getattr(app,"rf_recording",False)) else 0.0)
+    if rec_left>0.0:
+        # While recording, the middle tile counts the capture down in place of
+        # the lock count, then returns to it when the recording finishes.
+        app._text("%d"%int(math.ceil(rec_left)),160,402,app.font_l,RED,center=True)
+        app._text("REC",160,438,app.font_s,RED,center=True)
+    else:
+        nlock=int(snap.get("site_locked_count",0) or 0)
+        app._text(str(nlock),160,402,app.font_l,GREEN if nlock else DIM,center=True)
+        app._text("LOCKED",160,438,app.font_s,DIM,center=True)
     app._text(state,265,405,app.font_m if len(state)<7 else app.font_s,col,center=True); app._text("status",265,438,app.font_s,DIM,center=True)
 
 def draw_settings(app):

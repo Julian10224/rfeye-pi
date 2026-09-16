@@ -836,7 +836,18 @@ def main():
     a.record_confirm_opened=time.monotonic()-1.0
     a._last_compact_tap=0.0
     a._tap(160,250)
-    assert a.page=="settings"
+    # NEE returns to the main screen, not the menu -- a cancelled recording
+    # drops you back to watching.
+    assert a.page=="main", a.page
+
+    # The recording countdown renders on the main screen in place of the lock
+    # count while a capture is running, and reverts when it ends.
+    a.rf_recording=True
+    a.rf_record_end=time.monotonic()+42.0
+    a._draw_main(a.backend.snapshot())
+    a.rf_recording=False
+    a.rf_record_end=0.0
+    a._draw_main(a.backend.snapshot())
 
     # Keyboard SHIFT and escaped SSID handling stay available in compact mode.
     a.wifi_shift=False
