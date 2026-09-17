@@ -119,9 +119,18 @@ class FakeAir:
                                                 freq_offset_hz=off), 1.0))
             elif kind == "control_burst":
                 # A single short uplink transmission: a moving mobile keying up
-                # a registration burst, not a held call.
+                # a registration burst, not a held call. One slot of one frame,
+                # which is what a terminal really sends -- this was two
+                # contiguous slots until 0.9.33, a shape that cleared the
+                # occupancy measurement a single slot could not.
                 parts.append((sim.control_burst(dur, sr, seed=self.seed + 37,
-                                                n_slots=2, freq_offset_hz=off), 1.0))
+                                                n_slots=1, freq_offset_hz=off), 1.0))
+            elif kind == "access_burst":
+                # Shorter still: the subslot of a random-access burst, the
+                # first thing a terminal transmits when it registers and the
+                # shortest transmission ETSI defines.
+                parts.append((sim.control_burst(dur, sr, seed=self.seed + 43,
+                                                n_slots=0.5, freq_offset_hz=off), 1.0))
             elif kind == "gated_noise":
                 parts.append((sim.gated_noise(dur, sr, 22_000.0, 0.0142, 0.0567,
                                               off, self.seed + 31), 1.0))
@@ -618,34 +627,39 @@ def check_sensitive_control_burst():
     print(chr(10) + "19. a short control burst -- sensitive alerts, strict does not")
     site = [391_187_500.0, 391_512_500.0, 391_762_500.0]
     handset = site[0] - 10_000_000.0
-    for mode, want in (("sensitive", True), ("strict", False)):
-        with tempfile.TemporaryDirectory() as d:
-            air = FakeAir(downlinks=site)
-            b = make_backend(air, os.path.join(d, "sites.json"),
-                             uplink_sensitive=(mode == "sensitive"))
-            try:
-                now = time.time()
-                for f in site:
-                    b.sites.entries[int(round(f))] = {
-                        "hits": 9, "misses": 0, "quality": 0.7,
-                        "last_ok": now, "first_seen": now, "ok_total": 9}
-                b._site_queue = []
-                b._survey_at = now
-                log = run(b, 9, at={3: lambda: air.interferers.append((handset, "control_burst")),
-                                    6: lambda: air.interferers.clear()})
-                alerted = any(s["mobile_confirmed"] for s in log)
-                check("%s: %s on a lone control burst" % (
-                        mode, "alerts" if want else "stays silent"),
-                      alerted == want,
-                      "alerted=%s on cycles %s" % (alerted,
-                          [i for i, s in enumerate(log) if s["mobile_confirmed"]]))
-                if want and alerted:
-                    hit = next(s for s in log if s["mobile_confirmed"] and s["peaks"])
-                    check("sensitive: names the burst's uplink channel",
-                          abs(hit["peaks"][0]["freq_hz"] - handset) < 1000.0,
-                          "%.4f MHz" % (hit["peaks"][0]["freq_hz"] / 1e6))
-            finally:
-                b.running = False
+    # Both real shapes: one 14 ms slot, and the 7 ms subslot of a random-access
+    # burst. Until 0.9.33 this scenario only ran a contiguous two-slot block,
+    # and neither of these two would have passed it -- which is why the suite
+    # was green through eight drives past police that raised no alert.
+    for kind in ("control_burst", "access_burst"):
+        for mode, want in (("sensitive", True), ("strict", False)):
+            with tempfile.TemporaryDirectory() as d:
+                air = FakeAir(downlinks=site)
+                b = make_backend(air, os.path.join(d, "sites.json"),
+                                 uplink_sensitive=(mode == "sensitive"))
+                try:
+                    now = time.time()
+                    for f in site:
+                        b.sites.entries[int(round(f))] = {
+                            "hits": 9, "misses": 0, "quality": 0.7,
+                            "last_ok": now, "first_seen": now, "ok_total": 9}
+                    b._site_queue = []
+                    b._survey_at = now
+                    log = run(b, 9, at={3: lambda: air.interferers.append((handset, kind)),
+                                        6: lambda: air.interferers.clear()})
+                    alerted = any(s["mobile_confirmed"] for s in log)
+                    check("%s: %s on a lone %s" % (
+                            mode, "alerts" if want else "stays silent", kind),
+                          alerted == want,
+                          "alerted=%s on cycles %s" % (alerted,
+                              [i for i, s in enumerate(log) if s["mobile_confirmed"]]))
+                    if want and alerted:
+                        hit = next(s for s in log if s["mobile_confirmed"] and s["peaks"])
+                        check("sensitive: names the %s uplink channel" % kind,
+                              abs(hit["peaks"][0]["freq_hz"] - handset) < 1000.0,
+                              "%.4f MHz" % (hit["peaks"][0]["freq_hz"] / 1e6))
+                finally:
+                    b.running = False
 
 
 def main():

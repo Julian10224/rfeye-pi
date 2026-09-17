@@ -2,6 +2,7 @@
 """Headless RF Eye application/UI regression test."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -752,7 +753,7 @@ def main():
     # Derived from the layout constants, not written out: the settings rows
     # have moved before and a hard-coded y silently taps the wrong feature.
     from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_HEIGHT
-    _ROWS = ["demo_mode", "brightness", "low_power", "sensitive", "record_rf",
+    _ROWS = ["demo_mode", "brightness", "low_power", "record_rf",
              "recordings", "wifi", "update", "debug"]
     def _row_y(name):
         return SETTINGS_TOP + _ROWS.index(name) * SETTINGS_STEP + SETTINGS_HEIGHT // 2
@@ -816,17 +817,32 @@ def main():
     a.power_notice_done = False
     a.power_notice_lines = []
 
-    # Sensitive toggle: strict <-> sensitive, and it clears any standing
-    # alarm confirmation so the mode change is not carried by stale state.
-    assert a.cfg.get("uplink_sensitive") is True, "sensitive is the shipped default"
-    a.backend.alarm.confirmed = True
-    time.sleep(0.15)
-    a._tap(40, _row_y("sensitive"))
-    assert a.cfg["uplink_sensitive"] is False, "the row flips the mode"
-    assert a.backend.alarm.confirmed is False, "switching mode clears the alarm"
-    time.sleep(0.15)
-    a._tap(40, _row_y("sensitive"))
-    assert a.cfg["uplink_sensitive"] is True
+    # Sensitive detection is not a setting since 0.9.33. There is no row for
+    # it, nothing in Settings mentions it, and load_config forces it on -- a
+    # unit that saved OFF under the old toggle must not carry that through the
+    # update and go on ignoring the short bursts this release exists to catch.
+    assert a.cfg.get("uplink_sensitive") is True, "sensitive is the only mode"
+    assert "sensitive" not in _ROWS
+    import config as _config
+    assert _config.DEFAULTS["uplink_sensitive"] is True
+    # The forcing line, checked against a saved config that says otherwise --
+    # which is exactly what a unit updating from 0.9.29-0.9.32 with the old
+    # toggle switched off hands to load_config.
+    with tempfile.TemporaryDirectory() as _d:
+        _p = os.path.join(_d, "config.json")
+        with open(_p, "w") as _fh:
+            json.dump({"uplink_sensitive": False,
+                       "detector_profile_version": 11}, _fh)
+        _keep = os.environ.get("RFEYE_CONFIG")
+        os.environ["RFEYE_CONFIG"] = _p
+        try:
+            assert _config.load_config()["uplink_sensitive"] is True, \
+                "a saved OFF must not survive the update"
+        finally:
+            if _keep is None:
+                os.environ.pop("RFEYE_CONFIG", None)
+            else:
+                os.environ["RFEYE_CONFIG"] = _keep
 
     a.page = "settings"
 

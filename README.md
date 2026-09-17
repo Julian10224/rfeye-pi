@@ -1,6 +1,6 @@
-# RF Eye 0.9.32 for Raspberry Pi
+# RF Eye 0.9.33 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.32 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.33 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.32 appliance path:
+The installer reproduces the working 0.9.33 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.32
+## User interface in 0.9.33
 
 The compact profile contains:
 
@@ -93,9 +93,10 @@ The compact profile contains:
 - settings gear and large touch targets
 - Sound/Mute on the home screen, and the number of verified C2000
   downlink carriers where the spectrum button used to be
-- Settings with nine rows, including a dedicated Recordings browser
-- a **Gevoelig** (sensitive) toggle: on by default, it also alerts on a short
-  control burst and confirms on one hit; off is the strict held-call behaviour
+- Settings with eight rows, including a dedicated Recordings browser
+- no sensitivity setting: since 0.9.33 the detector always alerts on a short
+  control burst as well as on a held call, so there is nothing to choose and
+  nothing to leave in the wrong position
 - the middle home tile (the C2000 lock count) is a shortcut straight to the
   recording confirmation, so a capture next to a vehicle needs no menu
 - no spectrum page: it cost a wide sweep every fourth cycle to draw
@@ -261,6 +262,18 @@ carriers measured the same there as at 288 kS/s: occupied width 21.4-21.9 kHz,
 symbol-rate selectivity 1.5-2.2, SNR within 2 dB, out to 682 kHz from the
 tuner. The site state from profile 9 is discarded on upgrade, so phantom locks
 do not survive it.
+
+0.9.33 is detector profile 11, and it discards the site state again for the
+same kind of reason: locks made while the uplink occupancy was measured at the
+98th percentile are not evidence about a receiver that peak holds it. Re-locking
+a site costs about a minute. The profile bump also resets the detector
+constants, which this release needs for a duller reason -- `install-cuqi35.sh`
+copies `config/reference-config-cuqi35.json` into place verbatim, acceptance
+limits and all, so every unit installed from 0.9.29 onwards holds an explicit
+`phy_uplink_sensitive_percentile` of 98 that would otherwise have survived the
+update and kept peak hold switched off on exactly the units that need it.
+`save_config()` claims this fossil cannot form again; that is true of the path
+it guards and not of the installer.
 
 ### A candidate must not take every dwell either
 
@@ -457,14 +470,20 @@ bursts** (registration and location updates as it crosses cells, status
 messages), which the held-call test throws away: they have no repeating
 17.647 Hz frame line, one or two slots instead of many.
 
-**Sensitive mode** (the `Gevoelig` Settings toggle, on by default) alerts on
-those too. It keeps every TETRA-*proving* test -- the 25 kHz channel shape and
-the pi/4-DQPSK / 18 kbaud / selectivity tests -- and drops only the
-sustained-call structure tests, and it confirms on a single verified hit
-because a control burst does not come round twice. To see a few-per-cent-duty
-burst at all, the occupancy spectrum for the uplink is read at the 98th
-percentile rather than the 92nd. Turning the toggle off restores the strict
-held-call behaviour.
+**Sensitive mode** alerts on those too. It keeps every TETRA-*proving* test --
+the 25 kHz channel shape and the pi/4-DQPSK / 18 kbaud / selectivity tests --
+and drops only the sustained-call structure tests, and it confirms on a single
+verified hit because a control burst does not come round twice. To see a
+few-per-cent-duty burst at all, the occupancy spectrum for the uplink is read
+at a higher percentile than the 92nd.
+
+It shipped in 0.9.29 as the `Gevoelig` Settings toggle, on by default. Since
+0.9.33 it is not a setting at all: strict mode only answers "is someone
+holding a call", which is not the question this device is for, and a unit left
+on the other position is a unit that cannot see the thing it was built to see.
+`load_config()` forces it on, so a unit that had it switched off gets it back
+on the update. The strict path stays in `tetra_phy` because both modes are
+measured by the regression suite.
 
 The trade is real: a lone freak pass now raises an alert, so sensitive mode
 gives more false alarms than strict. What holds the line is that the shape and
@@ -474,10 +493,61 @@ clipping (34% and 11%), sensitive mode produced **zero** false accepts -- there
 simply was no TETRA burst on air in them.
 
 `scripts/tetra-phy-selftest.py` (`sensitive_uplink`) asserts that a simulated
-2-3 slot control burst is rejected strict and accepted sensitive, while noise
-and a continuously keyed carrier are rejected in both;
-`scripts/detector-selftest.py` scenario 19 drives one through the whole backend
-and requires an alert in sensitive mode and silence in strict.
+control burst is rejected strict and accepted sensitive, while noise, a
+continuously keyed carrier, impulsive noise and a CW spur are rejected in
+both; `scripts/detector-selftest.py` scenario 19 drives one through the whole
+backend and requires an alert in sensitive mode and silence in strict.
+
+### Why a short burst was still never detected (0.9.33)
+
+0.9.29 shipped the mode and the field result did not change. The reason was
+not the acceptance limits: a transmission shorter than **two** TDMA slots
+inside one 0.52 s dwell was rejected at *any* signal strength, in both modes.
+Measured by driving `tetra_sim` straight into `tetra_phy.analyse` at a true
+25 dB SNR, one slot per frame, which is what a mobile actually transmits:
+
+| uplink transmission | real duty | 0.9.32 | 0.9.33 |
+| --- | --- | --- | --- |
+| 7 ms subslot (random access) | 1.4% | reject | **accept** |
+| 14 ms, one control burst | 2.7% | reject | **accept** |
+| 28 ms, two bursts | 5.4% | accept | accept |
+| held call | 25% | accept | accept |
+
+A registration or location update is exactly one or two of those bursts, so
+the mode that existed to catch them could not. Four independent causes, each
+sufficient on its own:
+
+- **The level was averaged away.** One dwell reduces to ~146 spectrum rows of
+  3.56 ms. The 98th percentile keeps the top three; a 14 ms slot is four rows
+  and a subslot is two. A burst that was really 25 dB measured 14.5 dB at the
+  98th percentile and 1.6 dB at the 92nd -- under the 8 dB floor before any
+  test ran. The occupancy spectrum for the sensitive path is now a **peak
+  hold**, which measures the same burst at 22.6 dB. That is safe because the
+  bias lands on the noise reference as much as on the channel: an empty
+  channel still reads 0.6 dB, and every acceptance number here is a ratio.
+- **The duty came out as 1.00.** `tdma_timing` took its high reference at the
+  95th percentile of the envelope, which for a 2.7%-duty burst is still noise.
+  The resulting span fell under `min_span_db`, the flat-envelope branch
+  declared the channel continuously occupied -- and the sensitive rule then
+  rejected that as a base station bleeding into the uplink under overload. The
+  high reference is now the 99th percentile, so the burst sets it.
+- **The subslot was filtered out by name.** `runs` dropped anything shorter
+  than `0.6 * SLOT_S` = 8.5 ms, under a comment saying it kept everything down
+  to a subslot. A subslot is 7.08 ms. The threshold is now `0.4 * SLOT_S`.
+- **The modulation test refused the sample count.** With the burst mask
+  applied, `dqpsk_moments` needed 256 samples; a subslot at 36 kS/s is 255.
+  The floor is now derived from the 96 symbols a timing phase actually needs.
+
+The regression suite missed all four because it only ever built a **contiguous
+two-slot block** -- a shape no TETRA mobile transmits, and one that happens to
+clear every threshold above. `tetra_sim.control_burst` now takes a fractional
+`n_slots` and a `gap_frames` spacing, and the suite runs the subslot and the
+single slot down to 16 dB. Against 0.9.32's detector those cases fail exactly
+as the field did; against this one they pass.
+
+Nothing was loosened to achieve it. Over the same suite an empty channel,
+impulsive noise, a CW spur, non-TETRA pi/4-DQPSK at 21.7 kbaud, 4-FSK data and
+a continuously keyed carrier are all still rejected, in both modes.
 
 **What still cannot be detected, in either mode.** A radio switched on but not
 transmitting emits nothing -- a parked or patrolling vehicle whose crew is not
@@ -631,7 +701,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.32 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.33 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -780,7 +850,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.32**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.33**.
 
 Build the OTA package with:
 

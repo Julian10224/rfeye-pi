@@ -146,9 +146,28 @@ class Channelizer:
         A higher percentile recovers a shorter transmission: the default 92
         needs the channel busy for at least ~8% of the dwell, so a single
         14 ms control burst (2-3% duty) is averaged away and reads as noise.
-        The sensitive uplink path asks for ~98 so a one-off registration burst
-        still lifts above the floor.  The result is cached per percentile, so
-        a dwell that measures both costs each FFT reduction only once.
+
+        ``percentile=100`` is a peak hold, and it is what the sensitive uplink
+        path asks for.  98 was not enough: one dwell is ~146 rows of 3.56 ms,
+        so the top 2% is three rows, and a 14 ms burst is four.  Measured
+        against simulated TETRA at a true 25 dB:
+
+            burst        p92    p98   p99.5   peak hold
+            7 ms          0.6    1.6   18.1        20.9
+            14 ms         1.0   14.5   20.8        22.6
+            28 ms         2.0   20.6   23.2        23.7
+            held call    22.8   24.4   25.1        25.3
+            empty         0.3    0.5    0.7         0.6
+
+        The last row is why a peak hold is safe: the bias applies to the
+        noise reference as much as to the channel, so an empty channel still
+        reads 0.6 dB and no ratio derived from this spectrum moves.  What a
+        peak hold really buys is that the measurement stops depending on the
+        duty cycle of the thing being measured, which is the one property a
+        detector for short bursts cannot do without.
+
+        The result is cached per percentile, so a dwell that measures both
+        costs each FFT reduction only once.
         """
         if nfft is None:
             nfft = 1024 * max(1, int(round(self.sample_rate / 288_000.0)))
@@ -340,7 +359,16 @@ def tdma_timing(env, rate, harmonics=5, snr_db=0.0, min_snr_db=8.0,
     # wrong is what makes a base station look like a silent channel.
     e_db = _db(env)
     lo = float(np.percentile(e_db, 10))
-    hi = float(np.percentile(e_db, 95))
+    # The high reference has to be reachable by the shortest transmission
+    # worth finding, not by the average one.  At 95 it was not: one dwell is
+    # ~585 envelope boxes, a single 14 ms slot is 16 of them (2.7%), so the
+    # 95th percentile still sat in the noise.  ``span`` then came out under
+    # ``min_span_db``, the flat-envelope branch below declared the channel
+    # continuously occupied, and ``duty`` was reported as 1.00 for what was
+    # actually one burst in half a second of silence -- which the sensitive
+    # uplink rule then rejected as a base station bleeding in under overload.
+    # At 99 the top six boxes decide, so a 7 ms subslot burst still sets it.
+    hi = float(np.percentile(e_db, 99))
     span = hi - lo
     if span < float(min_span_db):
         occupied = float(snr_db) >= float(min_snr_db)
@@ -361,8 +389,13 @@ def tdma_timing(env, rate, harmonics=5, snr_db=0.0, min_snr_db=8.0,
             start = None
     if start is not None:
         runs.append((n - start) / float(rate))
-    # Ignore sub-slot flicker: no real TETRA burst is shorter than a subslot.
-    runs = [r for r in runs if r >= 0.6 * SLOT_S]
+    # Ignore flicker shorter than a real burst.  This used to be 0.6 slots,
+    # which is longer than a subslot (0.5) -- so the shortest burst ETSI
+    # defines, the random-access burst a mobile sends to register, was thrown
+    # away by the very filter whose comment said it kept it.  0.4 slots is
+    # 5.7 ms: it still drops single-box envelope flicker (0.9 ms) by a wide
+    # margin, and it keeps the 7.1 ms subslot.
+    runs = [r for r in runs if r >= 0.4 * SLOT_S]
 
     if runs:
         slots = np.asarray(runs, dtype=np.float64) / SLOT_S
@@ -418,7 +451,12 @@ def dqpsk_moments(bb, rate, baud, mask=None, timing_phases=8,
         valid = np.repeat(m, rep)[:len(bb)]
         if len(valid) < len(bb):
             valid = np.concatenate([valid, np.zeros(len(bb) - len(valid), bool)])
-        if int(np.count_nonzero(valid)) < 256:
+        # Enough keyed-up samples to carry the 96 symbols a timing phase needs
+        # below, and no more.  A flat 256 was a hidden second opinion on how
+        # short a burst may be: at 36 kS/s a 7.1 ms subslot burst is 255
+        # samples, so the shortest real TETRA transmission failed here by one
+        # sample, before any modulation was measured.
+        if int(np.count_nonzero(valid)) < int(math.ceil(96.0 * sps)):
             return (1.0, 1.0, 0.0)
 
     best = (1.0, 1.0, 0.0)
@@ -607,16 +645,18 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
     # Sensitive mode also alerts on a short control/registration burst -- a
     # moving mobile keys those up crossing cells even when nobody is talking --
     # not only on a held voice call. Such a burst is a few per cent duty, so
-    # the occupancy spectrum is measured at a higher percentile to see it at
-    # all. Every TETRA-proving test (the 25 kHz shape, the pi/4-DQPSK / 18 kbaud
-    # / selectivity tests) still has to pass; only the sustained-call structure
-    # tests are relaxed. See the uplink block below.
+    # the occupancy spectrum is peak held rather than averaged, or the level
+    # is lost before any test sees it. Every TETRA-proving test (the 25 kHz
+    # shape, the pi/4-DQPSK / 18 kbaud / selectivity tests) still has to pass;
+    # only the sustained-call structure tests are relaxed. See the uplink
+    # block below.
     # Sensitive mode is a mode switch, not an acceptance limit, so it is read
     # straight from the passed config rather than the merged LIMITS defaults
-    # (production passes the backend cfg here; the tests pass a small dict).
+    # (production passes the backend cfg here, and forces it on; the tests
+    # pass a small dict, and leave it off to exercise the strict path).
     cfg_src = limits if isinstance(limits, dict) else {}
     sensitive = bool(cfg_src.get('uplink_sensitive', False)) and str(role) == 'UPLINK'
-    pct = (float(cfg_src.get('phy_uplink_sensitive_percentile', 98.0))
+    pct = (float(cfg_src.get('phy_uplink_sensitive_percentile', 100.0))
            if sensitive else 92.0)
     res.sensitive = sensitive
 

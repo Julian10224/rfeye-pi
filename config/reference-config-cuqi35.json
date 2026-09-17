@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.9.32",
+  "app_version": "0.9.33",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -15,7 +15,7 @@
   "buzzer_yellow_gap_ms": 70,
   "buzzer_yellow_ms": 85,
   "demo_mode": false,
-  "detector_profile_version": 10,
+  "detector_profile_version": 11,
   "display_profile": "cuqi35",
   "duplex_split_hz": 10000000.0,
   "fft_size": 1024,
@@ -109,5 +109,5 @@
   "uplink_follow_dwells": 3,
   "site_silence_window_s": 180.0,
   "uplink_sensitive": true,
-  "phy_uplink_sensitive_percentile": 98.0
+  "phy_uplink_sensitive_percentile": 100.0
 }

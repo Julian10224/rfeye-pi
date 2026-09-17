@@ -134,27 +134,54 @@ def tetra_carrier(duration_s, sample_rate, role='DOWNLINK', seed=0,
 
 
 def control_burst(duration_s, sample_rate, seed=0, n_slots=1, start_frac=0.4,
-                  freq_offset_hz=0.0):
-    """A single short uplink transmission: a few TETRA slots, then silence.
+                  freq_offset_hz=0.0, gap_frames=1):
+    """A short uplink transmission: a burst or two of TETRA, then silence.
 
     This is what a moving mobile keys up crossing a cell boundary -- a
     registration or location update -- as opposed to a held voice call. It is
     genuine pi/4-DQPSK in a 25 kHz channel, so it must pass the modulation and
     shape tests, but it has no repeating frame structure, so strict mode
     rejects it and sensitive mode accepts it. Used to prove exactly that.
+
+    ``n_slots`` may be fractional: 0.5 is the subslot of a random-access
+    burst, the shortest transmission ETSI EN 300 392-2 defines, and the one
+    a terminal sends first when it registers.
+
+    ``gap_frames`` is how many 56.7 ms frames apart the bursts are. It
+    defaults to 1 because that is what a mobile actually does -- it owns one
+    slot of each frame, not a contiguous run of them. Up to 0.9.32 this
+    function could only make a contiguous block, which is why the suite
+    passed while real registrations went undetected: a contiguous 2-slot
+    block clears the occupancy and burst-length measurements that a real
+    1-slot burst does not. ``gap_frames=0`` keeps the old contiguous shape.
     """
     base = tetra_carrier(duration_s, sample_rate, role='DOWNLINK', seed=seed)
     n = len(base)
     slot = int(round(tetra_phy.SLOT_S * sample_rate))
+    frame = int(round(tetra_phy.FRAME_S * sample_rate))
     ramp = max(1, slot // 32)
     gate = np.zeros(n, dtype=np.float32)
-    a = int(n * float(start_frac))
-    b = min(n, a + int(n_slots) * slot)
-    gate[a:b] = 1.0
-    if b - a > 2 * ramp:
-        w = 0.5 * (1.0 - np.cos(np.pi * (np.arange(ramp) + 0.5) / ramp))
-        gate[a:a + ramp] = w
-        gate[b - ramp:b] = w[::-1]
+    a0 = int(n * float(start_frac))
+    if int(gap_frames) <= 0:
+        spans = [(a0, a0 + int(round(float(n_slots) * slot)))]
+    else:
+        # Whole slots, one per frame; a fractional count shortens the last one.
+        whole = int(math.floor(float(n_slots)))
+        rest = float(n_slots) - whole
+        lengths = [slot] * whole + ([int(round(rest * slot))] if rest > 1e-9 else [])
+        spans = [(a0 + k * int(gap_frames) * frame,
+                  a0 + k * int(gap_frames) * frame + length)
+                 for k, length in enumerate(lengths)]
+    for a, b in spans:
+        a = max(0, int(a))
+        b = min(n, int(b))
+        if b <= a:
+            continue
+        gate[a:b] = 1.0
+        if b - a > 2 * ramp:
+            w = 0.5 * (1.0 - np.cos(np.pi * (np.arange(ramp) + 0.5) / ramp))
+            gate[a:a + ramp] = w
+            gate[b - ramp:b] = w[::-1]
     sig = base * gate.astype(np.float32)
     if freq_offset_hz:
         t = np.arange(n, dtype=np.float64) / float(sample_rate)

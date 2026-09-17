@@ -293,11 +293,25 @@ def sensitive_uplink():
         return r
 
     cases = []
-    for n_slots, snr, seed in ((2, 30, 611), (2, 22, 613), (3, 18, 617)):
+    # The shortest transmissions first, because they are the ones the field
+    # unit actually meets and the ones 0.9.29 claimed but did not deliver.
+    # Up to 0.9.32 this loop only ran 2 and 3 slots, and contiguously -- a
+    # shape no mobile transmits. A real registration is one slot of one frame,
+    # sometimes only the subslot of a random-access burst, and every one of
+    # those was rejected in both modes at any SNR.
+    for n_slots, snr, seed in ((0.5, 30, 605), (0.5, 22, 607),
+                               (1, 30, 611), (1, 22, 613), (1, 16, 615),
+                               (2, 22, 617), (3, 16, 619)):
         iq = cap(sim.control_burst(dur, SR, seed=seed, n_slots=n_slots,
                                    freq_offset_hz=90_000.0), snr, seed + 50)
         # Strict rejects (not a held call); sensitive accepts.
         cases.append((f"control burst {n_slots} slots {snr} dB", iq, False, True))
+    # The old contiguous shape still has to work, so a 0.9.29-era recording
+    # replayed against this release gives the same answer it used to.
+    cases.append(("contiguous 2-slot burst 22 dB",
+                  cap(sim.control_burst(dur, SR, seed=623, n_slots=2, gap_frames=0,
+                                        freq_offset_hz=90_000.0), 22, 673),
+                  False, True))
     # A held call is accepted by both.
     call = cap(sim.tetra_carrier(dur, SR, role="UPLINK", seed=651,
                                  freq_offset_hz=90_000.0), 20, 701)
@@ -309,6 +323,16 @@ def sensitive_uplink():
     cont = cap(sim.tetra_carrier(dur, SR, role="DOWNLINK", seed=661,
                                  freq_offset_hz=90_000.0), 20, 703)
     cases.append(("continuous carrier in the uplink band", cont, False, False))
+    # The occupancy spectrum is peak held since 0.9.33, so the two shapes that
+    # a peak hold could plausibly turn into a carrier are asserted here rather
+    # than assumed: impulsive noise, whose whole energy is in a few rows, and
+    # a CW spur, which is one bin towering over the channel. Neither may pass,
+    # in either mode.
+    cases.append(("impulsive noise", cap(sim.impulse_noise(dur, SR), 25, 705),
+                  False, False))
+    cases.append(("CW spur on the channel",
+                  cap(sim.cw_tone(dur, SR, freq_offset_hz=90_000.0), 25, 707),
+                  False, False))
 
     for name, iq, want_strict, want_sens in cases:
         rs = verdict(iq, None)
@@ -319,14 +343,31 @@ def sensitive_uplink():
         ROWS.append(("sensitive: " + name, "UPLINK", want_sens, rr))
         if rr.ok != want_sens:
             FAILURES.append(f"sensitive {name}: expected {'ACCEPT' if want_sens else 'REJECT'}, got {rr.reason}")
-    # The point of the mode: a short burst that strict rejects, sensitive takes.
-    burst = cap(sim.control_burst(dur, SR, seed=613, n_slots=2,
+    # The point of the mode, measured on the shortest thing it has to catch:
+    # one 14 ms slot, the transmission a terminal makes when it registers.
+    burst = cap(sim.control_burst(dur, SR, seed=613, n_slots=1,
                                   freq_offset_hz=90_000.0), 22, 663)
     if phy.analyse(burst, 90_000.0, role="UPLINK", freq_hz=380_100_000.0, decim=56).ok:
         FAILURES.append("sensitive: strict mode accepted a lone control burst")
     if not phy.analyse(burst, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
                        limits=sens, decim=56).ok:
         FAILURES.append("sensitive: sensitive mode rejected a lone control burst")
+    # And the measurement that makes it possible: the level of a one-slot
+    # burst has to survive the reduction over time. At the 98th percentile
+    # this came back ~13 dB below what the same burst really was, which is
+    # what put it under the 8 dB acceptance floor in the field.
+    one = sim.control_burst(dur, SR, seed=631, n_slots=1, freq_offset_hz=90_000.0)
+    ch = cap(one, 25, 733)
+    peak = phy.channel_shape(*ch.psd(percentile=100.0), centre_hz=90_000.0)["snr_db"]
+    p98 = phy.channel_shape(*ch.psd(percentile=98.0), centre_hz=90_000.0)["snr_db"]
+    if peak < 20.0:
+        FAILURES.append(f"sensitive: peak hold lost a 1-slot burst ({peak:.1f} dB of 25)")
+    if peak - p98 < 3.0:
+        FAILURES.append("sensitive: peak hold bought nothing over the 98th percentile")
+    empty = cap(sim.control_burst(dur, SR, seed=2, n_slots=0), 0, 737)
+    quiet = phy.channel_shape(*empty.psd(percentile=100.0), centre_hz=90_000.0)["snr_db"]
+    if quiet > 3.0:
+        FAILURES.append(f"sensitive: peak hold lifted an empty channel to {quiet:.1f} dB")
 
 
 def main():

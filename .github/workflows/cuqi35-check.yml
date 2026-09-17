@@ -1,4 +1,4 @@
-name: RF Eye 0.9.32 appliance checks
+name: RF Eye 0.9.33 appliance checks
 
 on:
   push:
@@ -62,7 +62,7 @@ jobs:
           grep -q 'boot.log' rfeye/app.py
           grep -q 'frame_error_streak' rfeye/app.py
           grep -q 'FRAME_ERROR_RESTART_FRAMES' rfeye/app.py
-          grep -q 'SETTINGS_COUNT=9' rfeye/compact_ui_draw.py
+          grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
           # 0.9.10: the Power row. ECO ships as the default because the
           # detector's UI load kept a Pi 3 B+ busy enough to matter on a
           # marginal 5 V rail, measured 85% -> 39% of a core. Switching it
@@ -208,12 +208,41 @@ jobs:
           # no longer waits five minutes.
           grep -q '"site_rescan_s": 120.0' rfeye/config.py
           # 0.9.29: sensitive mode also alerts on a short control burst
-          # and confirms on one hit, with a Settings toggle back to strict.
+          # and confirms on one hit.
           grep -q '"uplink_sensitive": True' rfeye/config.py
           grep -q 'def control_burst' rfeye/tetra_sim.py
           grep -q 'def check_sensitive_control_burst' scripts/detector-selftest.py
           grep -q 'def sensitive_uplink' scripts/tetra-phy-selftest.py
-          grep -q 'key == "sensitive"' rfeye/compact_ui_controls.py
+          # 0.9.33: a transmission shorter than two slots has to be
+          # detectable, and sensitive detection stops being a setting.
+          #
+          # Each of these guards one of the four independent reasons a single
+          # 14 ms registration burst was rejected at any SNR, in both modes:
+          # the occupancy spectrum averaged its level away, the envelope
+          # measurement reported duty 1.00 for it, the burst-length filter
+          # threw a subslot away, and the modulation test refused the sample
+          # count a subslot carries. Any one of them coming back restores the
+          # field failure on its own.
+          grep -q '"phy_uplink_sensitive_percentile": 100.0' rfeye/config.py
+          grep -q 'hi = float(np.percentile(e_db, 99))' rfeye/tetra_phy.py
+          grep -q 'runs = \[r for r in runs if r >= 0.4 \* SLOT_S\]' rfeye/tetra_phy.py
+          grep -q 'int(math.ceil(96.0 \* sps))' rfeye/tetra_phy.py
+          ! grep -q 'np.percentile(e_db, 95)' rfeye/tetra_phy.py
+          ! grep -q '0.6 \* SLOT_S' rfeye/tetra_phy.py
+          # The toggle is gone and the mode is forced on, so a unit that saved
+          # OFF under 0.9.29-0.9.32 does not carry that through the update.
+          grep -q 'cfg\["uplink_sensitive"\] = True' rfeye/config.py
+          ! grep -q 'key == "sensitive"' rfeye/compact_ui_controls.py
+          ! grep -q '("Gevoelig"' rfeye/compact_ui_draw.py
+          ! grep -q '"sensitive"' rfeye/compact_ui_controls.py
+          # And the regression tests measure the shapes a mobile really
+          # transmits: one slot of one frame, and the subslot of a
+          # random-access burst. Until 0.9.33 the suite only ever built a
+          # contiguous two-slot block, which is why it stayed green through
+          # eight drives past police that raised no alert.
+          grep -q 'gap_frames' rfeye/tetra_sim.py
+          grep -q 'access_burst' scripts/detector-selftest.py
+          grep -q 'n_slots=0.5' scripts/tetra-phy-selftest.py scripts/detector-selftest.py
           # 0.9.30: the middle home tile (the C2000 lock count) is a
           # shortcut straight to the recording confirmation.
           grep -q 'x <= 212' rfeye/compact_ui_controls.py
@@ -339,7 +368,7 @@ jobs:
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['detector_profile_version']==10
+          assert c['detector_profile_version']==11
           # Detector profile v8 acceptance limits. A fresh install must ship
           # the calibrated values from scripts/tetra-phy-selftest.py, so a
           # silent drift here is a build failure rather than a field surprise.
@@ -381,7 +410,7 @@ jobs:
           assert c['uplink_alert_hold_s']==12.0
           assert c['uplink_follow_dwells']==3
           assert c['uplink_sensitive']==True
-          assert c['phy_uplink_sensitive_percentile']==98.0
+          assert c['phy_uplink_sensitive_percentile']==100.0
           assert c['tetra_channel_spacing_hz']==25000.0
           assert c['tetra_raster_offset_hz']==12500.0
           assert c['sample_rate']==2048000

@@ -58,7 +58,7 @@ except Exception:
     pass
 
 DEFAULTS = {
-    "detector_profile_version": 10,
+    "detector_profile_version": 11,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -122,18 +122,31 @@ DEFAULTS = {
     "phy_uplink_min_slot_quantisation": 0.45,
     "phy_uplink_min_bursts": 3,
 
-    # Sensitive detection. On (the product default since 0.9.29) so the alarm
-    # also fires on a short uplink control/registration burst -- what a moving
-    # mobile keys up crossing cells even when nobody is talking -- and not only
-    # on a held voice call. It confirms on a single verified hit. This is what
-    # a car driving past emits most of the time; the trade is more false
-    # alarms, since a lone freak pass now alerts. Every hit still had to pass
-    # the full 25 kHz shape and pi/4-DQPSK / 18 kbaud / selectivity tests, so
-    # noise, the base station bleeding in under overload, and other digital
-    # systems are still rejected. Turn it off in Settings for the strict
-    # held-call-only behaviour.
+    # Sensitive detection. The alarm fires on a short uplink
+    # control/registration burst -- what a moving mobile keys up crossing
+    # cells even when nobody is talking -- and not only on a held voice call.
+    # It confirms on a single verified hit. This is what a car driving past
+    # emits most of the time; the trade is more false alarms, since a lone
+    # freak pass now alerts. Every hit still had to pass the full 25 kHz shape
+    # and pi/4-DQPSK / 18 kbaud / selectivity tests, so noise, the base
+    # station bleeding in under overload, and other digital systems are still
+    # rejected.
+    #
+    # Since 0.9.33 this is not a setting. It shipped as a toggle in 0.9.29 and
+    # there was never a reason to reach for the other position: strict mode
+    # only answers "is someone holding a call", which is not the question the
+    # device is for, and a unit left on strict is a unit that cannot see the
+    # thing it was built to see. load_config() forces it on, so a unit that
+    # saved OFF gets it back on the update rather than staying quietly deaf.
+    # The strict path stays in tetra_phy for the regression tests, which
+    # measure both.
     "uplink_sensitive": True,
-    "phy_uplink_sensitive_percentile": 98.0,
+    # 100 is a peak hold over the dwell's ~146 spectrum rows. 98 kept the top
+    # three of them, and a single 14 ms TETRA slot is four -- so the level of
+    # the shortest real transmission was averaged away before any test saw it.
+    # The bias of a peak hold lands on the noise reference too, so an empty
+    # channel still measures 0.6 dB. See Channelizer.psd.
+    "phy_uplink_sensitive_percentile": 100.0,
 
     # C2000 network lock. Slow to acquire, slower to lose.
     "duplex_split_hz": 10_000_000.0,
@@ -230,7 +243,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.32",
+    "app_version": "0.9.33",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -289,6 +302,11 @@ def load_config():
     cfg["buzzer_passive"] = False
     cfg["buzzer_active_high"] = True
     cfg["audio_mode"] = "adaptive"
+    # Sensitive detection stopped being a setting in 0.9.33. A unit that had
+    # the old Gevoelig toggle switched off would otherwise carry that through
+    # the update and go on ignoring exactly the short control bursts this
+    # release exists to catch, with nothing on screen to say so.
+    cfg["uplink_sensitive"] = True
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
     # Detector profile v8 replaces energy-statistics detection with real
@@ -308,11 +326,21 @@ def load_config():
     # MHS35 reference config of every earlier install wrote the old dwell out
     # explicitly, so without this reset exactly those units would keep the
     # rate that locks phantom carriers.
-    if int(saved.get("detector_profile_version", 0) or 0) < 10:
+    #
+    # Profile 11 is the short-burst release. The claim in save_config() that
+    # the fossil "cannot form again" was wrong for one path: install-cuqi35.sh
+    # copies config/reference-config-cuqi35.json into place verbatim, detector
+    # constants and all, so every unit installed from 0.9.29 onwards holds an
+    # explicit phy_uplink_sensitive_percentile of 98 -- which would survive
+    # this update and keep peak hold switched off on exactly the units that
+    # need it. The site state is rebuilt too: locks made under the old
+    # occupancy measurement are not evidence for the new one, and re-locking
+    # costs about a minute.
+    if int(saved.get("detector_profile_version", 0) or 0) < 11:
         for key in list(DEFAULTS):
             if is_detector_key(key):
                 cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 10
+    cfg["detector_profile_version"] = 11
     for obsolete in (
         # pre-v7 leftovers
         "threshold_db", "threshold_min_db", "threshold_max_db",
