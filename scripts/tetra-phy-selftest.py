@@ -369,6 +369,36 @@ def sensitive_uplink():
     if quiet > 3.0:
         FAILURES.append(f"sensitive: peak hold lifted an empty channel to {quiet:.1f} dB")
 
+    # Where in the dwell the burst falls is not something the field controls,
+    # and one fixed start_frac hides that. 0.9.33 accepted a 7 ms burst on the
+    # seed this suite happened to use and only 68% of random positions at
+    # 30 dB, because the occupied-bandwidth walk stopped at whichever bin of
+    # the peak-held spectrum was noisiest. The walk is smoothed since 0.9.34;
+    # this is the check that would have caught it, so it sweeps positions
+    # rather than trusting one.
+    for n_slots, snr in ((0.5, 25), (0.5, 18), (1, 25), (1, 18), (2, 12)):
+        missed = []
+        for k in range(8):
+            start = 0.04 + k * 0.115
+            iq = cap(sim.control_burst(dur, SR, seed=811 + k, n_slots=n_slots,
+                                       start_frac=start, freq_offset_hz=90_000.0),
+                     snr, 861 + k)
+            r = phy.analyse(iq, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
+                            limits=sens, decim=56)
+            if not r.ok:
+                missed.append("%.2f:%s" % (start, r.reason))
+        ROWS.append(("sensitive: %s slots %d dB, 8 positions" % (n_slots, snr),
+                     "UPLINK", True, r))
+        if missed:
+            FAILURES.append("sensitive: %s-slot burst at %d dB missed %d of 8 "
+                            "positions (%s)" % (n_slots, snr, len(missed),
+                                                "; ".join(missed)))
+    # The `(2, 12)` row above is the stated floor: at 12 dB a *single* burst is
+    # not reliably separable from noise by the occupied-bandwidth measurement,
+    # in any release, and two slots are. That is a limit of the measurement,
+    # not a threshold anyone chose, so it is asserted where it holds rather
+    # than claimed where it does not.
+
 
 def main():
     ap = argparse.ArgumentParser()

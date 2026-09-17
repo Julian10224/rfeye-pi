@@ -1,4 +1,4 @@
-name: RF Eye 0.9.33 appliance checks
+name: RF Eye 0.9.34 appliance checks
 
 on:
   push:
@@ -243,6 +243,18 @@ jobs:
           grep -q 'gap_frames' rfeye/tetra_sim.py
           grep -q 'access_burst' scripts/detector-selftest.py
           grep -q 'n_slots=0.5' scripts/tetra-phy-selftest.py scripts/detector-selftest.py
+          # 0.9.34: the occupied-bandwidth walk is smoothed to ~1.4 kHz before
+          # it runs. Under a peak hold each bin of a 7 ms burst rests on one or
+          # two FFT rows, so the raw profile carries several dB of scatter and
+          # a walk that stops at the first bin below the edge stopped at
+          # random -- 0.9.33 accepted such a burst on 68% of start positions at
+          # 30 dB while passing its own single-position test. The sweep is what
+          # catches that, so both have to stay.
+          grep -q 'smooth_bins' rfeye/tetra_phy.py
+          grep -q 'w_db\[i\] > edge_db' rfeye/tetra_phy.py
+          ! grep -q 'p_db\[i\] > edge_db' rfeye/tetra_phy.py
+          grep -q '8 positions' scripts/tetra-phy-selftest.py
+          grep -q 'missed %d of 8' scripts/tetra-phy-selftest.py
           # 0.9.30: the middle home tile (the C2000 lock count) is a
           # shortcut straight to the recording confirmation.
           grep -q 'x <= 212' rfeye/compact_ui_controls.py

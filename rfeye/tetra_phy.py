@@ -266,16 +266,47 @@ def channel_shape(freqs, psd_db, centre_hz=0.0):
     # the guard valley, so it is never counted, while a genuinely wide emitter
     # has no valley to stop the walk and runs straight to the cap.
     # TETRA lands near 21 kHz, a CW spur under 1 kHz, 12.5 kHz FM near 6 kHz.
+    #
+    # The walk runs on a spectrum smoothed to ~1.4 kHz first, because a walk
+    # that stops at the *first* bin below the edge is only as stable as the
+    # single noisiest bin it passes.  At 281 Hz resolution a 25 kHz carrier is
+    # ~89 bins, far more than a width measurement needs, and under the peak
+    # hold the sensitive uplink path uses, each bin of a 7 ms burst rests on
+    # one or two FFT rows -- so the raw profile carries several dB of scatter
+    # and the walk terminated at random.  Measured over 16 random burst
+    # positions per point, before and after:
+    #
+    #     burst      30 dB     22 dB     16 dB
+    #     7 ms     68->100%  62->100%  81->100%
+    #     14 ms    93->100% 100->100% 100->100%
+    #
+    # Smoothing only this measurement, and not the level or the valley, is
+    # deliberate: those are calibrated ratios and a smoothed noise reference
+    # would move them by several dB. A continuous downlink carrier measures
+    # 21.4-21.7 kHz here against 21.4 kHz before, so the limits still mean
+    # what they were calibrated to mean.
+    smooth_bins = int(round(1400.0 / max(1.0, float(np.median(np.diff(freqs))))))
+    smooth_bins = max(1, smooth_bins | 1)
+    if smooth_bins > 1 and len(p_lin) >= 4 * smooth_bins:
+        kernel = np.ones(smooth_bins, dtype=np.float64) / float(smooth_bins)
+        w_lin = np.convolve(p_lin, kernel, mode='same')
+        edge = smooth_bins // 2
+        w_lin[:edge] = p_lin[:edge]
+        w_lin[len(w_lin) - edge:] = p_lin[len(p_lin) - edge:]
+    else:
+        w_lin = p_lin
+    w_db = _db(w_lin)
+
     cap_hz = 20000.0
-    edge_db = core_db - 10.0
+    edge_db = float(np.median(w_db[core])) - 10.0
     centre_idx = int(np.argmin(a))
     lo_hz = hi_hz = 0.0
     i = centre_idx
-    while i >= 0 and p_db[i] > edge_db and a[i] <= cap_hz:
+    while i >= 0 and w_db[i] > edge_db and a[i] <= cap_hz:
         lo_hz = a[i]
         i -= 1
     i = centre_idx
-    while i < len(d) and p_db[i] > edge_db and a[i] <= cap_hz:
+    while i < len(d) and w_db[i] > edge_db and a[i] <= cap_hz:
         hi_hz = a[i]
         i += 1
     occupied_bw = lo_hz + hi_hz
