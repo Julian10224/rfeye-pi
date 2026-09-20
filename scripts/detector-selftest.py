@@ -662,6 +662,103 @@ def check_sensitive_control_burst():
                     b.running = False
 
 
+def check_vehicle_on_an_unlocked_carrier():
+    """A vehicle keyed up on a carrier this unit never locked.
+
+    This is the ambulance. Until 0.9.35 stage 2 watched exactly the duplex
+    partners of the locked downlinks -- on a real unit two channels of the two
+    hundred in 380-385 MHz -- so a terminal registered on any other carrier,
+    or on a neighbouring site, transmitted into a receiver that was not
+    listening there. Not a sensitivity problem: a coverage one.
+    """
+    print(chr(10) + "20. a vehicle on a carrier this unit never locked")
+    site = [391_187_500.0, 391_512_500.0]
+    stranger = 382_437_500.0          # an uplink with no locked partner here
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=site)
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            now = time.time()
+            for f in site:
+                b.sites.entries[int(round(f))] = {
+                    "hits": 9, "misses": 0, "quality": 0.7,
+                    "last_ok": now, "first_seen": now, "ok_total": 9}
+            b._site_queue = []
+            b._survey_at = now
+            watched = set()
+            log = run(b, 26, at={2: lambda: air.interferers.append((stranger, "uplink"))})
+            for s in log:
+                watched |= {int(round(f)) for f in (s.get("watch_freqs") or [])}
+            check("the sweep reaches beyond the locked partners",
+                  len(watched) > 8, "%d distinct uplink channels examined" % len(watched))
+            alerted = [i for i, s in enumerate(log) if s["mobile_confirmed"]]
+            check("and alerts on a vehicle with no locked partner",
+                  bool(alerted), "alert on cycles %s" % alerted)
+            if alerted:
+                hit = next(s for s in log if s["mobile_confirmed"] and s["peaks"])
+                check("naming the right channel",
+                      abs(hit["peaks"][0]["freq_hz"] - stranger) < 1000.0,
+                      "%.4f MHz" % (hit["peaks"][0]["freq_hz"] / 1e6))
+        finally:
+            b.running = False
+
+
+def check_unlocked_receiver_still_hears():
+    """With nothing locked at all, the uplink is still watched.
+
+    Driving, that is most of the time in every new cell: the lock the unit
+    holds belongs to a site it left behind, or there is none yet. Stage 2 used
+    to run only behind a lock, so the receiver was deaf exactly then.
+    """
+    print(chr(10) + "21. nothing locked -- the uplink is watched anyway")
+    stranger = 381_937_500.0
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=[])
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            watched = set()
+            log = run(b, 14, at={1: lambda: air.interferers.append((stranger, "uplink"))})
+            for s in log:
+                watched |= {int(round(f)) for f in (s.get("watch_freqs") or [])}
+            check("uplink channels examined with no lock at all",
+                  len(watched) > 8, "%d channels" % len(watched))
+            check("and it can still raise an alert",
+                  any(s["mobile_confirmed"] for s in log),
+                  "alert on cycles %s" % [i for i, s in enumerate(log) if s["mobile_confirmed"]])
+        finally:
+            b.running = False
+
+
+def check_unknown_channel_needs_two_hits():
+    """One hit confirms on a partner channel; two are needed elsewhere.
+
+    Sweeping the whole band means two orders of magnitude more channels for a
+    freak accept to land on, so the single-hit rule that sensitive mode was
+    priced for is kept only where the site lock corroborates it. The follow-up
+    is what keeps the second hit cheap: it parks the next dwells back on the
+    window that just produced one.
+    """
+    print(chr(10) + "22. one hit on a partner, two on an unknown channel")
+    from tetra_detector import UplinkAlarm
+    from tetra_phy import PhyResult
+    cfg = dict(DEFAULTS)
+    partner, stranger = 381_187_500.0, 382_437_500.0
+
+    def hit(f):
+        r = PhyResult(freq_hz=f, role="UPLINK"); r.ok = True; r.quality = 0.6
+        return r
+
+    a = UplinkAlarm(cfg)
+    ok, _, _ = a.update([hit(partner)], [partner, stranger], 1000.0, trusted=[partner])
+    check("one hit on a locked partner confirms", ok)
+
+    a = UplinkAlarm(cfg)
+    ok, _, _ = a.update([hit(stranger)], [partner, stranger], 1000.0, trusted=[partner])
+    check("one hit on an unknown channel does not", not ok)
+    ok, _, _ = a.update([hit(stranger)], [partner, stranger], 1001.0, trusted=[partner])
+    check("the second hit on it does", ok)
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -699,12 +796,22 @@ def main():
     else:
         check("alert names the right uplink channel", False, "no alert produced")
 
-    # 4 -- a TETRA-shaped transmission with no base station behind it. Real
-    #      C2000 handsets never exist without a site, so this must stay silent.
-    log = scenario("4. uplink-shaped signal with no C2000 network",
+    # 4 -- a real TETRA uplink transmission with no base station locked.
+    #      Until 0.9.35 this had to stay silent: no verified site meant
+    #      nothing to be near, so any alert would have been a guess. That
+    #      rule cost more than it bought. Driving, the unit is between locks
+    #      most of the time, and 380-385 MHz carries nothing in this country
+    #      but emergency-services terminals -- so a transmission that passes
+    #      the full waveform test there is evidence on its own, and waiting
+    #      for a downlink to corroborate it is waiting through the event.
+    #      What replaces the rule is the confirmation count: a channel with
+    #      no locked partner has to be heard twice (scenario 22), where a
+    #      partner channel still confirms on one.
+    log = scenario("4. a real uplink transmission with nothing locked",
                    FakeAir(uplinks=UPLINKS[:1]))
-    check("never alerts without a locked network",
-          not any(s["mobile_confirmed"] for s in log))
+    check("alerts on verified TETRA even with no locked network",
+          any(s["mobile_confirmed"] for s in log),
+          "alert on cycles %s" % [i for i, s in enumerate(log) if s["mobile_confirmed"]])
 
     # 5 -- the profile v7 killer: interference sitting on exactly the channel
     #      being watched, with a TETRA-like bandwidth and duty cycle.
@@ -823,6 +930,9 @@ def main():
     check_short_transmission_alerts()
     check_follow_up_is_bounded()
     check_sensitive_control_burst()
+    check_vehicle_on_an_unlocked_carrier()
+    check_unlocked_receiver_still_hears()
+    check_unknown_channel_needs_two_hits()
 
     print()
     if FAILURES:

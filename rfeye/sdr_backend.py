@@ -19,11 +19,18 @@ v8 replaces that with a two-stage design:
      repeatedly.  No verified base station means no C2000 coverage here, and
      the device stays silent instead of guessing.
 
-  2. Watch the partners.  TETRA duplex spacing in this band is 10 MHz, so
-     each verified downlink names exactly one uplink channel where handsets on
-     that site transmit.  Those channels are dwelled on and verified with the
-     same physical-layer tests.  Only a verified TETRA uplink transmission
-     raises an alert.
+  2. Watch the band.  Every 25 kHz channel of 380-385 MHz is dwelled on and
+     verified with the same physical-layer tests, whether or not a downlink is
+     locked.  Only a verified TETRA uplink transmission raises an alert.
+
+     Until 0.9.35 this stage watched only the duplex partners of the locked
+     downlinks -- on the reference unit two channels of the two hundred the
+     band holds.  A vehicle registered on any other carrier, or on a
+     neighbouring site, transmitted into a receiver that was not listening
+     there, which is why an ambulance could drive past and raise nothing: a
+     coverage problem, not a sensitivity one.  The lock still decides which
+     channels confirm on a single hit, and it is still what the panel
+     reports, but it is no longer the gate on hearing anything.
 
 Every alert therefore rests on demodulated evidence -- pi/4-DQPSK at exactly
 18000 symbols/s, a 25 kHz RRC channel shape, and 14.1667 ms TDMA slot timing
@@ -256,6 +263,11 @@ class SDRBackend:
         self._pass_channels=0; self._pass_ok=0; self._pass_fails={}
         self.last_pass_s=0.
         self._site_verify_at=0.; self._watch_idx=0; self._display_cycle=0
+        # Uplink watch: _watch_idx walks the whole 380-385 MHz band,
+        # _partner_idx the duplex partners of the locked carriers, and
+        # _watch_turn alternates between the two.
+        self._partner_idx=0; self._watch_turn=0
+        self._band_cache_key=None; self._band_cache=[]
         # Uplink channels that just verified, and how many dwells are left to
         # spend confirming them; see _watch_work.
         self._follow=[]; self._follow_left=0
@@ -358,12 +370,15 @@ class SDRBackend:
         if not bool(self.cfg.get('low_power_mode', True)):
             return
         pause = max(0., float(self.cfg.get('low_power_scan_pause_s', 1.5)))
-        if self.sites.locked():
-            # With a network locked the uplink watch is the whole job, and a
-            # TETRA slot is 14.2 ms: a second and a half of idling between
-            # cycles is time a handset can key up and drop again unseen. The
-            # frame-rate saving stays either way, so keep a short pause here
-            # rather than the searching one.
+        if self.sites.locked() or bool(self.cfg.get('uplink_sweep_band', True)):
+            # The uplink watch is the whole job, and a TETRA slot is 14.2 ms:
+            # a second and a half of idling between cycles is time a handset
+            # can key up and drop again unseen. The frame-rate saving stays
+            # either way, so keep a short pause here rather than the searching
+            # one. Since 0.9.35 the band is swept whether or not anything is
+            # locked, so the long pause is only reached with the sweep turned
+            # off -- and it does cost supply headroom, which on a marginal 5 V
+            # rail is what decides whether the RTL-SDR stays on the bus.
             pause = max(0., float(self.cfg.get('low_power_locked_pause_s', 0.25)))
         end = time.time() + pause
         while self.running and time.time() < end:
@@ -992,28 +1007,80 @@ class SDRBackend:
         alert. The follow-up is bounded and is not re-armed by its own hits, so
         a long transmission cannot keep every other channel unwatched.
         """
+        band=self._uplink_band_channels()
         partners=sorted(self.sites.uplink_partners(now))
-        if not partners:
+        watch=band if band else partners
+        if not watch:
             self._follow=[]; self._follow_left=0
             return []
-        keys={int(round(p)) for p in partners}
+        keys={int(round(p)) for p in watch}
         follow=[f for f in self._follow if int(round(f)) in keys] if self._follow_left>0 else []
         if follow:
-            rotated=[follow[0]]+[p for p in partners if int(round(p))!=int(round(follow[0]))]
+            rotated=[follow[0]]+[p for p in watch if int(round(p))!=int(round(follow[0]))]
             self._follow_left-=1
         else:
             self._follow=[]; self._follow_left=0
-            start=self._watch_idx%len(partners)
-            rotated=partners[start:]+partners[:start]
+            # Alternate a partner-anchored dwell with the next slice of the
+            # band sweep. The partners are the likeliest channels and keep a
+            # revisit of a few seconds; the sweep guarantees that every other
+            # channel is looked at at all, which is the whole point.
+            self._watch_turn+=1
+            if partners and self._watch_turn%2==0:
+                start=self._partner_idx%len(partners)
+                rotated=partners[start:]+partners[:start]
+            else:
+                start=self._watch_idx%len(watch)
+                rotated=watch[start:]+watch[:start]
         results=self._verify(rotated,'UPLINK')
         if not follow:
             covered=max(1,len(self.dwell_channels))
-            self._watch_idx=(self._watch_idx+covered)%len(partners)
-            hits=[r.freq_hz for r in results if r.ok]
+            if partners and self._watch_turn%2==0:
+                self._partner_idx=(self._partner_idx+covered)%len(partners)
+            else:
+                self._watch_idx=(self._watch_idx+covered)%len(watch)
+            # Follow a hit only while it still has something to prove. A
+            # channel whose alert is already up re-armed the follow-up on
+            # every rotation dwell that reached it, so a handset that simply
+            # kept talking held the receiver on its own window and the other
+            # carriers went unvisited -- measured, 0 visits in 10 dwells.
+            done=self.alarm.confirmed_channels()
+            hits=[r.freq_hz for r in results
+                  if r.ok and int(round(float(r.freq_hz))) not in done]
             if hits:
                 self._follow=[float(h) for h in hits]
                 self._follow_left=max(0,int(self.cfg.get('uplink_follow_dwells',3)))
         return results
+
+    def _uplink_band_channels(self):
+        """Every 25 kHz uplink channel in 380-385 MHz, low to high.
+
+        Until 0.9.35 the watch list was exactly the duplex partners of the
+        locked downlinks -- on the reference unit two channels of the two
+        hundred the band holds, so 99% of it was never looked at. A vehicle
+        registered on any other carrier, or on a neighbouring site, transmitted
+        into a receiver that was not listening there and never could be. That
+        is why an ambulance never raised an alert: not a sensitivity problem,
+        a coverage one.
+
+        In the Netherlands 380-385 MHz carries nothing but emergency-services
+        terminals, so a channel needs no introduction from a locked downlink to
+        be worth testing -- the waveform test is the evidence either way. The
+        partners still come first, and a hit on one of them still confirms on a
+        single dwell; see UplinkAlarm.update.
+        """
+        if not bool(self.cfg.get('uplink_sweep_band',True)):
+            return []
+        lo=float(self.cfg.get('mobile_band_start_hz',380e6))
+        hi=float(self.cfg.get('mobile_band_end_hz',385e6))
+        key=(lo,hi,float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
+        if self._band_cache_key!=key:
+            step=max(1.0,key[2])
+            f=self._raster(lo+step,lo)
+            out=[]
+            while f<hi:
+                out.append(float(f)); f+=step
+            self._band_cache_key=key; self._band_cache=out
+        return list(self._band_cache)
 
     def _scan_cycle(self):
         t0=time.perf_counter(); self.last_scan_windows=0
@@ -1021,31 +1088,46 @@ class SDRBackend:
             now=time.time()
             site_results=[]; watch_results=[]
             self.dwell_channels=[]
-            if self.sites.locked(now):
-                watch_results=self._watch_work(now)
-                # A TETRA site runs several carriers and a handset can be on
-                # any of them, so an unfinished band pass is finished even
-                # after the first lock -- stopping early would leave real
-                # uplink channels unwatched. It runs on alternate cycles so
-                # the uplink watch keeps priority.
-                self._alt_cycle=not self._alt_cycle
-                # Alternate cycles carry the band pass; a due re-proof gets a
-                # turn whenever it comes round. _site_work owns the timer, so
-                # a pass dwell can no longer postpone the next re-proof.
-                due=(now-self._site_verify_at
-                     >= self._reverify_interval(self.sites.locked(now)))
-                # While a hit is being followed up the uplink gets the whole
-                # cycle: the handset may unkey at any moment, and nothing a
-                # downlink dwell could learn is urgent by comparison.
-                if not self._follow_left and ((self._site_queue and self._alt_cycle) or due):
+            # The uplink is watched whether or not a downlink is locked. Until
+            # 0.9.35 stage 2 ran only behind a lock, so a unit that had not yet
+            # proved a base station -- which, driving, is most of the time in
+            # every new cell -- was not listening to 380-385 MHz at all. The
+            # lock is still what the panel reports and still what decides which
+            # channels confirm on one hit, but it is no longer the gate on
+            # hearing anything.
+            watch_results=self._watch_work(now)
+            # A TETRA site runs several carriers and a handset can be on any
+            # of them, so an unfinished band pass is finished even after the
+            # first lock -- stopping early would leave real uplink channels
+            # unwatched. It runs on alternate cycles so the uplink watch keeps
+            # priority.
+            self._alt_cycle=not self._alt_cycle
+            # Alternate cycles carry the band pass; a due re-proof gets a turn
+            # whenever it comes round. _site_work owns the timer, so a pass
+            # dwell can no longer postpone the next re-proof.
+            due=(now-self._site_verify_at
+                 >= self._reverify_interval(self.sites.locked(now)))
+            # How the two stages share the cycles. The uplink sweep is the
+            # detector now, so it runs every cycle; the downlink pass rides
+            # along on alternate ones. With nothing locked it gets all of
+            # those, because a lock is what lets a partner channel confirm on a
+            # single hit -- worth having, just no longer worth waiting for.
+            # While a hit is being followed up the uplink gets the whole cycle:
+            # the handset may unkey at any moment, and nothing a downlink dwell
+            # could learn is urgent by comparison.
+            if not self._follow_left:
+                if self.sites.locked(now):
+                    run_site=(self._site_queue and self._alt_cycle) or due
+                else:
+                    run_site=self._alt_cycle or due
+                if run_site:
                     site_results=self._site_work(now)
-            else:
-                site_results=self._site_work(now)
 
             now=time.time()
             verified=[r for r in watch_results if r.ok]
             watched=[r.freq_hz for r in watch_results]
-            confirmed,level,peaks=self.alarm.update(verified,watched,now)
+            confirmed,level,peaks=self.alarm.update(
+                verified,watched,now,trusted=self.sites.uplink_partners(now))
             locked=self.sites.locked(now)
 
             # The 380-385 MHz sweep that used to run here fed the spectrum

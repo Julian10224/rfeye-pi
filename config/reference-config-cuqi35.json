@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.9.34",
+  "app_version": "0.9.35",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -109,5 +109,7 @@
   "uplink_follow_dwells": 3,
   "site_silence_window_s": 180.0,
   "uplink_sensitive": true,
+  "uplink_sweep_band": true,
+  "uplink_unknown_confirm_dwells": 2,
   "phy_uplink_sensitive_percentile": 100.0
 }

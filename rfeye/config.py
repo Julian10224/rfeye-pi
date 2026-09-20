@@ -141,6 +141,22 @@ DEFAULTS = {
     # The strict path stays in tetra_phy for the regression tests, which
     # measure both.
     "uplink_sensitive": True,
+    # Sweep the whole 380-385 MHz uplink band, not only the duplex partners of
+    # the locked downlinks. Until 0.9.35 the watch list was exactly those
+    # partners -- on the reference unit two channels of the two hundred the
+    # band holds, so 99% of it was never examined and a vehicle registered on
+    # any other carrier, or on a neighbouring site, was invisible however close
+    # it drove past. In the Netherlands this band carries nothing but
+    # emergency-services terminals, so a channel needs no introduction from a
+    # locked downlink to be worth testing.
+    "uplink_sweep_band": True,
+    # How many verified hits a channel *outside* the locked partners needs.
+    # One hit is enough on a partner, where the site lock corroborates it; two
+    # orders of magnitude more channels are swept now, so elsewhere the second
+    # hit is required again. The follow-up parks the next dwells back on a
+    # window that just produced a hit, so that second look costs about a second
+    # rather than a whole sweep.
+    "uplink_unknown_confirm_dwells": 2,
     # 100 is a peak hold over the dwell's ~146 spectrum rows. 98 kept the top
     # three of them, and a single 14 ms TETRA slot is four -- so the level of
     # the shortest real transmission was averaged away before any test saw it.
@@ -243,7 +259,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.34",
+    "app_version": "0.9.35",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

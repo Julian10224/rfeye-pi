@@ -15,10 +15,16 @@ follow:
     base station there is nothing to be near, so no alert can be correct, and
     v8 stays silent instead of guessing.  Profile v7 had no such anchor, which
     is why it alarmed in places where no C2000 traffic was possible.
-  * Every uplink channel worth watching is known exactly: TETRA duplex spacing
-    in this band is 10 MHz, so a verified downlink at 391.2375 MHz means
-    handsets on that site transmit at 381.2375 MHz.  The uplink search stops
-    being a blind sweep of 200 channels and becomes a short watch list.
+  * The likeliest uplink channels are known exactly: TETRA duplex spacing in
+    this band is 10 MHz, so a verified downlink at 391.2375 MHz means handsets
+    on that site transmit at 381.2375 MHz.  Those partners are swept first and
+    are the only channels that confirm on a single hit.
+
+    They are no longer the *whole* watch list, though.  Up to 0.9.34 they were,
+    and on a real unit that meant two channels of the two hundred in
+    380-385 MHz -- so a vehicle registered on another carrier or a neighbouring
+    site was never looked at.  The band is swept in full since 0.9.35; a
+    channel with no locked partner simply has to be heard twice.
 
 An alert then means: a handset that is physically near this receiver is
 transmitting on a carrier belonging to a base station this device has
@@ -274,15 +280,34 @@ def plan_dwell(freqs, sample_rate, max_offset_hz=100_000.0,
     def fits(f, c):
         return guard - eps <= abs(f - c) <= lim + eps
 
-    best = None
+    # Candidate tuner placements.  ``f +/- guard`` for every pending channel
+    # keeps the DC spike off a channel under test; ``anchor +/- lim`` puts the
+    # anchor on the very edge of the window instead, which is the placement
+    # that lets a channel left behind by an earlier dwell bring company.
+    #
+    # Without those last two, the pass alternated 47 channels and *one*: a
+    # full-width dwell always leaves the channel beside the spike behind, that
+    # channel then anchors the next dwell, and every centre offered by a still
+    # pending channel missed it -- by 5 kHz, since the nearest pending channel
+    # above sat 605 kHz away and the window is 600. So half of every band pass
+    # was a 0.52 s capture that carried one channel. Measured over 380-385 MHz:
+    # sizes [47,1,47,1,47,1,47,1,8] in 9 dwells, against [48,25,48,25,48,6] in
+    # 6 -- a third off every pass, and off the time to lock a site with it.
+    candidates = []
     for f in near:
-        for c in (f - guard, f + guard):
-            if not fits(anchor, c):
-                continue
-            group = [g for g in near if fits(g, c)]
-            key = (len(group), -abs(c - anchor))
-            if best is None or key > best[0]:
-                best = (key, c, group)
+        candidates.append(f - guard)
+        candidates.append(f + guard)
+    candidates.append(anchor - lim)
+    candidates.append(anchor + lim)
+
+    best = None
+    for c in candidates:
+        if not fits(anchor, c):
+            continue
+        group = [g for g in near if fits(g, c)]
+        key = (len(group), -abs(c - anchor))
+        if best is None or key > best[0]:
+            best = (key, c, group)
     if best is None:
         centre, group = anchor + guard, [anchor]
     else:
@@ -324,9 +349,26 @@ class UplinkAlarm:
         self.peaks = []
         self.streak = 0
 
-    def update(self, verified, watched=(), now=None):
+    def confirmed_channels(self):
+        """Uplink channels whose alert is already up.
+
+        The follow-up exists to fetch the *second* hit while the handset is
+        still keyed. Once a channel is confirmed it has nothing left to prove,
+        and following it further only costs the rest of the band its turn --
+        which, sweeping two hundred channels, is the whole band rather than the
+        two partners it used to be.
+        """
+        return {int(round(float(r.freq_hz))) for r in self.peaks} if self.confirmed else set()
+
+    def update(self, verified, watched=(), now=None, trusted=()):
         """``verified`` are the PhyResults that passed; ``watched`` is every
-        channel actually examined in this dwell, hit or not."""
+        channel actually examined in this dwell, hit or not.
+
+        ``trusted`` are the uplink channels that belong to a base station this
+        device verified itself -- the duplex partners of its locked downlinks.
+        A hit there is corroborated by the site lock; a hit on one of the other
+        ~198 channels of the band is not, so it has to come twice.
+        """
         now = time.time() if now is None else float(now)
         # Sensitive mode confirms on a single verified hit. A control burst is
         # a one-off -- it will not come round twice on the same channel -- so
@@ -334,10 +376,22 @@ class UplinkAlarm:
         # whole failure this mode exists to fix. Every hit reaching here has
         # already passed the full shape and modulation verification, so one is
         # real evidence; the trade is that a single freak pass can now alert.
+        #
+        # That trade was priced for the two or three partner channels a locked
+        # site names. Since the whole 380-385 MHz band is swept there are two
+        # orders of magnitude more channels for a freak pass to land on, so
+        # outside the partners the second hit is required again. The follow-up
+        # in the backend is what keeps that affordable: one verified hit parks
+        # the next dwells back on that window, so the second look costs about a
+        # second rather than a whole sweep.
+        trust = {int(round(float(f))) for f in trusted}
         if bool(self.cfg.get('uplink_sensitive', False)):
-            need = 1
+            need_trusted = 1
+            need_unknown = max(1, int(self.cfg.get('uplink_unknown_confirm_dwells', 2)))
         else:
-            need = max(1, int(self.cfg.get('uplink_confirm_dwells', 2)))
+            need_trusted = max(1, int(self.cfg.get('uplink_confirm_dwells', 2)))
+            need_unknown = need_trusted
+        need = max(need_trusted, need_unknown)
         span = max(need, int(self.cfg.get('uplink_confirm_visits', 4)))
         hold = max(0.0, float(self.cfg.get('uplink_alert_hold_s', 12.0)))
         max_age = max(10.0, float(self.cfg.get('uplink_state_max_age_s', 90.0)))
@@ -362,7 +416,8 @@ class UplinkAlarm:
                       if now - float(st.get('last', 0.0)) <= max_age}
 
         qualified = [r for f, r in hits.items()
-                     if len(self.state.get(f, {}).get('hits', [])) >= need]
+                     if len(self.state.get(f, {}).get('hits', []))
+                     >= (need_trusted if f in trust else need_unknown)]
 
         if qualified:
             self.confirmed = True

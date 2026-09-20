@@ -1,6 +1,6 @@
-# RF Eye 0.9.34 for Raspberry Pi
+# RF Eye 0.9.35 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.34 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.35 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.34 appliance path:
+The installer reproduces the working 0.9.35 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.34
+## User interface in 0.9.35
 
 The compact profile contains:
 
@@ -459,6 +459,86 @@ scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
 
+### The band, not the partners (0.9.35)
+
+Two field reports, months apart and both decisive:
+
+- it had **never** raised an alert near an ambulance;
+- driving past a patrol car it stayed silent, and only alerted **after** being
+  pulled over.
+
+Neither is a sensitivity problem. Read off the reference unit's own state file
+while it was running 0.9.32:
+
+| | |
+| --- | --- |
+| uplink channels in 380-385 MHz | 200 |
+| channels the unit was watching | **2** (380.7375 and 381.1875) |
+| coverage | **1.0%** |
+| P(a short transmission is on a watched channel) | 0.010 |
+| P(the receiver is listening at that moment) | 0.306 |
+| **P(both)** | **0.0031 -- one in 327** |
+
+Stage 2 watched exactly the duplex partners of the locked downlinks, and that
+unit had locked two carriers. A vehicle is registered on whatever cell serves
+*it*: another carrier of the same site, or a neighbouring site altogether. Its
+transmissions landed in the 99% of the band nothing was looking at. Since
+0.9.12 no part of the code swept 380-385 MHz at all -- the sweep that used to
+was removed as something that "fed the spectrum page and nothing else", which
+was true of what it fed and wrong about what it was.
+
+The second report follows from the first plus the lock. `_watch_work` ran only
+behind `if self.sites.locked(now)`, a lock stays valid for `site_lock_stale_s`
+(600 s), and a band pass on that unit measured **121 s** in its own
+`search.log`. Driving, the unit is therefore either not listening at all or
+listening to the uplinks of a site it left kilometres back. Parked at the
+roadside for a few minutes it caught up, locked the local site, and only then
+heard the crew's radio -- an alert after the stop rather than before it.
+
+**What changed.** The whole uplink band is swept, lock or no lock:
+
+- every 25 kHz channel of 380-385 MHz goes through the same waveform test;
+- partner channels of locked carriers are swept first and still confirm on a
+  single hit -- the site lock corroborates them;
+- every other channel needs **two** verified hits. Sweeping two hundred
+  channels instead of two multiplies the opportunities for a freak accept by
+  the same factor, so the single-hit rule is kept where it was priced. The
+  follow-up is what keeps the second hit cheap: one verified hit parks the
+  next dwells back on that window, so the second look costs about a second
+  rather than a whole sweep;
+- the downlink pass rides along on alternate cycles. The lock is still what
+  the panel reports and still what decides the confirmation count. It is no
+  longer the gate on hearing anything.
+
+In this country 380-385 MHz carries nothing but emergency-services terminals,
+so a transmission that passes the full waveform test there is evidence on its
+own. Waiting for a downlink to corroborate it was waiting through the event.
+
+**The dwell planner was also throwing away half of every pass.** A full-width
+dwell always leaves behind the one channel that falls under the tuner's DC
+spike; that channel then anchored the *next* dwell, and every centre offered by
+a still-pending channel missed it by 5 kHz. Measured over 380-385 MHz:
+
+```text
+as shipped                            9 dwells  sizes [47, 1, 47, 1, 47, 1, 47, 1, 8]
+with anchor-at-window-edge centres    6 dwells  sizes [48, 25, 48, 25, 48, 6]
+```
+
+A third off every band pass, and off the time to lock a site with it.
+
+**What it costs.** A full sweep of the band is about 6.8 s on a Pi 3 B+ against
+a 1.7 s revisit of two channels, so any one channel is looked at less often --
+but there are a hundred times as many of them. For a single short burst the
+odds go from 1 in 327 to roughly 1 in 13, and a vehicle that transmits more
+than once while passing, or any voice call of a few seconds, is close to
+certain. More false alarms come with it; that is the trade this release makes
+deliberately, and the waveform test is what keeps it bounded.
+
+`scripts/detector-selftest.py` scenario 20 drives a vehicle on a carrier the
+unit never locked and requires the alert; 21 does it with nothing locked at
+all; 22 asserts one hit on a partner and two elsewhere; 18 still requires that
+a handset talking continuously does not stop the other carriers being visited.
+
 ### Sensitive mode: short control bursts (0.9.29)
 
 0.9.26 caught a held voice call, but eight drives past police vehicles still
@@ -742,7 +822,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.34 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.35 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -891,7 +971,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.34**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.35**.
 
 Build the OTA package with:
 
