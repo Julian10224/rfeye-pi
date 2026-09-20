@@ -763,6 +763,60 @@ def check_unknown_channel_needs_two_hits():
     check("the second hit on it does", ok)
 
 
+def check_capture_pipeline():
+    """The capture thread must change the timing and nothing else.
+
+    Until 0.9.37 the radio and the maths strictly alternated: 0.70 s capturing
+    then 0.93 s analysing, so the receiver listened to 380-385 MHz 11% of the
+    time. The pump overlaps them. What it must not do is change a single
+    verdict, so the same air is driven through both paths and compared.
+    """
+    print(chr(10) + "23. the capture pipeline decides exactly what one thread decided")
+    from sdr_backend import _CapturePump
+    site = [391_187_500.0, 391_512_500.0]
+    stranger = site[0] - 10_000_000.0
+
+    def drive(pipelined):
+        with tempfile.TemporaryDirectory() as d:
+            air = FakeAir(downlinks=site)
+            b = make_backend(air, os.path.join(d, "sites.json"))
+            if pipelined:
+                b._pump = _CapturePump(lambda c, s, n: b._samples(c, s, n))
+            try:
+                now = time.time()
+                for f in site:
+                    b.sites.entries[int(round(f))] = {
+                        "hits": 9, "misses": 0, "quality": 0.7,
+                        "last_ok": now, "first_seen": now, "ok_total": 9}
+                b._site_queue = []
+                b._survey_at = now
+                log = run(b, 16, at={3: lambda: air.interferers.append((stranger, "uplink"))})
+                seen = set()
+                for s in log:
+                    seen |= {int(round(f)) for f in (s.get("watch_freqs") or [])
+                             if 380e6 <= f < 385e6}
+                return ([s["mobile_confirmed"] for s in log], sorted(seen),
+                        b._prefetch_hits, b._prefetch_misses)
+            finally:
+                b.running = False
+                job, b._prefetch = b._prefetch, None
+                if job is not None and b._pump is not None:
+                    try: b._pump.wait(job, 5.0)
+                    except Exception: pass
+                if b._pump is not None:
+                    b._pump.stop()
+
+    plain = drive(False)
+    piped = drive(True)
+    check("the same alert pattern either way", plain[0] == piped[0],
+          "%d cycles, %d alerts both ways" % (len(plain[0]), sum(plain[0])))
+    check("the same channels examined either way", plain[1] == piped[1],
+          "%d channels" % len(piped[1]))
+    check("and the prefetched capture is actually being used",
+          piped[2] > 0, "%d used, %d discarded" % (piped[2], piped[3]))
+    check("the single-threaded path prefetches nothing", plain[2] == 0)
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -937,6 +991,7 @@ def main():
     check_vehicle_on_an_unlocked_carrier()
     check_unlocked_receiver_still_hears()
     check_unknown_channel_needs_two_hits()
+    check_capture_pipeline()
 
     print()
     if FAILURES:

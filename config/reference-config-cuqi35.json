@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.9.36",
+  "app_version": "0.9.37",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -105,11 +105,14 @@
   "low_power_ui_fps": 8,
   "low_power_scan_pause_s": 1.5,
   "site_rescan_s": 120.0,
-  "low_power_locked_pause_s": 0.25,
+  "low_power_locked_pause_s": 0.1,
   "uplink_follow_dwells": 3,
   "site_silence_window_s": 180.0,
   "uplink_sensitive": true,
   "uplink_sweep_band": true,
+  "scan_pipeline": true,
+  "site_pass_share": 5,
+  "snapshot_phy_rows": 64,
   "uplink_unknown_confirm_dwells": 2,
   "phy_uplink_sensitive_percentile": 100.0
 }

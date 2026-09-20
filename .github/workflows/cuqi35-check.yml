@@ -1,4 +1,4 @@
-name: RF Eye 0.9.36 appliance checks
+name: RF Eye 0.9.37 appliance checks
 
 on:
   push:
@@ -262,6 +262,24 @@ jobs:
           # (59 dwells for one 199-channel pass), and a forward-only slice
           # stranded the channel the DC guard skips (195 of 199 after 200).
           grep -q '_uplink_queue' rfeye/sdr_backend.py
+          # 0.9.37: the radio and the maths overlap. Strictly alternating,
+          # the field unit captured 0.70 s and then analysed 0.93 s, so it
+          # listened to 380-385 MHz 11% of the time. Every read still
+          # happens on one thread -- the handle may not be touched by two.
+          grep -q 'class _CapturePump' rfeye/sdr_backend.py
+          grep -q 'def _capture_dwell' rfeye/sdr_backend.py
+          grep -q 'def _prefetch_uplink' rfeye/sdr_backend.py
+          grep -q 'def _uplink_plan' rfeye/sdr_backend.py
+          grep -q '"scan_pipeline": True' rfeye/config.py
+          grep -q 'def check_capture_pipeline' scripts/detector-selftest.py
+          # and the band pass stops taking half the cycles once locked
+          grep -q 'site_pass_share' rfeye/sdr_backend.py rfeye/config.py
+          # the per-dwell spectrum work happens once, not once per channel
+          grep -q 'def prepare_shape' rfeye/tetra_phy.py
+          grep -q 'def shape_prepared' rfeye/tetra_phy.py
+          # a recording keeps every channel the dwell measured
+          grep -q 'snapshot_phy_rows' rfeye/sdr_backend.py rfeye/config.py
+          ! grep -q 'site_results)\[:12\]' rfeye/sdr_backend.py
           grep -q '"uplink_sweep_band": True' rfeye/config.py
           grep -q '"uplink_unknown_confirm_dwells": 2' rfeye/config.py
           grep -q 'need_trusted if f in trust else need_unknown' rfeye/tetra_detector.py
@@ -274,8 +292,11 @@ jobs:
           # channel the DC guard left behind: 47,1,47,1 over a band pass.
           grep -q 'candidates.append(anchor - lim)' rfeye/tetra_detector.py
           grep -q 'candidates.append(anchor + lim)' rfeye/tetra_detector.py
-          grep -q 'smooth_bins' rfeye/tetra_phy.py
-          grep -q 'w_db\[i\] > edge_db' rfeye/tetra_phy.py
+          # The smoothing moved into prepare_shape in 0.9.37 so it runs once
+          # per dwell instead of once per channel; what must not change is
+          # that the walk reads the smoothed profile and never the raw one.
+          grep -q 'smooth_hz' rfeye/tetra_phy.py
+          grep -q 'ok = (seg_db > edge_db)' rfeye/tetra_phy.py
           ! grep -q 'p_db\[i\] > edge_db' rfeye/tetra_phy.py
           grep -q '8 positions' scripts/tetra-phy-selftest.py
           grep -q 'missed %d of 8' scripts/tetra-phy-selftest.py
@@ -433,7 +454,6 @@ jobs:
           assert c['site_unlock_misses']==4
           assert c['site_reverify_s']==60.0
           assert c['site_rescan_s']==120.0
-          assert c['low_power_locked_pause_s']==0.25
           assert 'display_sweep_interval' not in c
           assert c['site_silence_window_s']==180.0
           assert c['site_lock_stale_s']==600.0
@@ -448,6 +468,9 @@ jobs:
           assert c['uplink_sensitive']==True
           assert c['uplink_sweep_band'] is True, 'the band is swept, not just the partners'
           assert c['uplink_unknown_confirm_dwells']==2
+          assert c['scan_pipeline'] is True
+          assert c['site_pass_share']==5
+          assert c['snapshot_phy_rows']==64
           assert c['phy_uplink_sensitive_percentile']==100.0
           assert c['tetra_channel_spacing_hz']==25000.0
           assert c['tetra_raster_offset_hz']==12500.0
@@ -458,6 +481,7 @@ jobs:
           assert c['low_power_mode'] is True, 'a fresh install ships economical'
           assert c['low_power_ui_fps']==8
           assert c['low_power_scan_pause_s']==1.5
+          assert c['low_power_locked_pause_s']==0.1
           assert c['audio_mode']=='adaptive'
           assert len(c['touch_calibration_affine'])==6
           # Every v6/v7 energy-statistics key must be gone, not merely unused.

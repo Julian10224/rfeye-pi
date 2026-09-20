@@ -150,6 +150,22 @@ DEFAULTS = {
     # emergency-services terminals, so a channel needs no introduction from a
     # locked downlink to be worth testing.
     "uplink_sweep_band": True,
+    # Capture on its own thread so the radio fills the next buffer while
+    # the last one is being measured. Strictly alternating, the field
+    # unit spent 0.70 s capturing and 0.93 s analysing per cycle, so it
+    # listened to 380-385 MHz 11% of the time. Set false to go back to
+    # one thread if a unit ever misbehaves; nothing else changes.
+    "scan_pipeline": True,
+    # How many per-channel results a snapshot carries. One dwell measures
+    # up to 48 channels; at 12 a recording kept a quarter of what the
+    # receiver saw, which is how a drive past a vehicle could be analysed
+    # afterwards and answer nothing.
+    "snapshot_phy_rows": 64,
+    # One cycle in this many goes to the 390-395 MHz band pass once a
+    # site is locked. It was one in two, measured at 9 of 22 cycles on a
+    # unit that already held six carriers -- half the receiver's time
+    # re-proving a lock that no longer gates the alarm.
+    "site_pass_share": 5,
     # How many verified hits a channel *outside* the locked partners needs.
     # One hit is enough on a partner, where the site lock corroborates it; two
     # orders of magnitude more channels are swept now, so elsewhere the second
@@ -235,7 +251,7 @@ DEFAULTS = {
     # Once a network is locked the uplink watch is the job, and a TETRA slot
     # is 14.2 ms. Idling for a second and a half between cycles then costs
     # detections rather than saving anything worth having.
-    "low_power_locked_pause_s": 0.25,
+    "low_power_locked_pause_s": 0.10,
     "gain": "auto",
     "ppm": 0,
     "muted": False,
@@ -259,7 +275,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.36",
+    "app_version": "0.9.37",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

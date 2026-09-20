@@ -112,6 +112,7 @@ class Channelizer:
         self.iq = iq[:n].astype(np.complex64)
         self._spectrum = None
         self._psd_cache = {}
+        self._prep_cache = {}
 
     @property
     def spectrum(self):
@@ -192,6 +193,23 @@ class Channelizer:
         self._psd_cache[key] = out
         return out
 
+    def shape_prepared(self, nfft=None, percentile=92.0, dc_notch_hz=2500.0):
+        """``prepare_shape`` for this dwell's spectrum, computed once.
+
+        Every channel of a dwell shares it.  Doing it per channel meant the
+        dB-to-linear conversion and the smoothing convolution ran up to 96
+        times over 7168 bins for one capture, which is analysis time the
+        receiver is not spending listening.
+        """
+        key = (nfft, float(percentile), float(dc_notch_hz))
+        prep = self._prep_cache.get(key)
+        if prep is None:
+            freqs, db = self.psd(nfft=nfft, percentile=percentile,
+                                 dc_notch_hz=dc_notch_hz)
+            prep = prepare_shape(freqs, db)
+            self._prep_cache[key] = prep
+        return prep
+
     def extract(self, offset_hz, decim, edge_taper=0.12):
         """Return (baseband, rate) for the channel centred on ``offset_hz``.
 
@@ -218,7 +236,41 @@ class Channelizer:
         return bb.astype(np.complex64), self.sample_rate / decim
 
 
-def channel_shape(freqs, psd_db, centre_hz=0.0):
+def prepare_shape(freqs, psd_db, smooth_hz=1400.0):
+    """The part of ``channel_shape`` that does not depend on the channel.
+
+    A dwell measures up to 48 channels out of one spectrum, and until 0.9.37
+    each of them re-did the whole-array work: the dB-to-linear conversion over
+    7168 bins, the smoothing convolution, and boolean masks the width of the
+    capture.  Nothing in any of that knows where the channel is.
+
+    That mattered because the analysis, not the radio, is what limits how
+    often a channel comes round.  Measured on the field unit: 0.70 s to
+    capture a dwell and 0.93 s to analyse it, so the receiver spent 11% of its
+    time actually listening to 380-385 MHz.
+
+    ``channel_shape`` accepts the result as ``prepared``; without it, it still
+    works out the same numbers on its own, which is what the offline tools do.
+    """
+    freqs = np.asarray(freqs, dtype=np.float64)
+    p_db = np.asarray(psd_db, dtype=np.float64)
+    bin_hz = float(np.median(np.diff(freqs))) if len(freqs) > 1 else 1.0
+    n = int(round(float(smooth_hz) / max(1.0, bin_hz)))
+    n = max(1, n | 1)
+    if n > 1 and len(p_db) >= 4 * n:
+        lin = 10.0 ** (p_db / 10.0)
+        kernel = np.ones(n, dtype=np.float64) / float(n)
+        w_lin = np.convolve(lin, kernel, mode='same')
+        edge = n // 2
+        w_lin[:edge] = lin[:edge]
+        w_lin[len(w_lin) - edge:] = lin[len(lin) - edge:]
+        w_db = _db(w_lin)
+    else:
+        w_db = p_db
+    return {'freqs': freqs, 'p_db': p_db, 'w_db': w_db, 'bin_hz': bin_hz}
+
+
+def channel_shape(freqs, psd_db, centre_hz=0.0, prepared=None):
     """How much a channel looks like a 25 kHz RRC(0.35) TETRA carrier.
 
     The RTL-SDR has roughly 45 dB of usable dynamic range, so this does not
@@ -226,25 +278,40 @@ def channel_shape(freqs, psd_db, centre_hz=0.0):
     that actually separated TETRA from the observed false positives: the
     carrier is about 25 kHz wide, it stops before the neighbouring 25 kHz
     channels, and its passband is flat rather than one spur line.
+
+    ``prepared`` is ``prepare_shape``'s result for this spectrum, shared by
+    every channel of the dwell.  The windows below are contiguous runs of a
+    uniformly spaced spectrum, so they are taken as index slices rather than
+    boolean masks over the whole capture; the numbers are identical and the
+    work is proportional to the channel rather than to the dwell.
     """
-    d = np.asarray(freqs, dtype=np.float64) - float(centre_hz)
-    p_db = np.asarray(psd_db, dtype=np.float64)
-    p_lin = 10.0 ** (p_db / 10.0)
-    a = np.abs(d)
+    if prepared is None:
+        prepared = prepare_shape(freqs, psd_db)
+    fr = prepared['freqs']
+    p_db = prepared['p_db']
+    w_db = prepared['w_db']
+    centre = float(centre_hz)
 
-    def sel(lo, hi):
-        m = (a >= lo) & (a < hi)
-        return m if int(np.count_nonzero(m)) >= 3 else None
+    def span(lo_hz, hi_hz, lo_open=True, hi_open=True):
+        """Indices of ``lo_hz < f-centre < hi_hz`` (open ends by default)."""
+        i0 = int(np.searchsorted(fr, centre + lo_hz, 'right' if lo_open else 'left'))
+        i1 = int(np.searchsorted(fr, centre + hi_hz, 'left' if hi_open else 'right'))
+        return i0, max(i0, i1)
 
-    core = sel(0.0, 8000.0)
-    noise = sel(30000.0, 140000.0)
-    if core is None or noise is None:
+    # |f - centre| < 8000
+    c0, c1 = span(-8000.0, 8000.0)
+    core = slice(c0, c1)
+    # 30000 <= |f - centre| < 140000, which is one window either side
+    n0a, n1a = span(-140000.0, -30000.0, lo_open=True, hi_open=False)
+    n0b, n1b = span(30000.0, 140000.0, lo_open=False, hi_open=True)
+    if (c1 - c0) < 3 or (n1a - n0a) + (n1b - n0b) < 3:
         raise ValueError('capture bandwidth too small for shape analysis')
+    noise_vals = np.concatenate((p_db[n0a:n1a], p_db[n0b:n1b]))
 
     core_db = float(np.median(p_db[core]))
     # A low percentile, not the median: in a busy band part of the reference
     # window is occupied by neighbouring carriers and would inflate a median.
-    noise_db = float(np.percentile(p_db[noise], 20))
+    noise_db = float(np.percentile(noise_vals, 20))
 
     # Is there a spectral valley where the 25 kHz channel ends?  This is the
     # test that separates one TETRA carrier from one wide hump spilling across
@@ -254,9 +321,9 @@ def channel_shape(freqs, psd_db, centre_hz=0.0):
     # neighbour cannot mask a carrier that is genuinely wide.
     valleys = []
     for lo, hi in ((-15500.0, -10500.0), (10500.0, 15500.0)):
-        m = (d >= lo) & (d <= hi)
-        if int(np.count_nonzero(m)) >= 3:
-            valleys.append(core_db - float(np.min(p_db[m])))
+        v0, v1 = span(lo, hi, lo_open=False, hi_open=False)
+        if v1 - v0 >= 3:
+            valleys.append(core_db - float(np.min(p_db[v0:v1])))
     boundary_db_reject = min(valleys) if valleys else 0.0
 
     # Occupied bandwidth: the *contiguous* -10 dB width around the channel
@@ -285,41 +352,48 @@ def channel_shape(freqs, psd_db, centre_hz=0.0):
     # would move them by several dB. A continuous downlink carrier measures
     # 21.4-21.7 kHz here against 21.4 kHz before, so the limits still mean
     # what they were calibrated to mean.
-    smooth_bins = int(round(1400.0 / max(1.0, float(np.median(np.diff(freqs))))))
-    smooth_bins = max(1, smooth_bins | 1)
-    if smooth_bins > 1 and len(p_lin) >= 4 * smooth_bins:
-        kernel = np.ones(smooth_bins, dtype=np.float64) / float(smooth_bins)
-        w_lin = np.convolve(p_lin, kernel, mode='same')
-        edge = smooth_bins // 2
-        w_lin[:edge] = p_lin[:edge]
-        w_lin[len(w_lin) - edge:] = p_lin[len(p_lin) - edge:]
-    else:
-        w_lin = p_lin
-    w_db = _db(w_lin)
-
     cap_hz = 20000.0
     edge_db = float(np.median(w_db[core])) - 10.0
-    centre_idx = int(np.argmin(a))
-    lo_hz = hi_hz = 0.0
-    i = centre_idx
-    while i >= 0 and w_db[i] > edge_db and a[i] <= cap_hz:
-        lo_hz = a[i]
-        i -= 1
-    i = centre_idx
-    while i < len(d) and w_db[i] > edge_db and a[i] <= cap_hz:
-        hi_hz = a[i]
-        i += 1
+    # argmin(a) without touching the whole array: the nearest bin is one of
+    # the two either side of the centre, and a tie goes to the lower index
+    # exactly as argmin would resolve it.
+    j = int(np.searchsorted(fr, centre))
+    cands = [k for k in (j - 1, j) if 0 <= k < len(fr)] or [0]
+    centre_idx = min(cands, key=lambda k: (abs(float(fr[k]) - centre), k))
+    # The walk, as a run length rather than a Python loop. On flat noise the
+    # spectrum never drops 10 dB, so it used to step all the way to the cap --
+    # ~71 bins each side, twice per channel, for every one of the 48 channels
+    # in a dwell. That was the single hottest thing in a quiet sweep, and a
+    # quiet sweep is what the band mostly is.
+    cap_bins = int(cap_hz / max(1.0, prepared['bin_hz'])) + 2
+    lo_i = max(0, centre_idx - cap_bins)
+    hi_i = min(len(fr), centre_idx + cap_bins + 1)
+
+    def run(seg_db, seg_fr):
+        """How far the condition holds from the centre outwards."""
+        ok = (seg_db > edge_db) & (np.abs(seg_fr - centre) <= cap_hz)
+        if ok.size == 0 or not ok[0]:
+            return 0
+        bad = np.flatnonzero(~ok)
+        return int(bad[0]) if bad.size else int(ok.size)
+
+    down = run(w_db[lo_i:centre_idx + 1][::-1], fr[lo_i:centre_idx + 1][::-1])
+    up = run(w_db[centre_idx:hi_i], fr[centre_idx:hi_i])
+    lo_hz = abs(float(fr[centre_idx - down + 1]) - centre) if down else 0.0
+    hi_hz = abs(float(fr[centre_idx + up - 1]) - centre) if up else 0.0
     occupied_bw = lo_hz + hi_hz
 
     # Flatness: modulation is noise-like and flat across the passband, a
     # carrier or spur is not.  Peak-to-median so one hot bin is punished.
-    flatness_db = float(np.max(p_db[core]) - np.median(p_db[core]))
+    flatness_db = float(np.max(p_db[core])) - core_db
 
     # Power centroid, used to strip the residual tuner error before the
     # symbol-rate test runs.
-    fit = a <= 13000.0
-    w = np.clip(p_lin[fit] - 10.0 ** (noise_db / 10.0), 0.0, None)
-    centre_err = float(np.sum(d[fit] * w) / np.sum(w)) if float(np.sum(w)) > 0 else 0.0
+    f0, f1 = span(-13000.0, 13000.0, lo_open=False, hi_open=False)
+    fit_lin = 10.0 ** (p_db[f0:f1] / 10.0)
+    w = np.clip(fit_lin - 10.0 ** (noise_db / 10.0), 0.0, None)
+    centre_err = (float(np.sum((fr[f0:f1] - centre) * w) / np.sum(w))
+                  if float(np.sum(w)) > 0 else 0.0)
 
     return {
         'snr_db': core_db - noise_db,
@@ -691,8 +765,9 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
            if sensitive else 92.0)
     res.sensitive = sensitive
 
-    freqs, psd = channelizer.psd(percentile=pct)
-    shape = channel_shape(freqs, psd, centre_hz=freq_offset_hz)
+    prep = channelizer.shape_prepared(percentile=pct)
+    freqs, psd = prep['freqs'], prep['p_db']
+    shape = channel_shape(freqs, psd, centre_hz=freq_offset_hz, prepared=prep)
 
     # An uncalibrated tuner puts the carrier somewhere near, but not on, the
     # nominal raster frequency. Measuring the shape around the nominal centre
@@ -711,7 +786,7 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
     res.tuner_error_hz = err
     if abs(err) > 200.0 and abs(err) <= guard:
         offset = freq_offset_hz + err
-        shape = channel_shape(freqs, psd, centre_hz=offset)
+        shape = channel_shape(freqs, psd, centre_hz=offset, prepared=prep)
 
     res.snr_db = shape['snr_db']
     res.noise_db = shape['noise_db']

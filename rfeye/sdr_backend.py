@@ -131,6 +131,58 @@ def open_rtlsdr_library():
     return first[0],first[1],False
 
 
+class _CapturePump:
+    """Runs dwell captures on their own thread.
+
+    The radio and the maths were strictly alternating: on the field unit a
+    cycle was 0.70 s of capture followed by 0.93 s of analysis, so the receiver
+    spent about a third of a cycle -- and 11% of wall-clock time -- actually
+    listening to 380-385 MHz. Nothing about that is forced by the hardware; the
+    dongle can fill a buffer while the previous one is being measured.
+
+    Every read still happens on exactly one thread, this one, because the
+    librtlsdr handle may not be touched from two at once. The scan thread only
+    submits and waits, so ``_samples`` keeps its single owner and the tests
+    keep their patch point.
+    """
+
+    def __init__(self, fn):
+        self._fn = fn
+        self._q = __import__('queue').Queue()
+        self._thread = threading.Thread(target=self._run, name='rfeye-capture',
+                                        daemon=True)
+        self._thread.start()
+
+    def submit(self, centre, sr, count):
+        job = {'args': (centre, sr, count),
+               'key': (int(round(float(centre))), int(sr), int(count)),
+               'ev': threading.Event(), 'iq': None, 'err': None}
+        self._q.put(job)
+        return job
+
+    def wait(self, job, timeout):
+        if not job['ev'].wait(max(0.1, float(timeout))):
+            raise RuntimeError('capture thread did not answer in time')
+        if job['err'] is not None:
+            raise job['err']
+        return job['iq']
+
+    def _run(self):
+        while True:
+            job = self._q.get()
+            if job is None:
+                break
+            try:
+                job['iq'] = self._fn(*job['args'])
+            except BaseException as exc:            # reported to the waiter
+                job['err'] = exc
+            finally:
+                job['ev'].set()
+
+    def stop(self):
+        self._q.put(None)
+
+
 class _PersistentRTL:
     """Persistent librtlsdr wrapper using only stable C API calls.
 
@@ -268,6 +320,8 @@ class SDRBackend:
         # _watch_turn alternates between the two.
         self._partner_idx=0; self._watch_turn=0
         self._uplink_queue=[]; self._uplink_sweeps=0
+        self._pump=None; self._prefetch=None; self._site_share=0
+        self._prefetch_hits=0; self._prefetch_misses=0
         self._band_cache_key=None; self._band_cache=[]
         # Uplink channels that just verified, and how many dwells are left to
         # spend confirming them; see _watch_work.
@@ -380,12 +434,19 @@ class SDRBackend:
             # locked, so the long pause is only reached with the sweep turned
             # off -- and it does cost supply headroom, which on a marginal 5 V
             # rail is what decides whether the RTL-SDR stays on the bus.
-            pause = max(0., float(self.cfg.get('low_power_locked_pause_s', 0.25)))
+            pause = max(0., float(self.cfg.get('low_power_locked_pause_s', 0.10)))
+            # A rail that has already sagged gets its headroom back: on a
+            # marginal 5 V supply the idle time is what decides whether the
+            # RTL-SDR stays on the bus, and that outranks the sweep rate.
+            if self._power_history:
+                pause = max(pause, float(self.cfg.get('low_power_scan_pause_s', 1.5)))
         end = time.time() + pause
         while self.running and time.time() < end:
             time.sleep(min(0.25, max(0.01, end - time.time())))
 
     def _run(self):
+        if self._pump is None and bool(self.cfg.get('scan_pipeline',True)):
+            self._pump=_CapturePump(lambda c,s,n: self._samples(c,s,n))
         try:
             while self.running:
                 with self.lock:
@@ -401,6 +462,14 @@ class SDRBackend:
                     else: time.sleep(.5)
                 self._low_power_pause()
         finally:
+            # Let a prefetch finish before anything closes the handle: the
+            # capture thread may be inside rtlsdr_read_sync() right now.
+            job,self._prefetch=self._prefetch,None
+            if job is not None:
+                try: self._pump.wait(job,8.0)
+                except Exception: pass
+            if self._pump is not None:
+                self._pump.stop(); self._pump=None
             # Close from the same worker that performs synchronous USB reads.
             self._close_direct_sdr()
 
@@ -446,6 +515,8 @@ class SDRBackend:
                 'mobile_scan_ms':float(self.last_dwell_ms),
                 'site_scan_ms':float(self.last_survey_ms),
                 'scan_windows':int(self.last_scan_windows),
+            'prefetch_hits':int(self._prefetch_hits),
+            'prefetch_misses':int(self._prefetch_misses),
                 'sdr_path':str(self.sdr_path),
                 'power_warning':str(self._power_flag),
                 'power_history':str(self._power_history),
@@ -617,10 +688,57 @@ class SDRBackend:
             self._close_direct_sdr()
             raise RuntimeError('librtlsdr read failed: '+str(e))
 
+    def _capture(self,centre,sr,count):
+        """Read one capture, through the pump when it is running."""
+        if self._pump is None:
+            return self._samples(centre,sr,count)
+        budget=8.0+3.0*float(count)/max(1.0,float(sr))
+        return self._pump.wait(self._pump.submit(centre,sr,count),budget)
+
+    def _capture_dwell(self,centre,sr,count):
+        """The dwell capture, taking the prefetched one when it fits.
+
+        A prefetch that no longer matches the plan is still waited for before
+        anything else is asked of the radio -- the handle is single threaded,
+        and a discarded capture is cheaper than a race.
+        """
+        job=self._prefetch; self._prefetch=None
+        if job is not None:
+            key=(int(round(float(centre))),int(sr),int(count))
+            try:
+                iq=self._pump.wait(job,8.0+3.0*float(count)/max(1.0,float(sr)))
+            except Exception:
+                iq=None                      # a fresh read will say what broke
+            if iq is not None and job['key']==key:
+                self._prefetch_hits+=1
+                return iq
+            self._prefetch_misses+=1
+        return self._capture(centre,sr,count)
+
+    def _prefetch_uplink(self,now):
+        """Start the next uplink capture while this cycle is still analysing."""
+        if self._pump is None or self._prefetch is not None or not self.running:
+            return
+        try:
+            plan=self._uplink_plan(now)
+            if not plan:
+                return
+            sr=int(self.cfg.get('phy_sample_rate',2016000))
+            n=1<<int(self.cfg.get('phy_dwell_log2',20))
+            centre,members=plan_dwell(
+                plan[1],sr,
+                max_offset_hz=float(self.cfg.get('phy_max_offset_hz',600000.)),
+                spacing_hz=float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
+            if centre is None or not members:
+                return
+            self._prefetch=self._pump.submit(centre,sr,n)
+        except Exception:
+            self._prefetch=None
+
     def _capture_spectrum(self,center,sr,n,blocks,percentile=None):
         """Wideband survey capture; returns (freqs, power_db)."""
         t0=time.perf_counter()
-        iq=self._samples(center,sr,n*blocks)
+        iq=self._capture(center,sr,n*blocks)
         self.last_capture_ms=(time.perf_counter()-t0)*1000.
         rows=min(blocks,len(iq)//n)
         if rows<1: raise RuntimeError('no complete FFT blocks')
@@ -825,7 +943,7 @@ class SDRBackend:
         if centre is None or not members:
             return []
         t0=time.perf_counter()
-        iq=self._samples(centre,sr,n)
+        iq=self._capture_dwell(centre,sr,n)
         self.last_dwell_ms=(time.perf_counter()-t0)*1000.
         self.last_capture_ms=self.last_dwell_ms
         self.last_scan_windows+=1
@@ -995,6 +1113,45 @@ class SDRBackend:
         self.sites.save()
         return results
 
+    def _uplink_plan(self,now):
+        """What the next uplink dwell would look at, deciding nothing.
+
+        Pulled out of _watch_work so the capture for it can be started while
+        the previous dwell is still being analysed. It must not touch state:
+        the prefetch runs it, then the dwell itself runs it again and uses the
+        waiting capture only if it still plans the same tuner placement.
+        """
+        band=self._uplink_band_channels()
+        partners=sorted(self.sites.uplink_partners(now))
+        watch=band if band else partners
+        if not watch:
+            return None
+        keys={int(round(p)) for p in watch}
+        follow=[f for f in self._follow if int(round(f)) in keys] if self._follow_left>0 else []
+        if follow:
+            rotated=[follow[0]]+[p for p in watch if int(round(p))!=int(round(follow[0]))]
+            return partners,rotated,follow,self._watch_turn
+        # Alternate a partner-anchored dwell with the next slice of the band
+        # sweep. The partners are the likeliest channels and keep a revisit of
+        # a few seconds; the sweep guarantees that every other channel is
+        # looked at at all, which is the whole point.
+        turn=self._watch_turn+1
+        if partners and turn%2==0:
+            start=self._partner_idx%len(partners)
+            rotated=partners[start:]+partners[:start]
+        else:
+            # A queue, drained and refilled, exactly as the downlink pass
+            # works -- not a rotating cursor. A cursor cannot express "this one
+            # channel still owes me a look": plan_dwell places the tuner where
+            # it covers the most of what it is handed, so handed a rotation it
+            # centres behind the cursor and remeasures what was just swept (a
+            # 199-channel pass took 59 dwells that way), and handed only what
+            # lies ahead it strands the channel the DC guard skipped (195 of
+            # 199 after 200 dwells). Draining a queue ends both.
+            queue=self._uplink_queue or list(watch)
+            rotated=list(queue)
+        return partners,rotated,follow,turn
+
     def _watch_work(self,now):
         """Dwell on the uplink partners of the locked base stations.
 
@@ -1008,49 +1165,25 @@ class SDRBackend:
         alert. The follow-up is bounded and is not re-armed by its own hits, so
         a long transmission cannot keep every other channel unwatched.
         """
-        band=self._uplink_band_channels()
-        partners=sorted(self.sites.uplink_partners(now))
-        watch=band if band else partners
-        if not watch:
+        plan=self._uplink_plan(now)
+        if plan is None:
             self._follow=[]; self._follow_left=0
             return []
-        keys={int(round(p)) for p in watch}
-        follow=[f for f in self._follow if int(round(f)) in keys] if self._follow_left>0 else []
+        partners,rotated,follow,turn=plan
         if follow:
-            rotated=[follow[0]]+[p for p in watch if int(round(p))!=int(round(follow[0]))]
             self._follow_left-=1
         else:
             self._follow=[]; self._follow_left=0
-            # Alternate a partner-anchored dwell with the next slice of the
-            # band sweep. The partners are the likeliest channels and keep a
-            # revisit of a few seconds; the sweep guarantees that every other
-            # channel is looked at at all, which is the whole point.
-            self._watch_turn+=1
-            if partners and self._watch_turn%2==0:
-                start=self._partner_idx%len(partners)
-                rotated=partners[start:]+partners[:start]
-            else:
-                # A queue, drained and refilled, exactly as the downlink pass
-                # works -- not a rotating cursor. A cursor cannot express "this
-                # one channel still owes me a look": plan_dwell places the
-                # tuner where it covers the most of what it is handed, so
-                # handed a rotation it centres behind the cursor and remeasures
-                # what was just swept (a 199-channel pass took 59 dwells that
-                # way), and handed only what lies ahead it strands the channel
-                # the DC guard skipped (195 of 199 after 200 dwells). Draining
-                # a queue ends both: the skipped channel stays in it and
-                # anchors a later dwell, where it now brings a couple of dozen
-                # neighbours with it rather than travelling alone.
-                if not self._uplink_queue:
-                    self._uplink_queue=list(watch)
-                    self._uplink_sweeps+=1
-                rotated=list(self._uplink_queue)
+            self._watch_turn=turn
         results=self._verify(rotated,'UPLINK')
         if not follow:
             covered=max(1,len(self.dwell_channels))
-            if partners and self._watch_turn%2==0:
+            if partners and turn%2==0:
                 self._partner_idx=(self._partner_idx+covered)%len(partners)
             else:
+                if not self._uplink_queue:
+                    self._uplink_queue=self._uplink_band_channels() or list(partners)
+                    self._uplink_sweeps+=1
                 done={int(round(x)) for x in self.dwell_channels}
                 self._uplink_queue=[x for x in self._uplink_queue
                                     if int(round(x)) not in done]
@@ -1133,7 +1266,14 @@ class SDRBackend:
             # could learn is urgent by comparison.
             if not self._follow_left:
                 if self.sites.locked(now):
-                    run_site=(self._site_queue and self._alt_cycle) or due
+                    # One cycle in site_pass_share, not one in two. Measured on
+                    # the field unit, the band pass was taking 9 of 22 cycles
+                    # while the site was already locked with six carriers --
+                    # half the receiver's time spent re-proving 390-395 MHz,
+                    # which no longer decides whether anything alerts.
+                    share=max(2,int(self.cfg.get('site_pass_share',5)))
+                    self._site_share+=1
+                    run_site=(self._site_queue and self._site_share%share==0) or due
                 else:
                     run_site=self._alt_cycle or due
                 if run_site:
@@ -1161,9 +1301,19 @@ class SDRBackend:
                     'survey_idle_interval_s',15.0))-(now-self._survey_at)))
                 time.sleep(wait)
 
+            # The radio can be filling the next buffer while the rest of
+            # this cycle runs.
+            self._prefetch_uplink(now)
+
             state='ALERT' if confirmed else ('LOCKED' if locked else 'SEARCHING')
             shown=[self._peak_row(r) for r in peaks[:int(self.cfg.get('max_signals',3))]]
-            phy_rows=[r.as_dict() for r in (watch_results+site_results)[:12]]
+            # Every channel the dwell measured, not the first twelve. A
+            # dwell covers up to 48, so a recording of a drive past a
+            # vehicle kept a quarter of the evidence -- and the quarter
+            # it kept was the head of the queue, not the interesting
+            # part. The recordings are the only real evidence there is.
+            keep=max(12,int(self.cfg.get('snapshot_phy_rows',64)))
+            phy_rows=[r.as_dict() for r in (watch_results+site_results)[:keep]]
 
             with self.lock:
                 self.detector_state=state
@@ -1188,6 +1338,10 @@ class SDRBackend:
             # every _samples() failure is wrapped as 'read failed', so matching
             # that text resets on absence too -- which is precisely what kept
             # the dongle from coming back.
+            job,self._prefetch=self._prefetch,None
+            if job is not None:
+                try: self._pump.wait(job,4.0)
+                except Exception: pass
             if ('timeout' in low or 'short read' in low or 'stuck' in low) and 'open failed' not in low:
                 self._recover_sdr_usb()
             power=self._power_warning() or self._power_history

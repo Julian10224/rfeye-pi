@@ -1,6 +1,6 @@
-# RF Eye 0.9.36 for Raspberry Pi
+# RF Eye 0.9.37 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.36 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.37 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.36 appliance path:
+The installer reproduces the working 0.9.37 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.36
+## User interface in 0.9.37
 
 The compact profile contains:
 
@@ -458,6 +458,77 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### Listening, not computing (0.9.37)
+
+0.9.35 and 0.9.36 fixed *where* the receiver looks. A recording made driving
+past a customs vehicle that was stopping someone showed what was still wrong
+with *how often*. Read straight out of that recording:
+
+| first 20 s of the drive | |
+| --- | --- |
+| uplink dwells | 5 |
+| channels examined | 82 of 200 |
+| channels never looked at | 118 |
+| RF actually captured | 2.6 s -- **13% of the time** |
+
+Over the full minute it did reach the whole band, and it measured 65 uplink
+channels in the first 25 s with exactly one above 8 dB -- flat noise 39.7 kHz
+wide. The receiver was healthy: the right driver was loaded, base stations
+came in at 10.6-12.5 dB and three carriers were locked. It simply was not
+listening at the moment, or on the channel, that mattered.
+
+Three things were eating the time, and the same recording named them:
+
+- **`cycle_ms` 1644, `dwell_ms` 704, `verify_ms` 934.** The radio and the
+  maths strictly alternated, so the dongle sat idle for as long as it had just
+  spent filling a buffer.
+- **9 of 22 cycles went to the 390-395 MHz band pass** while the site was
+  already locked with six carriers -- half the receiver's time re-proving
+  something that no longer decides whether anything alerts.
+- **A 0.25 s pause on top of every cycle.**
+
+What changed:
+
+- **Capture runs on its own thread** (`_CapturePump`). The next dwell is
+  planned and started while the current one is still being analysed, so the
+  cycle costs the longer of the two rather than their sum. Every read still
+  happens on exactly one thread, because the librtlsdr handle may not be
+  touched from two. A prefetch whose plan no longer matches -- a follow-up
+  armed in the meantime -- is waited for and discarded rather than raced.
+- **The band pass gets one cycle in `site_pass_share` (5) once locked**,
+  measured at 98% of dwells going to the uplink against 59% in the field.
+- **The per-dwell spectrum work happens once per dwell.** `prepare_shape`
+  hoists the dB-to-linear conversion and the smoothing convolution out of
+  `channel_shape`, the windows are index slices rather than boolean masks the
+  width of the capture, and the -10 dB walk is a run length rather than a
+  Python loop that stepped 142 times per channel on flat noise. Measured over
+  a 48-channel dwell: **61.9 ms -> 40.7 ms** quiet, 100 ms -> 84 ms with
+  carriers present. The numbers it produces are unchanged -- bit for bit, over
+  3416 comparisons across four captures, 61 centres and both percentiles.
+- **The pause drops to 0.10 s**, and goes back to the long one by itself if
+  the supply has ever sagged: on a marginal 5 V rail the idle time is what
+  decides whether the RTL-SDR stays on the bus, and that outranks sweep rate.
+
+Put together, on the measured Pi 3 B+ components, a cycle goes from
+0.70 + 0.93 + 0.25 = 1.88 s to about max(0.70, 0.61) + 0.10 = 0.80 s, with
+98% of dwells on the uplink instead of 59%. A full sweep of the band should
+fall from the ~33 s the recording showed to under 10 s, and the listening
+fraction from 11% to roughly half.
+
+**That last paragraph is a model, not a measurement.** The components in it
+are measured; the combination has not been seen on air yet. The honest test is
+another recording.
+
+`scripts/detector-selftest.py` scenario 23 drives the same air through both
+paths and requires the same alerts, the same channels and a prefetch that is
+actually being used -- the pipeline is allowed to change the timing and
+nothing else.
+
+**Recordings keep every channel now.** A snapshot carried the first 12 phy
+rows while a dwell measures up to 48, so the recording of that drive held a
+quarter of what the receiver saw, and the quarter it held was the head of the
+queue rather than the interesting part. `snapshot_phy_rows` is 64.
 
 ### The band, not the partners (0.9.35)
 
@@ -840,7 +911,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.36 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.37 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -989,7 +1060,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.36**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.37**.
 
 Build the OTA package with:
 
