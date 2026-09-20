@@ -1,4 +1,4 @@
-name: RF Eye 0.9.35 appliance checks
+name: RF Eye 0.9.36 appliance checks
 
 on:
   push:
@@ -257,6 +257,11 @@ jobs:
           # could drive past and raise nothing. The gate on the lock is gone
           # with it; what replaces it is the confirmation count.
           grep -q 'def _uplink_band_channels' rfeye/sdr_backend.py
+          # 0.9.36: the uplink sweep drains a queue. A rotating cursor let
+          # plan_dwell centre behind it and remeasure what was just swept
+          # (59 dwells for one 199-channel pass), and a forward-only slice
+          # stranded the channel the DC guard skips (195 of 199 after 200).
+          grep -q '_uplink_queue' rfeye/sdr_backend.py
           grep -q '"uplink_sweep_band": True' rfeye/config.py
           grep -q '"uplink_unknown_confirm_dwells": 2' rfeye/config.py
           grep -q 'need_trusted if f in trust else need_unknown' rfeye/tetra_detector.py

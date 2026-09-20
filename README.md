@@ -1,6 +1,6 @@
-# RF Eye 0.9.35 for Raspberry Pi
+# RF Eye 0.9.36 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.35 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.36 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.35 appliance path:
+The installer reproduces the working 0.9.36 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.35
+## User interface in 0.9.36
 
 The compact profile contains:
 
@@ -526,13 +526,31 @@ with anchor-at-window-edge centres    6 dwells  sizes [48, 25, 48, 25, 48, 6]
 
 A third off every band pass, and off the time to lock a site with it.
 
-**What it costs.** A full sweep of the band is about 6.8 s on a Pi 3 B+ against
-a 1.7 s revisit of two channels, so any one channel is looked at less often --
-but there are a hundred times as many of them. For a single short burst the
-odds go from 1 in 327 to roughly 1 in 13, and a vehicle that transmits more
-than once while passing, or any voice call of a few seconds, is close to
-certain. More false alarms come with it; that is the trade this release makes
-deliberately, and the waveform test is what keeps it bounded.
+**What it costs, measured rather than estimated.** Driving the backend
+against simulated air and counting cycles until all 199 channels of the band
+have been examined:
+
+| | full sweep | at 1.4 s per cycle |
+| --- | --- | --- |
+| a site locked (partners share the cycles) | 11 dwells | **15 s** |
+| nothing locked | 6 dwells | **8 s** |
+
+So any one channel is looked at every 15 s instead of every 1.7 s -- but there
+are a hundred times as many of them. Each channel gets a 0.52 s capture per
+sweep, which puts the odds on a single short burst at about **1 in 29** against
+1 in 327 before, and a vehicle that transmits more than once while passing, or
+any voice call of a few seconds, is close to certain. More false alarms come
+with it; that is the trade this release makes deliberately, and the waveform
+test is what keeps it bounded.
+
+Getting that 15 s took three attempts, and the first two are worth recording
+because both looked right. Handing `plan_dwell` the rotation starting at a
+cursor let it centre the tuner *behind* the cursor and re-measure the half of
+the window just swept: 59 dwells for one pass. Handing it only the channels
+ahead of the cursor stranded the channel the DC guard skips, which then sits
+behind the cursor for a whole lap: 195 of 199 after 200 dwells. The uplink
+sweep is a drained-and-refilled queue now, exactly like the downlink pass,
+because a cursor cannot express "this one channel still owes me a look".
 
 `scripts/detector-selftest.py` scenario 20 drives a vehicle on a carrier the
 unit never locked and requires the alert; 21 does it with nothing locked at
@@ -822,7 +840,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.35 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.36 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -971,7 +989,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.35**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.36**.
 
 Build the OTA package with:
 

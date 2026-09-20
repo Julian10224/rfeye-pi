@@ -267,6 +267,7 @@ class SDRBackend:
         # _partner_idx the duplex partners of the locked carriers, and
         # _watch_turn alternates between the two.
         self._partner_idx=0; self._watch_turn=0
+        self._uplink_queue=[]; self._uplink_sweeps=0
         self._band_cache_key=None; self._band_cache=[]
         # Uplink channels that just verified, and how many dwells are left to
         # spend confirming them; see _watch_work.
@@ -1029,15 +1030,30 @@ class SDRBackend:
                 start=self._partner_idx%len(partners)
                 rotated=partners[start:]+partners[:start]
             else:
-                start=self._watch_idx%len(watch)
-                rotated=watch[start:]+watch[:start]
+                # A queue, drained and refilled, exactly as the downlink pass
+                # works -- not a rotating cursor. A cursor cannot express "this
+                # one channel still owes me a look": plan_dwell places the
+                # tuner where it covers the most of what it is handed, so
+                # handed a rotation it centres behind the cursor and remeasures
+                # what was just swept (a 199-channel pass took 59 dwells that
+                # way), and handed only what lies ahead it strands the channel
+                # the DC guard skipped (195 of 199 after 200 dwells). Draining
+                # a queue ends both: the skipped channel stays in it and
+                # anchors a later dwell, where it now brings a couple of dozen
+                # neighbours with it rather than travelling alone.
+                if not self._uplink_queue:
+                    self._uplink_queue=list(watch)
+                    self._uplink_sweeps+=1
+                rotated=list(self._uplink_queue)
         results=self._verify(rotated,'UPLINK')
         if not follow:
             covered=max(1,len(self.dwell_channels))
             if partners and self._watch_turn%2==0:
                 self._partner_idx=(self._partner_idx+covered)%len(partners)
             else:
-                self._watch_idx=(self._watch_idx+covered)%len(watch)
+                done={int(round(x)) for x in self.dwell_channels}
+                self._uplink_queue=[x for x in self._uplink_queue
+                                    if int(round(x)) not in done]
             # Follow a hit only while it still has something to prove. A
             # channel whose alert is already up re-armed the follow-up on
             # every rotation dwell that reached it, so a handset that simply

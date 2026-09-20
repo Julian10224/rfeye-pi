@@ -687,8 +687,11 @@ def check_vehicle_on_an_unlocked_carrier():
             b._survey_at = now
             watched = set()
             log = run(b, 26, at={2: lambda: air.interferers.append((stranger, "uplink"))})
+            # watch_freqs is whatever dwell ran last in the cycle, and a
+            # downlink pass shares the cycle, so count only the uplink band.
             for s in log:
-                watched |= {int(round(f)) for f in (s.get("watch_freqs") or [])}
+                watched |= {int(round(f)) for f in (s.get("watch_freqs") or [])
+                            if 380e6 <= f < 385e6}
             check("the sweep reaches beyond the locked partners",
                   len(watched) > 8, "%d distinct uplink channels examined" % len(watched))
             alerted = [i for i, s in enumerate(log) if s["mobile_confirmed"]]
@@ -719,7 +722,8 @@ def check_unlocked_receiver_still_hears():
             watched = set()
             log = run(b, 14, at={1: lambda: air.interferers.append((stranger, "uplink"))})
             for s in log:
-                watched |= {int(round(f)) for f in (s.get("watch_freqs") or [])}
+                watched |= {int(round(f)) for f in (s.get("watch_freqs") or [])
+                            if 380e6 <= f < 385e6}
             check("uplink channels examined with no lock at all",
                   len(watched) > 8, "%d channels" % len(watched))
             check("and it can still raise an alert",
