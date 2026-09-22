@@ -1,4 +1,4 @@
-name: RF Eye 0.9.37 appliance checks
+name: RF Eye 0.9.38 appliance checks
 
 on:
   push:
@@ -267,6 +267,24 @@ jobs:
           # listened to 380-385 MHz 11% of the time. Every read still
           # happens on one thread -- the handle may not be touched by two.
           grep -q 'class _CapturePump' rfeye/sdr_backend.py
+          # 0.9.38: the radio's share of the time is a measured limit, not a
+          # fixed pause. 0.9.37 moved it without naming it -- about 88% of
+          # the time streaming against 37% -- and a field unit threw the
+          # dongle off the USB bus 169 s after boot, under-voltage flagged.
+          grep -q 'def radio_duty' rfeye/sdr_backend.py
+          grep -q 'def _duty_limit' rfeye/sdr_backend.py
+          grep -q 'def _timed_samples' rfeye/sdr_backend.py
+          grep -q 'sdr_duty_eco' rfeye/config.py rfeye/sdr_backend.py
+          grep -q '_duty_backoff_until' rfeye/sdr_backend.py
+          grep -q 'def check_radio_duty_limit' scripts/detector-selftest.py
+          # a hit keeps its channel in the fast rotation, and the follow-up
+          # is bounded in seconds so it outlasts one repeat of a periodic
+          # reporter -- while still alternating, or it blinds the band.
+          grep -q 'uplink_hot_s' rfeye/config.py rfeye/sdr_backend.py
+          grep -q 'uplink_follow_s' rfeye/config.py rfeye/sdr_backend.py
+          grep -q 'self._follow_left%2==0' rfeye/sdr_backend.py
+          grep -q 'def check_periodic_reporter_is_caught' scripts/detector-selftest.py
+          grep -q 'def check_hot_channel_rotation' scripts/detector-selftest.py
           grep -q 'def _capture_dwell' rfeye/sdr_backend.py
           grep -q 'def _prefetch_uplink' rfeye/sdr_backend.py
           grep -q 'def _uplink_plan' rfeye/sdr_backend.py
@@ -464,13 +482,17 @@ jobs:
           assert c['uplink_confirm_visits']==4
           assert c['survey_flatness_weight']==0.5
           assert c['uplink_alert_hold_s']==12.0
-          assert c['uplink_follow_dwells']==3
+          assert c['uplink_follow_dwells']==8
           assert c['uplink_sensitive']==True
           assert c['uplink_sweep_band'] is True, 'the band is swept, not just the partners'
           assert c['uplink_unknown_confirm_dwells']==2
           assert c['scan_pipeline'] is True
           assert c['site_pass_share']==5
           assert c['snapshot_phy_rows']==64
+          assert 0.2 <= c['sdr_duty_eco'] <= 0.8, 'ECO limits the radio'
+          assert c['sdr_duty_max_power'] > c['sdr_duty_eco']
+          assert c['uplink_hot_s']==60.0
+          assert c['uplink_follow_s']==7.0
           assert c['phy_uplink_sensitive_percentile']==100.0
           assert c['tetra_channel_spacing_hz']==25000.0
           assert c['tetra_raster_offset_hz']==12500.0
@@ -481,7 +503,7 @@ jobs:
           assert c['low_power_mode'] is True, 'a fresh install ships economical'
           assert c['low_power_ui_fps']==8
           assert c['low_power_scan_pause_s']==1.5
-          assert c['low_power_locked_pause_s']==0.1
+          assert c['low_power_locked_pause_s']==0.15
           assert c['audio_mode']=='adaptive'
           assert len(c['touch_calibration_affine'])==6
           # Every v6/v7 energy-statistics key must be gone, not merely unused.

@@ -1,6 +1,6 @@
-# RF Eye 0.9.37 for Raspberry Pi
+# RF Eye 0.9.38 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.9.37 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.9.38 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.9.37 appliance path:
+The installer reproduces the working 0.9.38 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.9.37
+## User interface in 0.9.38
 
 The compact profile contains:
 
@@ -458,6 +458,77 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### What the radio may spend, and what it can recognise (0.9.38)
+
+0.9.37 bought its sweep rate with current nobody had budgeted. Capture on its
+own thread with a 0.10 s pause had the dongle **streaming about 88% of the
+time against 37% before**, and a field unit threw it off the USB bus 169 s
+after boot with the under-voltage flag set:
+
+```text
+usb 1-1.1.3: USB disconnect, device number 4     # 169 s after boot
+throttled=0x50000                                # under-voltage has occurred
+```
+
+So the share of time the radio streams is a measured limit now rather than a
+side effect of whatever pause happened to be configured. An RTL-SDR draws its
+several hundred milliamps *while it is streaming*, so that fraction is the
+knob, and `radio_duty` on the debug page is what it is actually doing.
+
+| | limit |
+| --- | --- |
+| ECO (`sdr_duty_eco`, shipped default) | 0.55 |
+| Max power (`sdr_duty_max_power`) | 1.0 |
+| after the rail sags or the dongle needs recovering | 0.30 for two minutes |
+
+**Max power means something again.** Between 0.9.35 and 0.9.37 the two
+positions differed by a 0.10 s pause, which is not a power setting. They now
+differ by nearly half the radio's on-time, and the button still re-checks USB
+when it is pressed, which is the reason anyone reaches for it.
+
+#### Recognising a vehicle that is not talking
+
+A passing emergency vehicle mostly offers short transmissions every few
+seconds rather than speech. Driven through the whole backend, a terminal
+reporting in on average once every four dwells:
+
+| | visits to its channel | verified hits | alert |
+| --- | --- | --- | --- |
+| on a carrier of a locked site | 24 | 7 | **cycle 5** |
+| on a carrier with no lock, before 0.9.38 | 7 | 1 | never |
+| on a carrier with no lock, after | 13 | 5 | **cycle 31** |
+
+Two things made the second row possible.
+
+- **A channel that produced verified TETRA joins the fast rotation** for
+  `uplink_hot_s` (60 s). Before, the sweep came back to it about once every
+  fifteen dwells, so the second hit the two-hit rule wants never arrived. It
+  is *not* promoted to trusted: it still needs two hits, it just gets the
+  chances to earn them.
+- **The follow-up is bounded in seconds as well as dwells** (7 s, 8 dwells,
+  whichever ends first). Three dwells was about 2.4 s, shorter than the gap
+  between two transmissions from a terminal reporting in, so the window that
+  exists to catch the repeat ended before it came. It alternates with the
+  ordinary rotation rather than parking: holding the window exclusively for
+  long enough to outlast a repeat is long enough to blind the rest of the
+  band, measured as 0 visits to the other carrier of the site in 10 dwells.
+
+**What is still luck.** On a carrier with no lock and a terminal that reports
+in rarely, the *first* hit is chance: one 0.52 s look every fifteen or so
+dwells against a transmission that is on air a few per cent of the time. The
+table above shows it working at one burst in four dwells and failing at one in
+eight. Nothing in this release changes that, and with one tuner covering
+1.2 MHz of a 5 MHz band, nothing in software will. What helps is more locked
+downlinks, because every lock turns one more uplink channel into one that is
+visited every other dwell.
+
+**On periodic registration.** If terminals on this network really do report in
+every few seconds, the tables above are the behaviour to expect and the design
+follows from it. That claim is not something this repository has measured, and
+nothing here depends on it being exactly four seconds: what the detector needs
+is that *something* is transmitted more than once while the vehicle is in
+range, which is also true of a call, a status message or a location update.
 
 ### Listening, not computing (0.9.37)
 
@@ -911,7 +982,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.9.37 uses a **TMB12A03 active buzzer**:
+RF Eye 0.9.38 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1060,7 +1131,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.9.37**.
+`VERSION` and `rfeye/config.py` identify this release as **0.9.38**.
 
 Build the OTA package with:
 

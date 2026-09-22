@@ -66,6 +66,7 @@ class FakeAir:
         self.interferers = list(interferers)     # (freq_hz, kind)
         self.snr_db = float(snr_db)
         self.seed = 0
+        self.burst_every = 5
 
     def silence(self):
         """Everything off air, as if the antenna had been unscrewed."""
@@ -124,6 +125,19 @@ class FakeAir:
                 # contiguous slots until 0.9.33, a shape that cleared the
                 # occupancy measurement a single slot could not.
                 parts.append((sim.control_burst(dur, sr, seed=self.seed + 37,
+                                                n_slots=1, freq_offset_hz=off), 1.0))
+            elif kind == "periodic_burst":
+                # A terminal that reports in periodically rather than talking:
+                # a one-slot burst, present only in some captures, which is
+                # what a passing vehicle mostly offers a receiver.
+                # Drawn, not counted: a burst gated on the capture counter
+                # aliases against the sweep period and can be present on
+                # exactly the captures that never look here.
+                import random as _random
+                if _random.Random(self.seed * 2654435761).random() >= 1.0 / max(
+                        1.0, float(self.burst_every)):
+                    continue
+                parts.append((sim.control_burst(dur, sr, seed=self.seed + 61,
                                                 n_slots=1, freq_offset_hz=off), 1.0))
             elif kind == "access_burst":
                 # Shorter still: the subslot of a random-access burst, the
@@ -817,6 +831,155 @@ def check_capture_pipeline():
     check("the single-threaded path prefetches nothing", plain[2] == 0)
 
 
+def check_radio_duty_limit():
+    """The radio's share of the time is held to what the supply can carry.
+
+    0.9.37 moved it without naming it: capture on its own thread and a 0.10 s
+    pause had the dongle streaming about 88% of the time against 37% before,
+    and a field unit threw it off the USB bus 169 s after boot with the
+    under-voltage flag set. The limit is a measured fraction now, ECO and Max
+    power really differ, and losing the dongle backs it off further.
+    """
+    print(chr(10) + "24. the radio is held to its share of the time")
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=[391_187_500.0])
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            now = time.time()
+            eco = b._duty_limit(now)
+            b.cfg["low_power_mode"] = False
+            full = b._duty_limit(now)
+            b.cfg["low_power_mode"] = True
+            check("ECO limits the radio to a fraction of the time",
+                  0.2 <= eco <= 0.8, "%.2f" % eco)
+            check("Max power lifts the limit", full > eco, "%.2f vs %.2f" % (full, eco))
+            b._duty_backoff_until = now + 60.0
+            backed = b._duty_limit(now)
+            check("and losing the dongle backs it off further", backed < eco,
+                  "%.2f" % backed)
+            b._duty_backoff_until = 0.0
+
+            # The pause really is computed from measured streaming time.
+            b._radio_epoch = now - 10.0
+            b._radio_s = 9.0                      # 90% of the window, way over
+            t0 = time.perf_counter()
+            b.running = True
+            b._low_power_pause()
+            waited = time.perf_counter() - t0
+            check("an over-budget radio is made to wait", waited > 0.3,
+                  "%.2f s" % waited)
+            b._radio_s = 0.2                      # 2% of the window, under
+            t0 = time.perf_counter()
+            b._low_power_pause()
+            check("an under-budget one is not", (time.perf_counter() - t0) < 0.5)
+        finally:
+            b.running = False
+
+
+def check_follow_up_outlasts_a_repeat():
+    """A follow-up has to outlive the gap between two transmissions.
+
+    The second hit an unknown channel needs comes from the next transmission
+    on it. Counted only in dwells the window was about 2.4 s, which can be
+    shorter than the gap, so the look that exists to catch the repeat ended
+    before it arrived.
+    """
+    print(chr(10) + "25. the follow-up outlasts one repeat")
+    from config import DEFAULTS as D
+    dwells = int(D["uplink_follow_dwells"])
+    secs = float(D["uplink_follow_s"])
+    check("the follow-up is bounded in seconds as well as dwells", secs > 0,
+          "%d dwells or %.1f s" % (dwells, secs))
+    check("and the window outlasts a several-second repeat", secs >= 5.0,
+          "%.1f s" % secs)
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=[391_187_500.0])
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            b._follow = [381_187_500.0]
+            b._follow_left = dwells
+            b._follow_until = time.time() + secs
+            plan = b._uplink_plan(time.time())
+            check("a fresh follow-up is honoured",
+                  bool(plan) and abs(plan[1][0] - 381_187_500.0) < 1.0)
+            b._follow_until = time.time() - 0.1
+            plan = b._uplink_plan(time.time())
+            check("an expired one is not, dwells left or no",
+                  bool(plan) and abs(plan[1][0] - 381_187_500.0) > 1.0)
+        finally:
+            b.running = False
+
+
+def check_periodic_reporter_is_caught():
+    """A vehicle that reports in periodically rather than holding a call.
+
+    This is what a passing emergency vehicle mostly offers a receiver: short
+    transmissions every few seconds, not speech. Measured both ways, because
+    the two cases behave very differently and only one of them is solved:
+
+        carrier of a locked site   24 visits, alert three cycles in
+        carrier with no lock       13 visits, alert once the channel is hot
+
+    A channel that produces verified TETRA joins the fast rotation for
+    uplink_hot_s, which is what makes the second case possible at all -- before
+    it, one hit in seven visits and no alert, because the sweep only came back
+    about once every fifteen dwells.
+    """
+    print(chr(10) + "26. a vehicle that reports in periodically while passing")
+    site = [391_187_500.0, 391_512_500.0]
+    for label, chan, budget in (("on a locked site's carrier",
+                                 site[0] - 10_000_000.0, 12),
+                                ("on a carrier with no lock",
+                                 383_712_500.0, 40)):
+        with tempfile.TemporaryDirectory() as d:
+            air = FakeAir(downlinks=site)
+            air.burst_every = 4
+            b = make_backend(air, os.path.join(d, "sites.json"))
+            try:
+                now = time.time()
+                for f in site:
+                    b.sites.entries[int(round(f))] = {
+                        "hits": 9, "misses": 0, "quality": 0.7,
+                        "last_ok": now, "first_seen": now, "ok_total": 9}
+                b._site_queue = []
+                b._survey_at = now
+                log = run(b, 44, at={2: lambda c=chan: air.interferers.append(
+                    (c, "periodic_burst"))})
+                hit = next((i for i, s in enumerate(log) if s["mobile_confirmed"]), None)
+                check("recognised %s" % label, hit is not None and hit <= budget,
+                      "alert on cycle %s (budget %d)" % (hit, budget))
+                if hit is not None:
+                    s = next(s for s in log if s["mobile_confirmed"] and s["peaks"])
+                    check("  and on the right channel",
+                          abs(s["peaks"][0]["freq_hz"] - chan) < 1000.0,
+                          "%.4f MHz" % (s["peaks"][0]["freq_hz"] / 1e6))
+            finally:
+                b.running = False
+
+
+def check_hot_channel_rotation():
+    """One verified hit keeps its channel in the fast rotation for a while."""
+    print(chr(10) + "27. a channel that produced TETRA stays hot")
+    with tempfile.TemporaryDirectory() as d:
+        b = make_backend(FakeAir(downlinks=[391_187_500.0]),
+                         os.path.join(d, "sites.json"))
+        try:
+            now = time.time()
+            stranger = 383_712_500.0
+            b._hot[stranger] = now + 30.0
+            plan = b._uplink_plan(now)
+            check("a hot channel joins the fast rotation",
+                  bool(plan) and stranger in plan[0], "%d fast channels" % len(plan[0]))
+            b._hot[stranger] = now - 1.0
+            plan = b._uplink_plan(now)
+            check("and drops out when it goes cold",
+                  bool(plan) and stranger not in plan[0])
+            check("but it is still not trusted for a single hit",
+                  stranger not in set(b.sites.uplink_partners(now)))
+        finally:
+            b.running = False
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -992,6 +1155,10 @@ def main():
     check_unlocked_receiver_still_hears()
     check_unknown_channel_needs_two_hits()
     check_capture_pipeline()
+    check_radio_duty_limit()
+    check_follow_up_outlasts_a_repeat()
+    check_periodic_reporter_is_caught()
+    check_hot_channel_rotation()
 
     print()
     if FAILURES:

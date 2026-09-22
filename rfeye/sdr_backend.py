@@ -322,10 +322,13 @@ class SDRBackend:
         self._uplink_queue=[]; self._uplink_sweeps=0
         self._pump=None; self._prefetch=None; self._site_share=0
         self._prefetch_hits=0; self._prefetch_misses=0
+        self._radio_s=0.0; self._radio_epoch=time.time()
+        self._duty_backoff_until=0.0
         self._band_cache_key=None; self._band_cache=[]
         # Uplink channels that just verified, and how many dwells are left to
         # spend confirming them; see _watch_work.
-        self._follow=[]; self._follow_left=0
+        self._follow=[]; self._follow_left=0; self._follow_until=0.0
+        self._hot={}
         self.last_phy=[]
         self.dwell_centre_hz=0.; self.dwell_channels=[]
         self.last_dwell_role=''
@@ -414,39 +417,70 @@ class SDRBackend:
             self.scan_failures=0
             self.last_good_scan=0.
 
-    def _low_power_pause(self):
-        """Idle between cycles so the CPU can clock back down.
+    def radio_duty(self, now=None):
+        """What fraction of recent time the dongle has been streaming."""
+        now = time.time() if now is None else float(now)
+        elapsed = max(1e-3, now - self._radio_epoch)
+        return max(0.0, min(1.0, self._radio_s / elapsed))
 
-        Without this the detector hands the governor a continuous FFT load and
-        a Pi 3 B+ never leaves 1.4 GHz. The pause costs time to lock and buys
-        supply headroom, which on a marginal 5 V rail is what decides whether
-        the RTL-SDR stays on the bus at all.
+    def _duty_limit(self, now):
+        """The share of the time the radio may stream, and why.
+
+        This is the knob that decides current draw. An RTL-SDR pulls its
+        several hundred milliamps while it is *streaming*, so the honest way to
+        spend less is to stream a smaller fraction of the time -- not to hope a
+        fixed pause between cycles happens to be enough.
+
+        It became a real number in 0.9.38 because 0.9.37 quietly moved it. With
+        the capture on its own thread and a 0.10 s pause the dongle was reading
+        about 88% of the time against 37% before, and a field unit dropped it
+        off the bus 169 s after boot with the under-voltage flag set.
         """
         if not bool(self.cfg.get('low_power_mode', True)):
+            limit = float(self.cfg.get('sdr_duty_max_power', 1.0))
+        else:
+            limit = float(self.cfg.get('sdr_duty_eco', 0.55))
+        # A rail that has already sagged, or a dongle that has just had to be
+        # recovered, gets its headroom back. Sweep rate is worth nothing from a
+        # receiver that is no longer on the bus.
+        if self._power_history or now < self._duty_backoff_until:
+            limit = min(limit, float(self.cfg.get('sdr_duty_recover', 0.30)))
+        return min(1.0, max(0.05, limit))
+
+    def _low_power_pause(self):
+        """Hold the radio to its share of the time, and let the CPU breathe.
+
+        Idling also lets the governor clock back down; without it the detector
+        hands a Pi 3 B+ a continuous FFT load. Both matter on a marginal 5 V
+        rail, and that rail is what decides whether the RTL-SDR stays on the
+        bus at all.
+        """
+        now = time.time()
+        limit = self._duty_limit(now)
+        window = max(5.0, float(self.cfg.get('sdr_duty_window_s', 20.0)))
+        elapsed = now - self._radio_epoch
+        if elapsed > window:
+            # Slide the window rather than clearing it, or the duty would
+            # restart at zero and the radio would run flat out in bursts.
+            self._radio_epoch = now - window * 0.5
+            self._radio_s *= 0.5
+            elapsed = max(1e-3, now - self._radio_epoch)
+        pause = 0.0
+        if limit < 1.0 and self._radio_s > 0.0:
+            pause = (self._radio_s / limit) - max(1e-3, elapsed)
+        floor = max(0.0, float(self.cfg.get('low_power_min_pause_s', 0.0)))
+        if bool(self.cfg.get('low_power_mode', True)):
+            floor = max(floor, float(self.cfg.get('low_power_locked_pause_s', 0.10)))
+        pause = max(floor, min(pause, 3.0))
+        if pause <= 0.0:
             return
-        pause = max(0., float(self.cfg.get('low_power_scan_pause_s', 1.5)))
-        if self.sites.locked() or bool(self.cfg.get('uplink_sweep_band', True)):
-            # The uplink watch is the whole job, and a TETRA slot is 14.2 ms:
-            # a second and a half of idling between cycles is time a handset
-            # can key up and drop again unseen. The frame-rate saving stays
-            # either way, so keep a short pause here rather than the searching
-            # one. Since 0.9.35 the band is swept whether or not anything is
-            # locked, so the long pause is only reached with the sweep turned
-            # off -- and it does cost supply headroom, which on a marginal 5 V
-            # rail is what decides whether the RTL-SDR stays on the bus.
-            pause = max(0., float(self.cfg.get('low_power_locked_pause_s', 0.10)))
-            # A rail that has already sagged gets its headroom back: on a
-            # marginal 5 V supply the idle time is what decides whether the
-            # RTL-SDR stays on the bus, and that outranks the sweep rate.
-            if self._power_history:
-                pause = max(pause, float(self.cfg.get('low_power_scan_pause_s', 1.5)))
         end = time.time() + pause
         while self.running and time.time() < end:
             time.sleep(min(0.25, max(0.01, end - time.time())))
 
     def _run(self):
         if self._pump is None and bool(self.cfg.get('scan_pipeline',True)):
-            self._pump=_CapturePump(lambda c,s,n: self._samples(c,s,n))
+            self._pump=_CapturePump(lambda c,s,n: self._timed_samples(c,s,n))
         try:
             while self.running:
                 with self.lock:
@@ -515,6 +549,8 @@ class SDRBackend:
                 'mobile_scan_ms':float(self.last_dwell_ms),
                 'site_scan_ms':float(self.last_survey_ms),
                 'scan_windows':int(self.last_scan_windows),
+            'radio_duty':float(self.radio_duty()),
+            'duty_limit':float(self._duty_limit(time.time())),
             'prefetch_hits':int(self._prefetch_hits),
             'prefetch_misses':int(self._prefetch_misses),
                 'sdr_path':str(self.sdr_path),
@@ -688,10 +724,23 @@ class SDRBackend:
             self._close_direct_sdr()
             raise RuntimeError('librtlsdr read failed: '+str(e))
 
+    def _timed_samples(self,centre,sr,count):
+        """``_samples`` with the time the dongle spent streaming accounted for.
+
+        Every read goes through here, from the capture thread and from the
+        direct path alike, because the duty limit is only honest if it counts
+        all of them.
+        """
+        t0=time.perf_counter()
+        try:
+            return self._samples(centre,sr,count)
+        finally:
+            self._radio_s+=time.perf_counter()-t0
+
     def _capture(self,centre,sr,count):
         """Read one capture, through the pump when it is running."""
         if self._pump is None:
-            return self._samples(centre,sr,count)
+            return self._timed_samples(centre,sr,count)
         budget=8.0+3.0*float(count)/max(1.0,float(sr))
         return self._pump.wait(self._pump.submit(centre,sr,count),budget)
 
@@ -1122,12 +1171,27 @@ class SDRBackend:
         waiting capture only if it still plans the same tuner placement.
         """
         band=self._uplink_band_channels()
-        partners=sorted(self.sites.uplink_partners(now))
+        # A channel that has just produced verified TETRA joins the fast
+        # rotation for a while. Without it, one hit on a channel with no
+        # locked partner was usually the only one: the sweep came back about
+        # once every fifteen dwells, and the second hit the two-hit rule wants
+        # never arrived. Measured, a vehicle reporting in on an unlocked
+        # carrier gave 1 hit in 7 visits and no alert; on a locked carrier,
+        # which is already in this rotation, it alerted three cycles in.
+        hot=[f for f,until in self._hot.items() if now<until]
+        partners=sorted(set(self.sites.uplink_partners(now))|set(hot))
         watch=band if band else partners
         if not watch:
             return None
         keys={int(round(p)) for p in watch}
-        follow=[f for f in self._follow if int(round(f)) in keys] if self._follow_left>0 else []
+        # While the follow-up window is open the receiver alternates between
+        # that window and the ordinary rotation. Parking on it exclusively for
+        # long enough to outlast a repeat is long enough to blind everything
+        # else -- measured, 0 visits to the other carrier of the site in 10
+        # dwells, which is exactly what scenario 18 exists to catch.
+        following=(self._follow_left>0 and float(now)<self._follow_until
+                   and self._follow_left%2==0)
+        follow=[f for f in self._follow if int(round(f)) in keys] if following else []
         if follow:
             rotated=[follow[0]]+[p for p in watch if int(round(p))!=int(round(follow[0]))]
             return partners,rotated,follow,self._watch_turn
@@ -1170,10 +1234,12 @@ class SDRBackend:
             self._follow=[]; self._follow_left=0
             return []
         partners,rotated,follow,turn=plan
-        if follow:
+        window_open=self._follow_left>0 and float(now)<self._follow_until
+        if window_open:
             self._follow_left-=1
         else:
-            self._follow=[]; self._follow_left=0
+            self._follow=[]; self._follow_left=0; self._follow_until=0.0
+        if not follow:
             self._watch_turn=turn
         results=self._verify(rotated,'UPLINK')
         if not follow:
@@ -1196,8 +1262,20 @@ class SDRBackend:
             hits=[r.freq_hz for r in results
                   if r.ok and int(round(float(r.freq_hz))) not in done]
             if hits:
+                # Stay on the window long enough to outlast one repeat of
+                # whatever is transmitting there. A terminal that reports in
+                # periodically sends the next one seconds later, and a
+                # follow-up counted only in dwells ended before it -- three
+                # dwells was about 2.4 s. Bounded in both, so a channel cannot
+                # hold the receiver either.
+                hot_s=max(0.,float(self.cfg.get('uplink_hot_s',60.0)))
+                for h in hits:
+                    self._hot[float(round(float(h)))]=float(now)+hot_s
+                self._hot={f:u for f,u in self._hot.items() if now<u}
                 self._follow=[float(h) for h in hits]
-                self._follow_left=max(0,int(self.cfg.get('uplink_follow_dwells',3)))
+                self._follow_left=max(0,int(self.cfg.get('uplink_follow_dwells',8)))
+                self._follow_until=float(now)+max(
+                    0.,float(self.cfg.get('uplink_follow_s',7.0)))
         return results
 
     def _uplink_band_channels(self):
@@ -1342,6 +1420,11 @@ class SDRBackend:
             if job is not None:
                 try: self._pump.wait(job,4.0)
                 except Exception: pass
+            # Whatever broke, ease off the radio for a while: a unit that is
+            # losing the dongle is not helped by asking it for more.
+            self._duty_backoff_until=max(
+                self._duty_backoff_until,
+                time.time()+max(0.,float(self.cfg.get('sdr_duty_backoff_s',120.0))))
             if ('timeout' in low or 'short read' in low or 'stuck' in low) and 'open failed' not in low:
                 self._recover_sdr_usb()
             power=self._power_warning() or self._power_history

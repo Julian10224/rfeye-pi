@@ -156,6 +156,21 @@ DEFAULTS = {
     # listened to 380-385 MHz 11% of the time. Set false to go back to
     # one thread if a unit ever misbehaves; nothing else changes.
     "scan_pipeline": True,
+    # The share of the time the dongle may stream. This is the knob that
+    # decides current draw: an RTL-SDR pulls its several hundred mA while
+    # it is streaming, so spending less means streaming less of the time.
+    # 0.9.37 moved it without naming it -- capture on its own thread with
+    # a 0.10 s pause read about 88% of the time against 37% before, and a
+    # field unit threw the dongle off the bus 169 s after boot with the
+    # under-voltage flag set. ECO is the shipped default; Max power lifts
+    # the limit; either backs off after the rail sags or the dongle has
+    # to be recovered.
+    "sdr_duty_eco": 0.55,
+    "sdr_duty_max_power": 1.0,
+    "sdr_duty_recover": 0.30,
+    "sdr_duty_backoff_s": 120.0,
+    "sdr_duty_window_s": 20.0,
+    "low_power_min_pause_s": 0.0,
     # How many per-channel results a snapshot carries. One dwell measures
     # up to 48 channels; at 12 a recording kept a quarter of what the
     # receiver saw, which is how a drive past a vehicle could be analysed
@@ -216,7 +231,19 @@ DEFAULTS = {
     # After a verified uplink hit, how many dwells go straight back to that
     # window so the second confirmation comes while the handset is still
     # keyed up, instead of whenever the watch rotation next comes round.
-    "uplink_follow_dwells": 3,
+    # How long a verified hit keeps the next dwells on its own window, in
+    # dwells and in seconds, whichever ends first. Three dwells was about
+    # 2.4 s, which is shorter than the gap between two transmissions from
+    # a terminal that reports in periodically -- so the second hit an
+    # unknown channel needs could fall just outside the window that
+    # exists to catch it.
+    "uplink_follow_dwells": 8,
+    "uplink_follow_s": 7.0,
+    # How long a channel that produced verified TETRA stays in the fast
+    # rotation. A hit on a channel with no locked partner used to be the
+    # only one it ever got -- the sweep came back about once every fifteen
+    # dwells, so the second hit the two-hit rule wants never arrived.
+    "uplink_hot_s": 60.0,
 
     "tetra_channel_spacing_hz": 25_000.0,
     "tetra_raster_offset_hz": 12_500.0,
@@ -251,7 +278,7 @@ DEFAULTS = {
     # Once a network is locked the uplink watch is the job, and a TETRA slot
     # is 14.2 ms. Idling for a second and a half between cycles then costs
     # detections rather than saving anything worth having.
-    "low_power_locked_pause_s": 0.10,
+    "low_power_locked_pause_s": 0.15,
     "gain": "auto",
     "ppm": 0,
     "muted": False,
@@ -275,7 +302,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.37",
+    "app_version": "0.9.38",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
