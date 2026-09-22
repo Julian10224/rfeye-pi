@@ -101,6 +101,15 @@ DEFAULTS = {
     "phy_decimation": 56,
     "phy_max_offset_hz": 600_000.0,
     "phy_timing_phases": 8,
+    # Cheap level check before the waveform test. A swept band is nearly
+    # all empty -- 205 of 208 channels on the field unit were flat noise --
+    # and each was paid for at full price. One prefix sum over the capture
+    # levels every channel at once. The screen reads high by construction
+    # (a mean in linear power against a whole-capture noise floor), so it
+    # can only drop what the real test would drop; measured against it,
+    # -0.6 to +0.5 dB, and the margin below covers that several times over.
+    "phy_screen": True,
+    "phy_screen_margin_db": 2.0,
 
     # TETRA acceptance limits. These mirror tetra_phy.LIMITS and are the
     # values calibrated by scripts/tetra-phy-selftest.py. Loosening any of
@@ -166,6 +175,9 @@ DEFAULTS = {
     # the limit; either backs off after the rail sags or the dongle has
     # to be recovered.
     "sdr_duty_eco": 0.55,
+    # With nothing heard recently the band is swept cooler: there is no
+    # track to follow, so the extra current buys nothing.
+    "sdr_duty_idle": 0.45,
     "sdr_duty_max_power": 1.0,
     "sdr_duty_recover": 0.30,
     "sdr_duty_backoff_s": 120.0,
@@ -226,6 +238,10 @@ DEFAULTS = {
     # transmissions.
     "uplink_confirm_dwells": 2,
     "uplink_confirm_visits": 4,
+    # The same window for a channel with no locked partner. Wider,
+    # because something that reports in every few seconds is silent on
+    # most looks and its two hits land several visits apart.
+    "uplink_confirm_visits_unknown": 10,
     "uplink_state_max_age_s": 90.0,
     "uplink_alert_hold_s": 12.0,
     # After a verified uplink hit, how many dwells go straight back to that
@@ -243,7 +259,28 @@ DEFAULTS = {
     # rotation. A hit on a channel with no locked partner used to be the
     # only one it ever got -- the sweep came back about once every fifteen
     # dwells, so the second hit the two-hit rule wants never arrived.
-    "uplink_hot_s": 60.0,
+    # How a track is followed once it exists: fast while it still has to
+    # prove itself, then at the rate it actually transmits. A confirmed
+    # track with a rhythm is revisited at about half its own period --
+    # measuring a channel more often than it ever says anything is pure
+    # current.
+    "track_revisit_fast_s": 0.8,
+    "track_revisit_s": 2.5,
+    "track_revisit_cool_s": 3.0,
+    # How long after its last transmission a channel keeps its place in
+    # the fast rotation. A vehicle reporting in every few seconds is
+    # between transmissions most of the time; dropping it back to the
+    # band sweep the moment it goes quiet is how one hit used to be the
+    # only one a channel ever got.
+    "track_hot_s": 60.0,
+    # When a signal counts as here, fading, or gone.
+    "track_active_s": 2.0,
+    "track_fading_s": 5.0,
+    "track_forget_s": 90.0,
+    "track_forget_quiet_s": 20.0,
+    # The bar is the RF level between these two, not the waveform score.
+    "ui_level_weak_db": 8.0,
+    "ui_level_strong_db": 26.0,
 
     "tetra_channel_spacing_hz": 25_000.0,
     "tetra_raster_offset_hz": 12_500.0,
@@ -302,7 +339,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.9.38",
+    "app_version": "0.10.0",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

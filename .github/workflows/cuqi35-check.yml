@@ -1,4 +1,4 @@
-name: RF Eye 0.9.38 appliance checks
+name: RF Eye 0.10.0 appliance checks
 
 on:
   push:
@@ -272,6 +272,27 @@ jobs:
           # the time streaming against 37% -- and a field unit threw the
           # dongle off the USB bus 169 s after boot, under-voltage flagged.
           grep -q 'def radio_duty' rfeye/sdr_backend.py
+          # 0.10.0: a frequency is not an identity. RadioTrack remembers
+          # when a channel was heard, how strong it was and how far apart
+          # its transmissions came, so the scan can spend its time where
+          # something is, the bar can show RF level rather than how
+          # TETRA-like a waveform looked, and a repeat can be seen as one.
+          test -f rfeye/tracker.py
+          grep -q 'class RadioTrack' rfeye/tracker.py
+          grep -q 'class TrackRegistry' rfeye/tracker.py
+          grep -q 'def period_s' rfeye/tracker.py
+          grep -q 'def revisit_due' rfeye/tracker.py
+          grep -q 'from tracker import TrackRegistry' rfeye/tetra_detector.py
+          grep -q 'self.alarm.tracks.revisit_due' rfeye/sdr_backend.py
+          grep -q 'self.alarm.tracks.top' rfeye/sdr_backend.py
+          ! grep -q 'self._hot' rfeye/sdr_backend.py
+          # the cheap level screen runs before the waveform test, and a
+          # screened channel must not buy the silence exemption -- nothing
+          # looked closely enough to call a carrier idle rather than gone.
+          grep -q 'def screen_levels' rfeye/tetra_phy.py
+          grep -q 'r.screened=True' rfeye/sdr_backend.py
+          grep -q 'and not r.screened' rfeye/sdr_backend.py
+          grep -q 'def check_tracks_and_screen' scripts/detector-selftest.py
           grep -q 'def _duty_limit' rfeye/sdr_backend.py
           grep -q 'def _timed_samples' rfeye/sdr_backend.py
           grep -q 'sdr_duty_eco' rfeye/config.py rfeye/sdr_backend.py
@@ -280,7 +301,8 @@ jobs:
           # a hit keeps its channel in the fast rotation, and the follow-up
           # is bounded in seconds so it outlasts one repeat of a periodic
           # reporter -- while still alternating, or it blinds the band.
-          grep -q 'uplink_hot_s' rfeye/config.py rfeye/sdr_backend.py
+          # 0.10.0 moved the hot window into the track that owns it.
+          grep -q 'track_hot_s' rfeye/config.py rfeye/tracker.py
           grep -q 'uplink_follow_s' rfeye/config.py rfeye/sdr_backend.py
           grep -q 'self._follow_left%2==0' rfeye/sdr_backend.py
           grep -q 'def check_periodic_reporter_is_caught' scripts/detector-selftest.py
@@ -491,8 +513,13 @@ jobs:
           assert c['snapshot_phy_rows']==64
           assert 0.2 <= c['sdr_duty_eco'] <= 0.8, 'ECO limits the radio'
           assert c['sdr_duty_max_power'] > c['sdr_duty_eco']
-          assert c['uplink_hot_s']==60.0
           assert c['uplink_follow_s']==7.0
+          assert c['phy_screen'] is True
+          assert c['phy_screen_margin_db']==2.0
+          assert c['track_hot_s']==60.0
+          assert c['ui_level_strong_db'] > c['ui_level_weak_db']
+          assert c['uplink_confirm_visits_unknown']==10
+          assert c['sdr_duty_idle'] < c['sdr_duty_eco']
           assert c['phy_uplink_sensitive_percentile']==100.0
           assert c['tetra_channel_spacing_hz']==25000.0
           assert c['tetra_raster_offset_hz']==12500.0

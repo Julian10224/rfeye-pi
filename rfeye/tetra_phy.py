@@ -270,6 +270,54 @@ def prepare_shape(freqs, psd_db, smooth_hz=1400.0):
     return {'freqs': freqs, 'p_db': p_db, 'w_db': w_db, 'bin_hz': bin_hz}
 
 
+def screen_levels(prepared, offsets, noise_db=None):
+    """A rough level for many channels at once, for deciding what to measure.
+
+    The full shape analysis is cheap per channel and still the dominant cost of
+    a dwell, because a swept band is nearly all empty: on the field unit 205 of
+    208 channels were flat noise, and each of them was paid for twice.
+
+    This is the cheap look that comes first.  A prefix sum over the linear
+    spectrum makes the mean power of any contiguous run O(1), so the level of
+    every channel in the dwell costs one pass over the capture instead of one
+    pass each.  It is deliberately biased *high* -- a mean in linear power sits
+    above the median in dB that ``channel_shape`` uses, and the noise reference
+    is taken across the whole capture rather than beside the channel -- so a
+    channel it rejects is one the real test would have rejected too.  It can
+    never accept anything: everything it keeps still faces the full test.
+
+    Returns ``{offset_hz: snr_db}``.
+    """
+    p_db = prepared['p_db']
+    fr = prepared['freqs']
+    lin = prepared.get('p_lin')
+    if lin is None:
+        lin = 10.0 ** (p_db / 10.0)
+        prepared['p_lin'] = lin
+    csum = prepared.get('csum')
+    if csum is None:
+        csum = np.concatenate(([0.0], np.cumsum(lin)))
+        prepared['csum'] = csum
+    if noise_db is None:
+        noise_db = prepared.get('floor_db')
+        if noise_db is None:
+            noise_db = float(np.percentile(p_db, 20))
+            prepared['floor_db'] = noise_db
+    noise_lin = 10.0 ** (float(noise_db) / 10.0)
+    out = {}
+    n = len(fr)
+    for off in offsets:
+        centre = float(off)
+        i0 = int(np.searchsorted(fr, centre - 8000.0, 'right'))
+        i1 = int(np.searchsorted(fr, centre + 8000.0, 'left'))
+        if i1 - i0 < 3 or i0 < 0 or i1 > n:
+            out[float(off)] = 99.0        # cannot judge it: let the real test
+            continue
+        mean = (csum[i1] - csum[i0]) / float(i1 - i0)
+        out[float(off)] = 10.0 * math.log10(max(mean, 1e-30) / max(noise_lin, 1e-30))
+    return out
+
+
 def channel_shape(freqs, psd_db, centre_hz=0.0, prepared=None):
     """How much a channel looks like a 25 kHz RRC(0.35) TETRA carrier.
 
@@ -667,6 +715,11 @@ class PhyResult:
     # True when judged by the relaxed sensitive-uplink rules (a short control
     # burst counts), rather than the strict sustained-call rules.
     sensitive: bool = False
+    # True when the cheap level screen rejected this channel and the waveform
+    # test never ran. It is not the same statement as "this carrier was idle
+    # this time": nothing looked closely enough to say that, so a screened
+    # result must not buy a carrier the silence exemption in SiteRegistry.
+    screened: bool = False
     checks: dict = field(default_factory=dict)
 
     def as_dict(self):

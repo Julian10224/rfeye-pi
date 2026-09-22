@@ -47,6 +47,7 @@ import time
 from pathlib import Path
 
 from tetra_phy import CHANNEL_SPACING_HZ, clamp
+from tracker import TrackRegistry
 
 STATE_SCHEMA = 'rfeye-c2000-sites-v1'
 
@@ -334,7 +335,7 @@ class UplinkAlarm:
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.state = {}
+        self.tracks = TrackRegistry(cfg)
         self.confirmed = False
         self.level = 0.0
         self.last_hit = 0.0
@@ -342,7 +343,7 @@ class UplinkAlarm:
         self.streak = 0
 
     def reset(self):
-        self.state = {}
+        self.tracks = TrackRegistry(self.cfg)
         self.confirmed = False
         self.level = 0.0
         self.last_hit = 0.0
@@ -392,38 +393,59 @@ class UplinkAlarm:
             need_trusted = max(1, int(self.cfg.get('uplink_confirm_dwells', 2)))
             need_unknown = need_trusted
         need = max(need_trusted, need_unknown)
-        span = max(need, int(self.cfg.get('uplink_confirm_visits', 4)))
+        # How many visits the two hits may be apart. A channel that reports in
+        # every few seconds is silent on most looks, so its two hits are
+        # naturally several visits apart -- with a window of four they kept
+        # expiring one before the other arrived. The evidence is unchanged:
+        # still two full waveform verifications, just not required to land
+        # almost back to back.
+        span_trusted = max(need_trusted, int(self.cfg.get('uplink_confirm_visits', 4)))
+        span_unknown = max(need_unknown,
+                           int(self.cfg.get('uplink_confirm_visits_unknown', 10)))
+        span = max(span_trusted, span_unknown)
         hold = max(0.0, float(self.cfg.get('uplink_alert_hold_s', 12.0)))
         max_age = max(10.0, float(self.cfg.get('uplink_state_max_age_s', 90.0)))
 
         hits = {int(round(float(r.freq_hz))): r for r in verified}
         seen = {int(round(float(f))) for f in watched} | set(hits)
+
+        # The per-channel history lives in the tracker now. The rules below
+        # are unchanged -- hits counted in visits to that channel, not in
+        # seconds -- but they are asked of something that also remembers how
+        # strong the signal was and how far apart its transmissions came, so
+        # the scan and the display can use the same knowledge.
         for f in seen:
-            st = self.state.get(f)
-            if st is None or now - float(st.get('last', now)) > max_age:
-                st = {'visits': 0, 'hits': [], 'quality': 0.0}
-            st['visits'] += 1
-            st['last'] = now
-            if f in hits:
-                st['hits'].append(st['visits'])
-                st['quality'] = max(float(hits[f].quality),
-                                    float(st['quality']) * 0.5
-                                    + float(hits[f].quality) * 0.5)
-            st['hits'] = [h for h in st['hits'] if st['visits'] - h < span]
-            self.state[f] = st
+            tr = self.tracks.get(f, now)
+            if tr.visits and now - tr.last_seen > max_age:
+                tr.visits = 0
+                tr.hit_visits = []
+            tr.trusted = f in trust
+            span_f = span_trusted if f in trust else span_unknown
+            r = hits.get(f)
+            tr.note_visit(now, float(r.snr_db) if r is not None else None)
+            if r is not None:
+                tr.note_hit(now, r.snr_db, r.quality, span_f)
+            else:
+                tr.forget_stale_hits(span_f)
+        self.tracks.prune(now)
 
-        self.state = {f: st for f, st in self.state.items()
-                      if now - float(st.get('last', 0.0)) <= max_age}
-
-        qualified = [r for f, r in hits.items()
-                     if len(self.state.get(f, {}).get('hits', []))
-                     >= (need_trusted if f in trust else need_unknown)]
+        qualified = []
+        for f, r in hits.items():
+            tr = self.tracks.get(f, now, create=False)
+            if tr is None:
+                continue
+            need_f = need_trusted if f in trust else need_unknown
+            if len(tr.hit_visits) >= need_f:
+                tr.confirmed = True
+                tr.confirmed_at = now
+                qualified.append(r)
 
         if qualified:
             self.confirmed = True
             self.last_hit = now
-            self.streak = max(len(self.state[int(round(float(r.freq_hz)))]['hits'])
-                              for r in qualified)
+            self.streak = max(
+                len(self.tracks.get(int(round(float(r.freq_hz))), now).hit_visits)
+                for r in qualified)
             self.peaks = sorted(qualified, key=lambda r: r.quality, reverse=True)
             self.level = clamp(max(r.quality for r in qualified))
         elif self.confirmed and now - self.last_hit <= hold:
@@ -432,9 +454,10 @@ class UplinkAlarm:
             age = (now - self.last_hit) / max(hold, 1e-6)
             self.level = clamp(self.level * (1.0 - 0.35 * age))
         else:
+            self.tracks.expire_confirmations(now)
             self.confirmed = False
             self.level = 0.0
             self.peaks = []
-            self.streak = max([len(st.get('hits', []))
-                               for st in self.state.values()], default=0)
+            self.streak = max([len(tr.hit_visits)
+                               for tr in self.tracks.tracks.values()], default=0)
         return self.confirmed, self.level, list(self.peaks)

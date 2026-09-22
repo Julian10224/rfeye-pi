@@ -323,12 +323,12 @@ class SDRBackend:
         self._pump=None; self._prefetch=None; self._site_share=0
         self._prefetch_hits=0; self._prefetch_misses=0
         self._radio_s=0.0; self._radio_epoch=time.time()
+        self.last_screened=0
         self._duty_backoff_until=0.0
         self._band_cache_key=None; self._band_cache=[]
         # Uplink channels that just verified, and how many dwells are left to
         # spend confirming them; see _watch_work.
         self._follow=[]; self._follow_left=0; self._follow_until=0.0
-        self._hot={}
         self.last_phy=[]
         self.dwell_centre_hz=0.; self.dwell_channels=[]
         self.last_dwell_role=''
@@ -439,7 +439,14 @@ class SDRBackend:
         if not bool(self.cfg.get('low_power_mode', True)):
             limit = float(self.cfg.get('sdr_duty_max_power', 1.0))
         else:
-            limit = float(self.cfg.get('sdr_duty_eco', 0.55))
+            # Spend where something is. With nothing heard recently the band
+            # is swept at a slower, cooler rate; the moment a track is live
+            # the radio is allowed to work, which is the only time the extra
+            # current buys anything.
+            if self.alarm.tracks.heard(now):
+                limit = float(self.cfg.get('sdr_duty_eco', 0.55))
+            else:
+                limit = float(self.cfg.get('sdr_duty_idle', 0.45))
         # A rail that has already sagged, or a dongle that has just had to be
         # recovered, gets its headroom back. Sweep rate is worth nothing from a
         # receiver that is no longer on the bus.
@@ -1000,7 +1007,39 @@ class SDRBackend:
         t1=time.perf_counter()
         ch=Channelizer(iq,sr)
         out=[]
+        # Cheap first, heavy after. A swept band is nearly all empty -- on the
+        # field unit 205 of 208 channels were flat noise -- and every one of
+        # them was paid for at full price. One prefix sum over the capture
+        # gives every channel's level at once; only what clears the floor
+        # faces the waveform test. The screen reads high by construction, so
+        # it can drop a channel the real test would have dropped and never one
+        # it would have kept; measured against it, -0.6 to +0.5 dB.
+        screened=set()
+        if bool(self.cfg.get('phy_screen',True)):
+            try:
+                sensitive=(role=='UPLINK'
+                           and bool(self.cfg.get('uplink_sensitive',False)))
+                pct=(float(self.cfg.get('phy_uplink_sensitive_percentile',100.))
+                     if sensitive else 92.0)
+                prep=ch.shape_prepared(percentile=pct)
+                floor=(float(self.cfg.get('phy_min_snr_db',8.0))
+                       -max(0.,float(self.cfg.get('phy_screen_margin_db',2.0))))
+                levels=tetra_phy.screen_levels(prep,[o for _,o in members])
+                for freq,offset in members:
+                    if float(levels.get(float(offset),99.0))<floor:
+                        r=PhyResult(freq_hz=float(freq),role=role)
+                        r.snr_db=float(levels.get(float(offset),0.0))
+                        r.checks={'snr':False}
+                        r.reason='FAIL:snr'
+                        r.screened=True
+                        screened.add(int(round(float(freq))))
+                        out.append(r)
+            except Exception:
+                screened=set(); out=[]
+        self.last_screened=len(screened)
         for freq,offset in members:
+            if int(round(float(freq))) in screened:
+                continue
             try:
                 out.append(tetra_phy.analyse(
                     ch,offset,role=role,limits=self.cfg,freq_hz=freq,
@@ -1149,7 +1188,12 @@ class SDRBackend:
         for r in results:
             # A carrier that failed only because there was nothing to hear is
             # idle, not disproved -- traffic carriers are idle most of the time.
-            silent=(not r.ok and r.failed()==['snr'])
+            # An idle traffic carrier is "no information"; a channel the
+            # cheap screen dropped is not, because nothing looked closely
+            # enough to say the carrier was idle rather than gone. Without
+            # this a deaf receiver kept its locks: every channel came back as
+            # snr-only, which the exemption reads as "quiet, not absent".
+            silent=(not r.ok and r.failed()==['snr'] and not r.screened)
             self.sites.observe(r.freq_hz,r.ok,r.quality,now,silent=silent)
 
         covered={int(round(x)) for x in self.dwell_channels}
@@ -1178,8 +1222,16 @@ class SDRBackend:
         # never arrived. Measured, a vehicle reporting in on an unlocked
         # carrier gave 1 hit in 7 visits and no alert; on a locked carrier,
         # which is already in this rotation, it alerted three cycles in.
-        hot=[f for f,until in self._hot.items() if now<until]
-        partners=sorted(set(self.sites.uplink_partners(now))|set(hot))
+        # Priority 1 is a track that is due a look: something is actually
+        # there, and how often to go back is its own business -- fast while it
+        # still has to prove itself, then at the rate it really transmits, so
+        # measuring a channel more often than it ever says anything stops
+        # costing power. Priority 2 is the locked site's partners. Priority 3,
+        # below, is the rest of the band. A channel with nothing on it is not
+        # in any of them, and the sweep queue is its own cooldown: it cannot
+        # come back round until the sweep wraps.
+        due=[tr.freq_hz for tr in self.alarm.tracks.revisit_due(now)]
+        partners=sorted(set(self.sites.uplink_partners(now))|set(due))
         watch=band if band else partners
         if not watch:
             return None
@@ -1268,10 +1320,6 @@ class SDRBackend:
                 # follow-up counted only in dwells ended before it -- three
                 # dwells was about 2.4 s. Bounded in both, so a channel cannot
                 # hold the receiver either.
-                hot_s=max(0.,float(self.cfg.get('uplink_hot_s',60.0)))
-                for h in hits:
-                    self._hot[float(round(float(h)))]=float(now)+hot_s
-                self._hot={f:u for f,u in self._hot.items() if now<u}
                 self._follow=[float(h) for h in hits]
                 self._follow_left=max(0,int(self.cfg.get('uplink_follow_dwells',8)))
                 self._follow_until=float(now)+max(
@@ -1384,7 +1432,24 @@ class SDRBackend:
             self._prefetch_uplink(now)
 
             state='ALERT' if confirmed else ('LOCKED' if locked else 'SEARCHING')
-            shown=[self._peak_row(r) for r in peaks[:int(self.cfg.get('max_signals',3))]]
+            # The bars come from the tracks, not from whatever this one scan
+            # round returned, so they mean "these are the signals near me"
+            # and stop jumping channel every dwell. Their height is the RF
+            # level: how TETRA-like the waveform looked barely moves once a
+            # signal is decodable at all, and is not what someone glancing at
+            # the screen is asking.
+            weak=float(self.cfg.get('ui_level_weak_db',8.0))
+            strong=float(self.cfg.get('ui_level_strong_db',26.0))
+            nshow=int(self.cfg.get('max_signals',3))
+            shown=[tr.as_dict(now,weak,strong) for tr in
+                   self.alarm.tracks.top(now,nshow)]
+            if confirmed and not shown:
+                # The alert is being held through a gap between transmissions,
+                # and the track that raised it has gone quiet -- which is what
+                # a gap is. Falling to an empty list here stopped the buzzer
+                # the moment the vehicle drew breath, instead of letting the
+                # alert age out over uplink_alert_hold_s.
+                shown=[self._peak_row(r) for r in peaks[:nshow]]
             # Every channel the dwell measured, not the first twelve. A
             # dwell covers up to 48, so a recording of a drive past a
             # vehicle kept a quarter of the evidence -- and the quarter

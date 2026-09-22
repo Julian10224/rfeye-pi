@@ -930,11 +930,20 @@ def check_periodic_reporter_is_caught():
     for label, chan, budget in (("on a locked site's carrier",
                                  site[0] - 10_000_000.0, 12),
                                 ("on a carrier with no lock",
-                                 383_712_500.0, 40)):
+                                 383_712_500.0, 58)):
         with tempfile.TemporaryDirectory() as d:
             air = FakeAir(downlinks=site)
             air.burst_every = 4
-            b = make_backend(air, os.path.join(d, "sites.json"))
+            # The revisit cadence is in wall-clock seconds, and this suite
+            # runs a cycle in a fraction of what one costs on a Pi. Left
+            # alone, a track would come round every eight simulated cycles
+            # instead of every one or two, which measures the clock rather
+            # than the mechanism. Zero here means "as often as the rotation
+            # allows", which is what ~0.8 s means on the real thing.
+            b = make_backend(air, os.path.join(d, "sites.json"),
+                             track_revisit_fast_s=0.0,
+                             track_revisit_s=0.0,
+                             track_revisit_cool_s=0.0)
             try:
                 now = time.time()
                 for f in site:
@@ -943,7 +952,7 @@ def check_periodic_reporter_is_caught():
                         "last_ok": now, "first_seen": now, "ok_total": 9}
                 b._site_queue = []
                 b._survey_at = now
-                log = run(b, 44, at={2: lambda c=chan: air.interferers.append(
+                log = run(b, 70, at={2: lambda c=chan: air.interferers.append(
                     (c, "periodic_burst"))})
                 hit = next((i for i, s in enumerate(log) if s["mobile_confirmed"]), None)
                 check("recognised %s" % label, hit is not None and hit <= budget,
@@ -966,11 +975,12 @@ def check_hot_channel_rotation():
         try:
             now = time.time()
             stranger = 383_712_500.0
-            b._hot[stranger] = now + 30.0
-            plan = b._uplink_plan(now)
-            check("a hot channel joins the fast rotation",
+            tr = b.alarm.tracks.get(stranger, now)
+            tr.note_hit(now, 20.0, 0.6, 4)
+            plan = b._uplink_plan(now + 1.0)
+            check("a channel that produced TETRA joins the fast rotation",
                   bool(plan) and stranger in plan[0], "%d fast channels" % len(plan[0]))
-            b._hot[stranger] = now - 1.0
+            tr.last_hit = now - 10_000.0
             plan = b._uplink_plan(now)
             check("and drops out when it goes cold",
                   bool(plan) and stranger not in plan[0])
@@ -978,6 +988,71 @@ def check_hot_channel_rotation():
                   stranger not in set(b.sites.uplink_partners(now)))
         finally:
             b.running = False
+
+
+def check_tracks_and_screen():
+    """The two pieces 0.10.0 rests on, asserted directly.
+
+    A track is what lets the scan spend its time where something is, and the
+    screen is what stops it paying full price for the 199 channels where
+    nothing is. Both are cheap to get subtly wrong in ways the end-to-end
+    scenarios would not notice for a while.
+    """
+    print(chr(10) + "28. tracks remember, and the screen only ever drops")
+    import numpy as np
+    import tetra_phy as phy
+    import tetra_sim as sim2
+    from tracker import RadioTrack, TrackRegistry, ACTIVE, FADING, LOST
+
+    now = 1000.0
+    tr = RadioTrack(381_187_500.0, now)
+    for k in range(4):
+        tr.note_visit(now + 4.0 * k)
+        tr.note_hit(now + 4.0 * k, 18.0 + k, 0.5, 10)
+    check("a repeating transmission shows its period",
+          abs(tr.period_s() - 4.0) < 0.01, "%.2f s" % tr.period_s())
+    check("the bar follows the RF level, not the waveform score",
+          tr.level(8.0, 26.0) > tr.level(8.0, 60.0),
+          "%.2f at 26 dB full scale" % tr.level(8.0, 26.0))
+    last = now + 12.0                      # the fourth and final hit
+    check("it is here while it is still talking",
+          tr.state(last + 1.0, 2.0, 5.0) == ACTIVE, tr.state(last + 1.0, 2.0, 5.0))
+    check("  then fading", tr.state(last + 3.0, 2.0, 5.0) == FADING,
+          tr.state(last + 3.0, 2.0, 5.0))
+    check("  then gone", tr.state(last + 6.0, 2.0, 5.0) == LOST,
+          tr.state(last + 6.0, 2.0, 5.0))
+
+    # The registry floors these at 5 s, so prune past that, not past the
+    # configured value -- which is the kind of thing this check is for.
+    reg = TrackRegistry({"track_forget_quiet_s": 1.0, "track_forget_s": 90.0})
+    reg.note_visits([380_012_500.0], now)
+    reg.prune(now + 4.0)
+    check("a channel that said nothing is kept for the floor", bool(reg.tracks))
+    reg.prune(now + 7.0)
+    check("and forgotten after it", not reg.tracks)
+
+    # The screen may drop what the real test would drop, never the reverse.
+    SR = 2_016_000.0
+    dur = (1 << 20) / SR
+    parts = [(sim2.tetra_carrier(dur, SR, role="DOWNLINK", seed=11,
+                                 freq_offset_hz=o), 1.0)
+             for o in (-400_000.0, 0.0, 350_000.0)]
+    worst = 0.0
+    for iq in (sim2.make_capture(parts, dur, SR, snr_db=12, seed=5),
+               sim2.make_capture([], dur, SR, seed=5)):
+        ch = phy.Channelizer(iq, SR)
+        prep = ch.shape_prepared(percentile=100.0)
+        offs = [-600_000.0 + 25_000.0 * k for k in range(48)]
+        levels = phy.screen_levels(prep, offs)
+        for o in offs:
+            try:
+                real = phy.channel_shape(prep["freqs"], prep["p_db"],
+                                         centre_hz=o, prepared=prep)["snr_db"]
+            except ValueError:
+                continue
+            worst = min(worst, levels[o] - real)
+    check("the screen never reads below the real level by more than its margin",
+          worst > -2.0, "worst %.2f dB against a 2.0 dB margin" % worst)
 
 
 def main():
@@ -1159,6 +1234,7 @@ def main():
     check_follow_up_outlasts_a_repeat()
     check_periodic_reporter_is_caught()
     check_hot_channel_rotation()
+    check_tracks_and_screen()
 
     print()
     if FAILURES:
