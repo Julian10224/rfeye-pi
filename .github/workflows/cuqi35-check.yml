@@ -1,4 +1,4 @@
-name: RF Eye 0.10.0 appliance checks
+name: RF Eye 0.10.1 appliance checks
 
 on:
   push:
@@ -293,6 +293,19 @@ jobs:
           grep -q 'r.screened=True' rfeye/sdr_backend.py
           grep -q 'and not r.screened' rfeye/sdr_backend.py
           grep -q 'def check_tracks_and_screen' scripts/detector-selftest.py
+          # 0.10.1: three lanes really are three. Merged into the partner
+          # list a due track shared their rotation, so an active unknown
+          # channel could wait behind however many partners a locked site
+          # named; and the alarm level was still the waveform score while
+          # the bars had moved to RF level, so the two disagreed about the
+          # same signal.
+          grep -q "'lane':'track'" rfeye/sdr_backend.py
+          grep -q "'lane':'partner'" rfeye/sdr_backend.py
+          grep -q "'lane':'band'" rfeye/sdr_backend.py
+          grep -q 'uplink_track_run' rfeye/config.py rfeye/sdr_backend.py
+          grep -q 'self.level = clamp(max(_lvl(r) for r in qualified))' rfeye/tetra_detector.py
+          ! grep -q 'clamp(max(r.quality for r in qualified))' rfeye/tetra_detector.py
+          grep -q 'def check_priority_lanes' scripts/detector-selftest.py
           grep -q 'def _duty_limit' rfeye/sdr_backend.py
           grep -q 'def _timed_samples' rfeye/sdr_backend.py
           grep -q 'sdr_duty_eco' rfeye/config.py rfeye/sdr_backend.py
@@ -519,6 +532,7 @@ jobs:
           assert c['track_hot_s']==60.0
           assert c['ui_level_strong_db'] > c['ui_level_weak_db']
           assert c['uplink_confirm_visits_unknown']==10
+          assert c['uplink_track_run']==2
           assert c['sdr_duty_idle'] < c['sdr_duty_eco']
           assert c['phy_uplink_sensitive_percentile']==100.0
           assert c['tetra_channel_spacing_hz']==25000.0

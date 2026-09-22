@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.10.0",
+  "app_version": "0.10.1",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -130,6 +130,7 @@
   "track_fading_s": 5.0,
   "track_forget_s": 90.0,
   "track_forget_quiet_s": 20.0,
+  "uplink_track_run": 2,
   "ui_level_weak_db": 8.0,
   "ui_level_strong_db": 26.0,
   "site_pass_share": 5,

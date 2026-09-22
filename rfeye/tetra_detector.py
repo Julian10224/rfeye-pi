@@ -446,8 +446,23 @@ class UplinkAlarm:
             self.streak = max(
                 len(self.tracks.get(int(round(float(r.freq_hz))), now).hit_visits)
                 for r in qualified)
-            self.peaks = sorted(qualified, key=lambda r: r.quality, reverse=True)
-            self.level = clamp(max(r.quality for r in qualified))
+            # Ranked and scaled by RF level, not by how TETRA-like the
+            # waveform looked. The waveform score answers "is this really
+            # TETRA", which barely moves once a signal is decodable at all;
+            # the level answers "how close is it", which is what mobile_level
+            # feeds -- the meter, the audio decision and the recording. The
+            # bars were switched to the level in 0.10.0 and this was left
+            # behind, so the two disagreed about the same signal.
+            weak = float(self.cfg.get('ui_level_weak_db', 8.0))
+            strong = float(self.cfg.get('ui_level_strong_db', 26.0))
+
+            def _lvl(res):
+                tr = self.tracks.get(int(round(float(res.freq_hz))), now,
+                                     create=False)
+                return tr.level(weak, strong) if tr is not None else 0.0
+
+            self.peaks = sorted(qualified, key=_lvl, reverse=True)
+            self.level = clamp(max(_lvl(r) for r in qualified))
         elif self.confirmed and now - self.last_hit <= hold:
             # Hold through the gap between transmissions, fading the bar so
             # the display shows the alert ageing rather than freezing.

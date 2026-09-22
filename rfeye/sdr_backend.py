@@ -318,7 +318,7 @@ class SDRBackend:
         # Uplink watch: _watch_idx walks the whole 380-385 MHz band,
         # _partner_idx the duplex partners of the locked carriers, and
         # _watch_turn alternates between the two.
-        self._partner_idx=0; self._watch_turn=0
+        self._partner_idx=0; self._watch_turn=0; self._track_run=0
         self._uplink_queue=[]; self._uplink_sweeps=0
         self._pump=None; self._prefetch=None; self._site_share=0
         self._prefetch_hits=0; self._prefetch_misses=0
@@ -782,7 +782,7 @@ class SDRBackend:
             sr=int(self.cfg.get('phy_sample_rate',2016000))
             n=1<<int(self.cfg.get('phy_dwell_log2',20))
             centre,members=plan_dwell(
-                plan[1],sr,
+                plan['targets'],sr,
                 max_offset_hz=float(self.cfg.get('phy_max_offset_hz',600000.)),
                 spacing_hz=float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
             if centre is None or not members:
@@ -1231,8 +1231,9 @@ class SDRBackend:
         # in any of them, and the sweep queue is its own cooldown: it cannot
         # come back round until the sweep wraps.
         due=[tr.freq_hz for tr in self.alarm.tracks.revisit_due(now)]
-        partners=sorted(set(self.sites.uplink_partners(now))|set(due))
-        watch=band if band else partners
+        partners=sorted(self.sites.uplink_partners(now))
+        fast=sorted(set(partners)|set(due))
+        watch=band if band else fast
         if not watch:
             return None
         keys={int(round(p)) for p in watch}
@@ -1246,16 +1247,32 @@ class SDRBackend:
         follow=[f for f in self._follow if int(round(f)) in keys] if following else []
         if follow:
             rotated=[follow[0]]+[p for p in watch if int(round(p))!=int(round(follow[0]))]
-            return partners,rotated,follow,self._watch_turn
+            return {'fast':fast,'partners':partners,'targets':rotated,
+                    'follow':follow,'turn':self._watch_turn,'lane':'follow'}
         # Alternate a partner-anchored dwell with the next slice of the band
         # sweep. The partners are the likeliest channels and keep a revisit of
         # a few seconds; the sweep guarantees that every other channel is
         # looked at at all, which is the whole point.
         turn=self._watch_turn+1
+        # Three lanes, in order. A track that is due a look is something that
+        # is actually there, so it goes first -- merged into the partner list
+        # it could be made to wait behind however many partners a locked site
+        # happened to name. The run cap is what keeps the other two lanes
+        # alive: without it a channel that never stops transmitting is due
+        # every round and nothing else is ever measured.
+        cap=max(1,int(self.cfg.get('uplink_track_run',2)))
+        if due and self._track_run<cap:
+            head=[f for f in due if int(round(f)) in keys] or list(due)
+            rotated=head+[p for p in watch if int(round(p)) not in
+                          {int(round(x)) for x in head}]
+            return {'fast':fast,'partners':partners,'targets':rotated,
+                    'follow':follow,'turn':turn,'lane':'track'}
         if partners and turn%2==0:
             start=self._partner_idx%len(partners)
             rotated=partners[start:]+partners[:start]
-        else:
+            return {'fast':fast,'partners':partners,'targets':rotated,
+                    'follow':follow,'turn':turn,'lane':'partner'}
+        if True:
             # A queue, drained and refilled, exactly as the downlink pass
             # works -- not a rotating cursor. A cursor cannot express "this one
             # channel still owes me a look": plan_dwell places the tuner where
@@ -1266,7 +1283,8 @@ class SDRBackend:
             # 199 after 200 dwells). Draining a queue ends both.
             queue=self._uplink_queue or list(watch)
             rotated=list(queue)
-        return partners,rotated,follow,turn
+        return {'fast':fast,'partners':partners,'targets':rotated,
+                'follow':follow,'turn':turn,'lane':'band'}
 
     def _watch_work(self,now):
         """Dwell on the uplink partners of the locked base stations.
@@ -1285,7 +1303,9 @@ class SDRBackend:
         if plan is None:
             self._follow=[]; self._follow_left=0
             return []
-        partners,rotated,follow,turn=plan
+        partners=plan['partners']; rotated=plan['targets']
+        follow=plan['follow']; turn=plan['turn']; lane=plan['lane']
+        self._track_run=self._track_run+1 if lane=='track' else 0
         window_open=self._follow_left>0 and float(now)<self._follow_until
         if window_open:
             self._follow_left-=1
@@ -1296,9 +1316,9 @@ class SDRBackend:
         results=self._verify(rotated,'UPLINK')
         if not follow:
             covered=max(1,len(self.dwell_channels))
-            if partners and turn%2==0:
+            if lane=='partner' and partners:
                 self._partner_idx=(self._partner_idx+covered)%len(partners)
-            else:
+            elif lane=='band':
                 if not self._uplink_queue:
                     self._uplink_queue=self._uplink_band_channels() or list(partners)
                     self._uplink_sweeps+=1

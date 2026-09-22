@@ -279,6 +279,10 @@ DEFAULTS = {
     "track_forget_s": 90.0,
     "track_forget_quiet_s": 20.0,
     # The bar is the RF level between these two, not the waveform score.
+    # How many dwells in a row a track may take before the partner and
+    # band lanes get one. Without it a channel that never stops
+    # transmitting is due every round and nothing else is measured.
+    "uplink_track_run": 2,
     "ui_level_weak_db": 8.0,
     "ui_level_strong_db": 26.0,
 
@@ -339,7 +343,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.0",
+    "app_version": "0.10.1",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

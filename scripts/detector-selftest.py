@@ -901,11 +901,11 @@ def check_follow_up_outlasts_a_repeat():
             b._follow_until = time.time() + secs
             plan = b._uplink_plan(time.time())
             check("a fresh follow-up is honoured",
-                  bool(plan) and abs(plan[1][0] - 381_187_500.0) < 1.0)
+                  bool(plan) and abs(plan['targets'][0] - 381_187_500.0) < 1.0)
             b._follow_until = time.time() - 0.1
             plan = b._uplink_plan(time.time())
             check("an expired one is not, dwells left or no",
-                  bool(plan) and abs(plan[1][0] - 381_187_500.0) > 1.0)
+                  bool(plan) and abs(plan['targets'][0] - 381_187_500.0) > 1.0)
         finally:
             b.running = False
 
@@ -979,11 +979,14 @@ def check_hot_channel_rotation():
             tr.note_hit(now, 20.0, 0.6, 4)
             plan = b._uplink_plan(now + 1.0)
             check("a channel that produced TETRA joins the fast rotation",
-                  bool(plan) and stranger in plan[0], "%d fast channels" % len(plan[0]))
+                  bool(plan) and stranger in plan["fast"],
+                  "%d fast channels" % len(plan["fast"]))
+            check("  and takes the first lane, ahead of the partners",
+                  plan["lane"] == "track", plan["lane"])
             tr.last_hit = now - 10_000.0
             plan = b._uplink_plan(now)
             check("and drops out when it goes cold",
-                  bool(plan) and stranger not in plan[0])
+                  bool(plan) and stranger not in plan["fast"])
             check("but it is still not trusted for a single hit",
                   stranger not in set(b.sites.uplink_partners(now)))
         finally:
@@ -1053,6 +1056,41 @@ def check_tracks_and_screen():
             worst = min(worst, levels[o] - real)
     check("the screen never reads below the real level by more than its margin",
           worst > -2.0, "worst %.2f dB against a 2.0 dB margin" % worst)
+
+
+def check_priority_lanes():
+    """A track that is due may not wait behind the partner list.
+
+    Merged into the partners it shared their rotation, so an active unknown
+    channel could be made to wait behind however many partners a locked site
+    happened to name. The run cap is the other half: without it a channel that
+    never stops transmitting is due every round and nothing else is measured.
+    """
+    print(chr(10) + "29. the three lanes are really three")
+    site = [391_187_500.0, 391_512_500.0, 391_762_500.0]
+    with tempfile.TemporaryDirectory() as d:
+        b = make_backend(FakeAir(downlinks=site), os.path.join(d, "sites.json"))
+        try:
+            now = time.time()
+            for f in site:
+                b.sites.entries[int(round(f))] = {
+                    "hits": 9, "misses": 0, "quality": 0.7,
+                    "last_ok": now, "first_seen": now, "ok_total": 9}
+            stranger = 383_712_500.0
+            b.alarm.tracks.get(stranger, now).note_hit(now, 20.0, 0.6, 10)
+            lanes = []
+            for _ in range(6):
+                plan = b._uplink_plan(now + 1.0)
+                lanes.append(plan["lane"])
+                b._track_run = b._track_run + 1 if plan["lane"] == "track" else 0
+                b._watch_turn = plan["turn"]
+            check("a due track goes first", lanes[0] == "track", lanes[0])
+            check("  and does not hold every lane", set(lanes) != {"track"},
+                  " ".join(lanes))
+            check("  the other lanes still get their turn",
+                  {"partner", "band"} & set(lanes) != set(), " ".join(lanes))
+        finally:
+            b.running = False
 
 
 def main():
@@ -1235,6 +1273,7 @@ def main():
     check_periodic_reporter_is_caught()
     check_hot_channel_rotation()
     check_tracks_and_screen()
+    check_priority_lanes()
 
     print()
     if FAILURES:
