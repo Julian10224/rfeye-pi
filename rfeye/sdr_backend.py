@@ -50,6 +50,7 @@ import numpy as np
 import tetra_phy
 from tetra_phy import Channelizer, PhyResult, clamp
 from tetra_detector import SiteRegistry, UplinkAlarm, plan_dwell, raster_snap
+from power import PowerLadder, read_soc_temp, read_uv_alarm
 
 try:
     from rtlsdr import RtlSdr
@@ -306,6 +307,13 @@ class SDRBackend:
 
         self.sites=SiteRegistry(cfg)
         self.alarm=UplinkAlarm(cfg)
+        # The radio's share of the time, learned from the supply; next to the
+        # site state so a test run never touches the unit's own.
+        self.ladder=PowerLadder(cfg,self.sites._path().with_name('power-state.json'))
+        self._power_bits=None; self._power_pending=[]
+        self._uv_alarm={}; self._uv_alarm_last=None; self._uv_alarm_at=0.
+        self._uv_events=0; self._uv_counted_at=0.; self._soc_temp=None
+        self._power_log_at=0.; self._sdr_lost_at=0.
         self.detector_state='SEARCHING'
         self.survey_shortlist=[]
         self._survey_at=0.; self._survey_idx=0; self._site_maint_idx=0
@@ -324,7 +332,6 @@ class SDRBackend:
         self._prefetch_hits=0; self._prefetch_misses=0
         self._radio_s=0.0; self._radio_epoch=time.time()
         self.last_screened=0
-        self._duty_backoff_until=0.0
         self._band_cache_key=None; self._band_cache=[]
         # Uplink channels that just verified, and how many dwells are left to
         # spend confirming them; see _watch_work.
@@ -447,11 +454,12 @@ class SDRBackend:
                 limit = float(self.cfg.get('sdr_duty_eco', 0.55))
             else:
                 limit = float(self.cfg.get('sdr_duty_idle', 0.45))
-        # A rail that has already sagged, or a dongle that has just had to be
-        # recovered, gets its headroom back. Sweep rate is worth nothing from a
-        # receiver that is no longer on the bus.
-        if self._power_history or now < self._duty_backoff_until:
-            limit = min(limit, float(self.cfg.get('sdr_duty_recover', 0.30)))
+        # And never more than the supply has shown it can carry. Until 0.10.2
+        # this was "0.30 once the since-boot under-voltage bit is set", which
+        # never clears -- so one dip pinned the radio there until a reboot,
+        # and a unit that had not dipped yet ran flat out until it did. The
+        # ladder drops on trouble and climbs back on calm; see power.py.
+        limit = min(limit, self.ladder.cap)
         return min(1.0, max(0.05, limit))
 
     def _low_power_pause(self):
@@ -490,6 +498,10 @@ class SDRBackend:
             self._pump=_CapturePump(lambda c,s,n: self._timed_samples(c,s,n))
         try:
             while self.running:
+                try:
+                    self._power_tick()
+                except Exception:
+                    pass                 # watching the supply must never stop the scan
                 with self.lock:
                     demo=self._demo_forced
                     reopen=self._sdr_reopen
@@ -515,6 +527,7 @@ class SDRBackend:
             self._close_direct_sdr()
 
     def snapshot(self):
+        lim=self._duty_limit(time.time())
         with self.lock:
             return {
                 'status':self.status,'error':self.error,
@@ -557,7 +570,15 @@ class SDRBackend:
                 'site_scan_ms':float(self.last_survey_ms),
                 'scan_windows':int(self.last_scan_windows),
             'radio_duty':float(self.radio_duty()),
-            'duty_limit':float(self._duty_limit(time.time())),
+            'duty_limit':float(lim),
+            'power_cap':float(self.ladder.cap),
+            'power_events':int(self._uv_events),
+            'power_incidents':int(self.ladder.incidents),
+            'power_next_step_s':float(self.ladder.next_step_s(time.time())),
+            'power_last_event':str(self.ladder.last_why),
+            'soc_temp_c':float(self._soc_temp) if self._soc_temp is not None else -1.0,
+            'pipeline_active':bool(self._pump is not None and lim>=float(
+                self.cfg.get('scan_pipeline_min_duty',0.40))),
             'prefetch_hits':int(self._prefetch_hits),
             'prefetch_misses':int(self._prefetch_misses),
                 'sdr_path':str(self.sdr_path),
@@ -613,6 +634,19 @@ class SDRBackend:
                 self._power_flag='UNDER-VOLTAGE'
             if bits & 0x10000:
                 self._power_history='UNDER-VOLTAGE EARLIER'
+            # What changed since the last look is what the ladder acts on. The
+            # first look cannot tell when a set bit happened, only that it was
+            # before the radio had a say, so it counts as a dip at power-up;
+            # after that, the rail low right now or the since-boot bit newly
+            # set are the radio's business.
+            prev,self._power_bits=self._power_bits,bits
+            if prev is None:
+                if bits & 0x10001:
+                    self._power_pending.append(('under-voltage before start',False))
+            elif bits & 0x1:
+                self._power_pending.append(('rail below 4.63 V',True))
+            elif (bits & 0x10000) and not (prev & 0x10000):
+                self._power_pending.append(('under-voltage since last look',True))
             # A Pi 3 has no ADC on the 5 V input, so the only voltage it can
             # actually measure is the SoC core rail. Report it as what it is
             # rather than dressing it up as a supply reading: the number that
@@ -630,6 +664,89 @@ class SDRBackend:
         except Exception:
             pass
         return self._power_flag
+
+    def _power_tick(self,now=None):
+        """Watch the supply all the time, and move the ladder on what it shows.
+
+        Until 0.10.2 the rail was only looked at after the dongle had already
+        gone -- the one moment looking no longer helps. Now it is read on every
+        pass round the scan loop: the kernel's own under-voltage alarm every
+        couple of seconds (a file read) and ``vcgencmd`` every ten (a
+        process). Anything new steps the ladder down, and calm listening steps
+        it back up.
+        """
+        now=time.time() if now is None else float(now)
+        in_use=self._duty_limit(now)
+        self._power_warning()
+        if now-self._uv_alarm_at>=max(0.5,float(self.cfg.get('power_poll_s',2.0))):
+            self._uv_alarm_at=now
+            self._soc_temp=read_soc_temp()
+            alarm=read_uv_alarm(self._uv_alarm)
+            if alarm is not None:
+                if self._uv_alarm_last is None:
+                    if alarm:
+                        self._power_pending.append(('under-voltage before start',False))
+                elif alarm and not self._uv_alarm_last:
+                    self._power_pending.append(('under-voltage (kernel alarm)',True))
+                self._uv_alarm_last=alarm
+        pending,self._power_pending=self._power_pending,[]
+        for why,radio in pending:
+            # The kernel alarm and vcgencmd usually both see the same dip.
+            if now-self._uv_counted_at>=15.0:
+                self._uv_events+=1; self._uv_counted_at=now
+            if radio:
+                new=self.ladder.event(now,why,in_use=in_use)
+            else:
+                new=self.ladder.boot_dip(now,why)
+            if new:
+                self._power_log(now,'DROP %s at %d%% -> cap %d%%'%(
+                    why,round(in_use*100),round(self.ladder.cap*100)))
+            elif radio:
+                self._power_log(now,'%s (same incident)'%why)
+        live=bool(self.status=='LIVE' and self.last_good_scan
+                  and now-self.last_good_scan<10.0)
+        before=self.ladder.cap
+        if self.ladder.tick(now,live):
+            self._power_log(now,'STEP UP %d%% -> %d%% after %d min without trouble'%(
+                round(before*100),round(self.ladder.cap*100),
+                round(self.ladder._step_s()/60.0)))
+        if now-self._power_log_at>=max(10.0,float(self.cfg.get('power_log_heartbeat_s',60.0))):
+            temp=('%.1fC'%self._soc_temp) if self._soc_temp is not None else '?'
+            self._power_log(now,'HB cap=%d%% limit=%d%% duty=%d%% pipe=%s temp=%s '
+                            'uv=%d sdr=%s bus=%s next=%ds %s'%(
+                round(self.ladder.cap*100),round(in_use*100),
+                round(self.radio_duty(now)*100),
+                'on' if self._pipeline_on(now) else 'off',temp,self._uv_events,
+                str(self.status).replace(' ','_'),
+                'yes' if self._sdr_present() else 'no',
+                round(self.ladder.next_step_s(now)),self._power_detail or '-'))
+
+    def _power_log(self,now,text):
+        """One line per supply event, per ladder step and per minute.
+
+        Next to search.log, and for the question the field has so far not
+        been able to answer: when the dongle went, what had the rail and the
+        radio been doing just before? A sag, a dongle that overheats and a
+        cable that works loose all look the same on the screen -- "NO SDR" --
+        and each needs a different fix.
+        """
+        self._power_log_at=float(now)
+        try:
+            path=self.sites._path().with_name('power.log')
+            path.parent.mkdir(parents=True,exist_ok=True)
+            if path.exists() and path.stat().st_size>262144:
+                keep=path.read_text().splitlines()[-1500:]
+                path.write_text('\n'.join(keep)+'\n')
+            up=''
+            try:
+                up=' up=%ds'%int(float(Path('/proc/uptime').read_text().split()[0]))
+            except Exception:
+                pass
+            with path.open('a') as f:
+                f.write('%s%s %s\n'%(time.strftime('%Y-%m-%dT%H:%M:%S',
+                                                     time.localtime(now)),up,text))
+        except Exception:
+            pass
 
     def _recover_sdr_usb(self):
         """Force-re-enumerate a wedged RTL-SDR -- and only a wedged one.
@@ -771,9 +888,27 @@ class SDRBackend:
             self._prefetch_misses+=1
         return self._capture(centre,sr,count)
 
+    def _pipeline_on(self,now):
+        """Is overlapping capture with analysis worth its peak current?
+
+        The pipeline exists to reach a high radio share: it streams the next
+        dwell while this one is analysed. That is also the moment the unit
+        draws the most -- dongle streaming, USB interrupts and a core doing
+        FFTs, all at once. One thread on a Pi 3 B+ already streams roughly a
+        third of the time (a 0.52 s capture against a little under a second
+        of work), so at the steps the power ladder falls back to, the overlap
+        buys no more listening -- only a higher peak on a rail that has just
+        sagged.
+        """
+        if self._pump is None:
+            return False
+        return self._duty_limit(now) >= float(self.cfg.get('scan_pipeline_min_duty',0.40))
+
     def _prefetch_uplink(self,now):
         """Start the next uplink capture while this cycle is still analysing."""
         if self._pump is None or self._prefetch is not None or not self.running:
+            return
+        if not self._pipeline_on(now):
             return
         try:
             plan=self._uplink_plan(now)
@@ -1492,6 +1627,9 @@ class SDRBackend:
                 self.demo_active=False; self.last_good_scan=now; self.scan_failures=0
                 self._usb_resets=0; self._usb_backoff=0.
                 self.last_cycle_ms=(time.perf_counter()-t0)*1000.
+            if self._sdr_lost_at:
+                self._power_log(now,'SDR back after %.0f s'%(time.time()-self._sdr_lost_at))
+                self._sdr_lost_at=0.
             return True
         except Exception as e:
             err=str(e)
@@ -1505,11 +1643,22 @@ class SDRBackend:
             if job is not None:
                 try: self._pump.wait(job,4.0)
                 except Exception: pass
-            # Whatever broke, ease off the radio for a while: a unit that is
-            # losing the dongle is not helped by asking it for more.
-            self._duty_backoff_until=max(
-                self._duty_backoff_until,
-                time.time()+max(0.,float(self.cfg.get('sdr_duty_backoff_s',120.0))))
+            # A dongle that was working and has just stopped is the strongest
+            # sign there is that the radio asked for more than the supply --
+            # or the dongle -- could give, so the ladder steps down. Only the
+            # moment it is lost counts: every failed open while it is gone is
+            # the same incident, not a reason to keep stepping.
+            if self.last_good_scan and self.scan_failures==0 and not self._sdr_lost_at:
+                t=time.time()
+                gone=not self._sdr_present()
+                why='SDR lost: '+('off the USB bus' if gone else err[:60])
+                in_use=self._duty_limit(t)
+                self._sdr_lost_at=t
+                if self.ladder.event(t,why,in_use=in_use):
+                    self._power_log(t,'DROP %s at %d%% -> cap %d%%'%(
+                        why,round(in_use*100),round(self.ladder.cap*100)))
+                else:
+                    self._power_log(t,'%s (same incident)'%why)
             if ('timeout' in low or 'short read' in low or 'stuck' in low) and 'open failed' not in low:
                 self._recover_sdr_usb()
             power=self._power_warning() or self._power_history

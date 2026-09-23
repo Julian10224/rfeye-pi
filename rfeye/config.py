@@ -172,16 +172,35 @@ DEFAULTS = {
     # a 0.10 s pause read about 88% of the time against 37% before, and a
     # field unit threw the dongle off the bus 169 s after boot with the
     # under-voltage flag set. ECO is the shipped default; Max power lifts
-    # the limit; either backs off after the rail sags or the dongle has
-    # to be recovered.
+    # the limit; the power ladder below caps either.
     "sdr_duty_eco": 0.55,
     # With nothing heard recently the band is swept cooler: there is no
     # track to follow, so the extra current buys nothing.
     "sdr_duty_idle": 0.45,
     "sdr_duty_max_power": 1.0,
-    "sdr_duty_recover": 0.30,
-    "sdr_duty_backoff_s": 120.0,
     "sdr_duty_window_s": 20.0,
+    # The power ladder (0.10.2): the most the radio may stream, learned from
+    # the supply. A fresh under-voltage or a dongle that drops off the bus
+    # takes it straight to power_ladder_drop_to; every power_ladder_step_s of
+    # trouble-free listening climbs one step; and the step it failed on stays
+    # off limits for power_ladder_retry_s, doubling each time it fails there
+    # again, so it settles below what this supply can carry instead of
+    # climbing back into the same failure. 1.0 means "whatever the mode
+    # allows". Remembered across reboots in power-state.json.
+    "power_ladder": [0.22, 0.30, 0.35, 0.40, 0.45, 0.55, 0.70, 0.85, 1.0],
+    "power_ladder_drop_to": 0.30,
+    "power_ladder_step_s": 300.0,
+    "power_ladder_retry_s": 1800.0,
+    "power_ladder_debounce_s": 30.0,
+    "power_ladder_persist": True,
+    # The kernel's under-voltage alarm is a file read, so it is watched every
+    # couple of seconds; power.log gets a line per event and per minute.
+    "power_poll_s": 2.0,
+    "power_log_heartbeat_s": 60.0,
+    # Capture and analysis only overlap above this radio share. Below it one
+    # thread already reaches the limit, and the overlap is only a higher peak
+    # current -- exactly what a rail that has just sagged cannot use.
+    "scan_pipeline_min_duty": 0.40,
     "low_power_min_pause_s": 0.0,
     # How many per-channel results a snapshot carries. One dwell measures
     # up to 48 channels; at 12 a recording kept a quarter of what the
@@ -343,7 +362,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.1",
+    "app_version": "0.10.2",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

@@ -1,6 +1,6 @@
-# RF Eye 0.10.1 for Raspberry Pi
+# RF Eye 0.10.2 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.10.1 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.10.2 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.10.1 appliance path:
+The installer reproduces the working 0.10.2 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.10.1
+## User interface in 0.10.2
 
 The compact profile contains:
 
@@ -587,7 +587,7 @@ knob, and `radio_duty` on the debug page is what it is actually doing.
 | --- | --- |
 | ECO (`sdr_duty_eco`, shipped default) | 0.55 |
 | Max power (`sdr_duty_max_power`) | 1.0 |
-| after the rail sags or the dongle needs recovering | 0.30 for two minutes |
+| after the rail sags or the dongle drops (0.10.2) | the power ladder: 0.30, then back up in five-minute steps |
 
 **Max power means something again.** Between 0.9.35 and 0.9.37 the two
 positions differed by a 0.10 s pause, which is not a power setting. They now
@@ -1089,7 +1089,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.10.1 uses a **TMB12A03 active buzzer**:
+RF Eye 0.10.2 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1238,7 +1238,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.10.1**.
+`VERSION` and `rfeye/config.py` identify this release as **0.10.2**.
 
 Build the OTA package with:
 
@@ -1461,6 +1461,104 @@ vcgencmd get_throttled
 happened since boot. An RTL-SDR draws around 300 mA, so a Pi 3 B+ needs a real
 5 V / 3 A supply with a short, thick cable, or the dongle on a powered hub.
 
+### Why the dongle still went after ten minutes: the power ladder (0.10.2)
+
+Field report: the dongle drops off the USB bus about ten minutes into a
+drive. What the unit itself had logged, on two different boots:
+
+```text
+[    3.662857] usb 1-1.1.2: new full-speed USB device number 4 using dwc_otg
+[    3.734817] usb 1-1.1.2: device descriptor read/64, error -32
+[    4.438833] usb 1-1.1-port2: attempt power cycle
+[    5.910922] usb 1-1.1-port2: unable to enumerate USB device
+throttled=0x50000                  # under-voltage has occurred, ARM throttled
+
+[  169.228845] usb 1-1.1.3: USB disconnect, device number 4
+throttled=0x50000
+```
+
+Three things follow from that.
+
+1. **The supply sags on every boot that was checked, and the first failure is
+   3.7 s after power-on** -- before RF Eye has even started. An RTL2832U is a
+   high-speed device; one that comes up as full-speed and then stalls
+   (`-32`) is what a marginal supply or data connection at the dongle looks
+   like: the adapter, the cable, an extension lead. No software setting
+   reaches that moment.
+2. **RF Eye looked at the supply at the wrong time, and at the wrong bit.**
+   `get_throttled` was only read after a scan had already failed, and what it
+   acted on was bit 16, which never clears. So one dip pinned the radio at
+   30% until a reboot, while a unit that had not dipped yet ran at its full
+   share right up to the moment it lost the dongle. It never backed off
+   before a failure and never climbed back after one.
+3. **Since 0.9.37 the capture overlapped the analysis.** That is the highest
+   peak the unit draws: the dongle streaming, the USB interrupt load and a
+   core doing FFTs, all at once.
+
+What 0.10.2 does about the part software can reach:
+
+**The rail is watched all the time.** The kernel's own under-voltage alarm
+(`in0_lcrit_alarm` on the `rpi_volt` hwmon device) every 2 s -- a file read --
+and `vcgencmd get_throttled` every 10 s. What it acts on is what *changed*:
+the rail low right now, or the since-boot bit newly set. A dip from before
+the app started is counted once per boot, however often the app restarts.
+
+**The radio's share is a ladder** (`rfeye/power.py`):
+
+| | |
+| --- | --- |
+| a fresh under-voltage, or a working dongle that stops | straight to 30% |
+| the radio fails again at or below 30% | 22% |
+| five minutes of listening without trouble | one step up: 30, 35, 40, 45, 55, 70, 85%, no cap |
+| the step it failed on | off limits for 30 min; 60 if it fails there again, doubling to 4 h |
+| a reboot | starts where it left off (`power-state.json`) |
+
+A dip and the dongle dropping a second later are one incident, not two steps.
+Only time the dongle is actually working counts as calm: a receiver that is
+off the bus has proved nothing. The ladder is a ceiling on the mode, not a
+replacement for it -- ECO's own shares (0.45 idle, 0.55 with something heard)
+and Max power apply underneath, so a fully recovered ECO unit is not held back
+at all. Remembering the step that failed is what turns
+`normal -> SDR drops -> reset -> normal -> SDR drops` into a unit that settles
+just below what its supply can carry and tries the next step up rarely.
+
+**No overlap at the recovery steps.** Below 40% (`scan_pipeline_min_duty`)
+capture and analysis take turns again. One thread already streams about a
+third of the time on a Pi 3 B+, so at 22, 30 and 35% this costs no listening
+at all -- it only removes the peak, on a rail that has just shown it cannot
+take one.
+
+**`power.log`**, next to `search.log` in `~/.local/state/rfeye/`: a line for
+every event and every step, when the dongle is lost (and whether it was still
+on the bus), when it comes back, and once a minute the cap, the radio's actual
+share, the SoC temperature, whether the dongle is on the USB bus, the
+`get_throttled` word and the core voltage. It
+answers the question the screen cannot, because all of these say `NO SDR`:
+
+| in `power.log` | points at |
+| --- | --- |
+| an under-voltage shortly before `SDR lost: off the USB bus` | the supply |
+| `SDR lost: off the USB bus` with no under-voltage near it, temperature climbing | heat, or a cable or connector at the dongle |
+| `SDR lost` and the minute lines after it still say `bus=yes` | a wedged dongle, which the USB reset handles |
+
+The debug page's **Supply** row says the same in one line, e.g.
+`DIPPED x2 cap 30% +4m`: two dips this session, the radio held to 30%, the
+next step up in four minutes.
+
+**What actually fixes it is the hardware.** Software can only ask for less:
+
+1. **The supply.** 5.1 V at 2.5 A or more -- the official Pi supply at home;
+   in the car a 12 V to 5.1 V / 3 A converter or a good adapter. The cable is
+   the usual culprit: short (1 m or less) with thick power wires. A thin
+   micro-USB cable loses half a volt or more at the current a Pi 3 B+ with a
+   dongle draws.
+2. **Give the dongle its own power**: a powered USB hub with its own supply,
+   or a Y-cable that injects power, so its ~300 mA does not come through the
+   Pi at all.
+3. **No long passive USB extension** on the dongle. The full-speed, `-32`
+   enumeration failure above is typical of a marginal lead or connector.
+4. **Heat**: keep the dongle out of the sun and away from the Pi's SoC.
+
 ## A receiver that has stopped receiving
 
 On 11 September a unit was driven alongside an undercover police car and did
@@ -1637,6 +1735,14 @@ systemctl show lightdm.service -p Wants -p After
 systemctl show systemd-user-sessions.service -p After
 systemctl --user cat rfeye-user.service
 systemd-analyze
+```
+
+After a drive in which the dongle went, `power.log` says what the supply and
+the radio were doing just before (see *the power ladder* above):
+
+```bash
+tail -n 40 ~/.local/state/rfeye/power.log
+grep -E 'DROP|SDR|STEP' ~/.local/state/rfeye/power.log | tail -n 20
 ```
 
 The installed overlay can be compared with the repository using:

@@ -793,7 +793,10 @@ def check_capture_pipeline():
     def drive(pipelined):
         with tempfile.TemporaryDirectory() as d:
             air = FakeAir(downlinks=site)
-            b = make_backend(air, os.path.join(d, "sites.json"))
+            # At the power ladder's recovery steps the capture deliberately
+            # does not overlap; this compares the overlap itself.
+            b = make_backend(air, os.path.join(d, "sites.json"),
+                             scan_pipeline_min_duty=0.0)
             if pipelined:
                 b._pump = _CapturePump(lambda c, s, n: b._samples(c, s, n))
             try:
@@ -853,11 +856,11 @@ def check_radio_duty_limit():
             check("ECO limits the radio to a fraction of the time",
                   0.2 <= eco <= 0.8, "%.2f" % eco)
             check("Max power lifts the limit", full > eco, "%.2f vs %.2f" % (full, eco))
-            b._duty_backoff_until = now + 60.0
+            b.ladder.event(now, "SDR lost", in_use=eco)
             backed = b._duty_limit(now)
             check("and losing the dongle backs it off further", backed < eco,
                   "%.2f" % backed)
-            b._duty_backoff_until = 0.0
+            b.ladder.index = len(b.ladder.rungs) - 1
 
             # The pause really is computed from measured streaming time.
             b._radio_epoch = now - 10.0
@@ -1093,12 +1096,193 @@ def check_priority_lanes():
             b.running = False
 
 
+def check_power_ladder():
+    """The radio backs off when the supply sags, and earns its share back.
+
+    Until 0.10.2 the rail was only read after the dongle had already gone, and
+    what was read -- the since-boot under-voltage bit -- never clears. One dip
+    pinned the radio at 30% until a reboot, while a unit that had not dipped
+    yet ran at its full share right up to the moment it lost the dongle,
+    which a field unit then did about ten minutes into every drive.
+    """
+    print(chr(10) + "30. the power ladder steps down on trouble and climbs back on calm")
+    from power import PowerLadder, supply_text
+    import sdr_backend as sb
+    from sdr_backend import _CapturePump
+    with tempfile.TemporaryDirectory() as d:
+        cfg = dict(DEFAULTS)
+        path = os.path.join(d, "ladder.json")
+        lad = PowerLadder(cfg, path, boot_id="boot-a")
+        t = 1_000_000.0
+        check("a fresh unit is not held back", lad.cap == 1.0)
+        check("trouble drops straight to the safe step, not one at a time",
+              lad.event(t, "SDR lost", in_use=0.45) and abs(lad.cap - 0.30) < 1e-9,
+              "%.2f" % lad.cap)
+        check("the dip and the dongle going a second later are one incident",
+              not lad.event(t + 1.0, "under-voltage", in_use=0.30)
+              and abs(lad.cap - 0.30) < 1e-9 and lad.incidents == 1)
+
+        def calm(t0, seconds, live=True):
+            tt, end = t0, t0 + seconds
+            while tt < end:
+                tt += 1.0
+                lad.tick(tt, live)
+            return tt
+
+        t2 = calm(t + 1.0, 100.0, live=False)
+        check("time without a working dongle proves nothing",
+              abs(lad.cap - 0.30) < 1e-9)
+        t2 = calm(t2, 301.0)
+        check("five calm minutes buy one step", abs(lad.cap - 0.35) < 1e-9,
+              "%.2f" % lad.cap)
+        t2 = calm(t2, 301.0)
+        check("and five more the next", abs(lad.cap - 0.40) < 1e-9, "%.2f" % lad.cap)
+        t2 = calm(t2, 600.0)
+        check("the step it failed on stays off limits for half an hour",
+              abs(lad.cap - 0.40) < 1e-9 and lad.next_step_s(t2) > 0.0,
+              "%.2f, next in %.0f s" % (lad.cap, lad.next_step_s(t2)))
+        t2 = calm(t2, (t + 1800.0 - t2) + 2.0)
+        check("and is tried again after that", abs(lad.cap - 0.45) < 1e-9,
+              "%.2f" % lad.cap)
+        t3 = t2 + 60.0
+        lad.event(t3, "SDR lost", in_use=0.45)
+        check("failing there again keeps it away twice as long",
+              abs(lad.cap - 0.30) < 1e-9
+              and abs((lad.ceiling_until - t3) - 3600.0) < 1.0,
+              "%.0f s" % (lad.ceiling_until - t3))
+        t4 = calm(t3, 3600.0 + 302.0)
+        t4 = calm(t4, 302.0)
+        check("holding the old ceiling for a full step clears it",
+              lad.cap > 0.45 and lad.ceiling == 0.0, "%.2f" % lad.cap)
+        again = PowerLadder(cfg, path, boot_id="boot-b")
+        check("where it stands survives a reboot", abs(again.cap - lad.cap) < 1e-9,
+              "%.2f vs %.2f" % (again.cap, lad.cap))
+
+        boot = os.path.join(d, "boot.json")
+        x = PowerLadder(cfg, boot, boot_id="boot-c")
+        check("a dip at power-up drops to the safe step",
+              x.boot_dip(t) and abs(x.cap - 0.30) < 1e-9 and x.ceiling == 0.0)
+        x2 = PowerLadder(cfg, boot, boot_id="boot-c")
+        check("an app restart in the same boot does not take it twice",
+              not x2.boot_dip(t + 100.0) and x2.incidents == 1)
+        check("a dip the radio cannot have caused never goes under the safe step",
+              x2.event(t + 200.0, "under-voltage before start")
+              and abs(x2.cap - 0.30) < 1e-9)
+        check("the radio failing at the safe step goes one further down",
+              x2.event(t + 300.0, "SDR lost", in_use=0.30)
+              and abs(x2.cap - 0.22) < 1e-9, "%.2f" % x2.cap)
+        check("and not below the floor",
+              x2.event(t + 400.0, "SDR lost", in_use=0.22)
+              and abs(x2.cap - 0.22) < 1e-9)
+
+        # The backend: the limit, the pipeline, and the dongle going.
+        air = FakeAir(downlinks=[391_187_500.0])
+        os.makedirs(os.path.join(d, "a"))
+        b = make_backend(air, os.path.join(d, "a", "sites.json"))
+        try:
+            now = time.time()
+            eco = b._duty_limit(now)
+            b.ladder.event(now, "test", in_use=eco)
+            check("the radio is held to the ladder",
+                  abs(b._duty_limit(now) - 0.30) < 1e-9, "%.2f" % b._duty_limit(now))
+            b.cfg["low_power_mode"] = False
+            check("Max power too", abs(b._duty_limit(now) - 0.30) < 1e-9)
+            b.cfg["low_power_mode"] = True
+            b._pump = _CapturePump(lambda c, s_, n: b._samples(c, s_, n))
+            check("at the recovery steps capture and analysis do not overlap",
+                  not b._pipeline_on(now))
+            b._prefetch_uplink(now)
+            check("so nothing is prefetched", b._prefetch is None)
+            b.ladder.index = len(b.ladder.rungs) - 1
+            check("at the normal share they do", b._pipeline_on(now))
+            b._pump.stop()
+            b._pump = None
+
+            # A clean ladder: the one above has just taken an incident, and
+            # anything within its debounce is rightly the same one.
+            b.ladder = PowerLadder(b.cfg, None, boot_id="t")
+            ok = b._scan_cycle()
+            check("a working dongle scans", ok and bool(b.last_good_scan))
+            good = b._samples
+
+            def gone(centre, sr, count):
+                raise RuntimeError("librtlsdr read failed: boom")
+            b._samples = gone
+            b._scan_cycle()
+            check("losing a working dongle steps the ladder down",
+                  abs(b.ladder.cap - 0.30) < 1e-9, "%.2f" % b.ladder.cap)
+            b._scan_cycle()
+            b._scan_cycle()
+            check("while it stays gone nothing more is taken",
+                  b.ladder.incidents == 1, "%d" % b.ladder.incidents)
+            b._samples = good
+            b._scan_cycle()
+            log = open(os.path.join(d, "a", "power.log")).read()
+            check("power.log says what happened, and when it came back",
+                  "SDR lost" in log and "DROP" in log and "SDR back" in log, log[-200:])
+        finally:
+            b.running = False
+
+        # The supply itself, read before anything has gone wrong.
+        os.makedirs(os.path.join(d, "b"))
+        b2 = make_backend(air, os.path.join(d, "b", "sites.json"))
+        word = ["0x50000"]
+
+        class _CP:
+            def __init__(self, out):
+                self.stdout = out
+
+        def fake_run(cmd, **kw):
+            if cmd[1] == "get_throttled":
+                return _CP("throttled=%s\n" % word[0])
+            return _CP("volt=1.2563V\n")
+        real_which, real_run = sb.shutil.which, sb.subprocess.run
+        sb.shutil.which = lambda name: "/usr/bin/vcgencmd"
+        sb.subprocess.run = fake_run
+        try:
+            t0 = time.time()
+            b2._power_checked = 0.0
+            b2._power_tick(t0)
+            check("the supply is read before the dongle has had a chance to fail",
+                  b2._power_bits == 0x50000)
+            check("a dip before the radio started drops to the safe step, once",
+                  abs(b2.ladder.cap - 0.30) < 1e-9 and b2.ladder.ceiling == 0.0,
+                  "%.2f" % b2.ladder.cap)
+            b2._power_checked = 0.0
+            b2._power_tick(t0 + 40.0)
+            check("the since-boot bit alone does not keep taking it down",
+                  b2.ladder.incidents == 1, "%d" % b2.ladder.incidents)
+            word[0] = "0x50005"
+            b2._power_checked = 0.0
+            b2._power_tick(t0 + 80.0)
+            check("the rail low right now is a new incident",
+                  b2.ladder.incidents == 2 and b2.ladder.cap < 0.30,
+                  "%d, %.2f" % (b2.ladder.incidents, b2.ladder.cap))
+            text = supply_text(b2.snapshot())
+            check("and the debug page says so", "LOW NOW" in text and "cap 22%" in text,
+                  text)
+            check("in 22 characters", len(text) <= 22, "%d" % len(text))
+        finally:
+            sb.shutil.which, sb.subprocess.run = real_which, real_run
+            b2.running = False
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--only", default="",
+                    help="comma-separated check_* functions to run on their own")
     args = ap.parse_args()
     VERBOSE = args.verbose
+    if args.only:
+        for name in args.only.split(","):
+            globals()[name.strip()]()
+        print()
+        for f in FAILURES:
+            print("  FAIL " + f)
+        print("%d failures" % len(FAILURES) if FAILURES else "detector-selftest OK")
+        return 1 if FAILURES else 0
 
     # 1 -- nothing on air but noise and clutter.
     log = scenario("1. empty band with clutter",
@@ -1274,6 +1458,7 @@ def main():
     check_hot_channel_rotation()
     check_tracks_and_screen()
     check_priority_lanes()
+    check_power_ladder()
 
     print()
     if FAILURES:

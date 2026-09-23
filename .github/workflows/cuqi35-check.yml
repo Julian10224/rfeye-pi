@@ -309,7 +309,25 @@ jobs:
           grep -q 'def _duty_limit' rfeye/sdr_backend.py
           grep -q 'def _timed_samples' rfeye/sdr_backend.py
           grep -q 'sdr_duty_eco' rfeye/config.py rfeye/sdr_backend.py
-          grep -q '_duty_backoff_until' rfeye/sdr_backend.py
+          # 0.10.2: the supply is watched all the time and the radio's share
+          # is a ladder. Before it, the rail was only read after the dongle
+          # had gone, and bit 16 of get_throttled -- which never clears --
+          # pinned the radio at 30% for the rest of the boot after one dip.
+          test -f rfeye/power.py
+          grep -q 'class PowerLadder' rfeye/power.py
+          grep -q 'def boot_dip' rfeye/power.py
+          grep -q 'def read_uv_alarm' rfeye/power.py
+          grep -q 'def _power_tick' rfeye/sdr_backend.py
+          grep -q 'self._power_tick()' rfeye/sdr_backend.py
+          grep -q 'limit = min(limit, self.ladder.cap)' rfeye/sdr_backend.py
+          ! grep -q '_duty_backoff_until' rfeye/sdr_backend.py
+          ! grep -q 'if self._power_history or' rfeye/sdr_backend.py
+          grep -q 'def _pipeline_on' rfeye/sdr_backend.py
+          grep -q "with_name('power.log')" rfeye/sdr_backend.py
+          grep -q 'power_ladder_step_s' rfeye/config.py
+          grep -q 'scan_pipeline_min_duty' rfeye/config.py
+          grep -q 'supply_text' rfeye/app.py rfeye/compact_ui_draw.py
+          grep -q 'def check_power_ladder' scripts/detector-selftest.py
           grep -q 'def check_radio_duty_limit' scripts/detector-selftest.py
           # a hit keeps its channel in the fast rotation, and the follow-up
           # is bounded in seconds so it outlasts one repeat of a periodic
@@ -534,6 +552,13 @@ jobs:
           assert c['uplink_confirm_visits_unknown']==10
           assert c['uplink_track_run']==2
           assert c['sdr_duty_idle'] < c['sdr_duty_eco']
+          assert 'sdr_duty_recover' not in c, 'replaced by the power ladder'
+          assert c['power_ladder_drop_to'] in c['power_ladder']
+          assert max(c['power_ladder'])==1.0, 'the top step is no cap at all'
+          assert min(c['power_ladder']) < c['power_ladder_drop_to'], 'room below the safe step'
+          assert c['power_ladder_step_s']==300.0
+          assert c['power_ladder_retry_s'] >= c['power_ladder_step_s']
+          assert c['power_ladder_drop_to'] < c['scan_pipeline_min_duty'] <= c['sdr_duty_idle'],               'serial at the recovery steps, the pipeline at the normal share'
           assert c['phy_uplink_sensitive_percentile']==100.0
           assert c['tetra_channel_spacing_hz']==25000.0
           assert c['tetra_raster_offset_hz']==12500.0

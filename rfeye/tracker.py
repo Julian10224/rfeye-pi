@@ -195,7 +195,9 @@ class TrackRegistry:
     def heard(self, now, states=(ACTIVE, FADING)):
         """Tracks in one of those states, most interesting first."""
         act, fad = self._states()
-        out = [t for t in self.tracks.values() if t.state(now, act, fad) in states]
+        # A copy first: the display asks this from its own thread (for the
+        # radio's duty limit) while the scan thread may be adding a track.
+        out = [t for t in list(self.tracks.values()) if t.state(now, act, fad) in states]
         out.sort(key=lambda t: (t.confirmed, t.snr_db), reverse=True)
         return out
 

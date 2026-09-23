@@ -1,4 +1,5 @@
 """Compact RF Eye drawing helpers for the CUQI 3.5-inch 320x480 portrait UI."""
+from power import supply_text
 BG=(2,3,5); PANEL=(8,9,12); BLUE=(0,152,222); BLUE_BRIGHT=(28,190,255)
 WHITE=(224,229,236); DIM=(82,90,100); SEG_OFF=(34,35,31); GREEN=(57,205,91)
 YELLOW=(243,192,56); RED=(230,54,54)
@@ -220,7 +221,9 @@ def draw_debug(app,snap):
           # noise -- a fault with no other symptom at all.
           ("Driver",("BLOG %s" % _driver_name(snap)) if snap.get("driver_knows_model")
                     else ("PLAIN %s" % _driver_name(snap))),
-          ("Supply",str(snap.get("power_warning") or snap.get("power_history") or "OK")),
+          # The rail, how often it dipped and what the power ladder holds the
+          # radio to because of it, e.g. "DIPPED x2 cap 30% +4m".
+          ("Supply",supply_text(snap)),
           # When the radio is unhappy its own words are worth more than the
           # code path it was opened through.
           ("Backend",(f"{snap.get('status','?')} {_sdr_fault(snap.get('error'))}"

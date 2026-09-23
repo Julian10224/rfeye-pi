@@ -15,6 +15,7 @@ import pygame
 print(f"RFEYE_BOOT pygame-imported {time.monotonic():.3f}", flush=True)
 
 from config import load_config, save_config
+from power import supply_text
 from buzzer import GPIOBuzzer
 from updater import fetch_manifest, download_update, install_zip_bytes, version_tuple
 
@@ -1266,8 +1267,9 @@ class App:
             ("Full cycle", f"{float(snap.get('cycle_ms',0)):7.0f} ms"),
             ("Dwell capture", f"{float(snap.get('dwell_ms',0)):7.0f} ms"),
             ("Verification", f"{float(snap.get('verify_ms',0)):7.0f} ms"),
-            ("Supply", str(snap.get('power_warning')
-                            or snap.get('power_history') or 'OK')),
+            # The rail, how often it has dipped and what the power ladder
+            # holds the radio to because of it.
+            ("Supply", supply_text(snap)),
             ("Supply detail", str(snap.get('power_detail') or '-')[:24]),
             ("Best channel", _search_best_text(snap)),
             ("Backend", f"{snap.get('status','?')}  age {age_ms:.0f} ms"),
