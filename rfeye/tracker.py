@@ -38,7 +38,7 @@ class RadioTrack:
 
     __slots__ = ('freq_hz', 'first_seen', 'last_seen', 'last_hit', 'hit_times',
                  'visits', 'hit_visits', 'snr_db', 'best_snr_db', 'quality',
-                 'confirmed', 'confirmed_at', 'trusted')
+                 'confirmed', 'confirmed_at', 'trusted', 'provisional', 'proven')
 
     def __init__(self, freq_hz, now):
         self.freq_hz = float(freq_hz)
@@ -54,6 +54,10 @@ class RadioTrack:
         self.confirmed = False
         self.confirmed_at = 0.0
         self.trusted = False         # a locked site's duplex partner
+        # Showing on one weak hit, not yet sounding the full alarm; and
+        # whether it has ever earned the full alarm while this track lived.
+        self.provisional = False
+        self.proven = False
 
     # -- history -----------------------------------------------------------
     def note_visit(self, now, snr_db=None):
@@ -139,6 +143,7 @@ class RadioTrack:
             'age_s': float(now - self.first_seen),
             'since_hit_s': float(now - self.last_hit) if self.last_hit else -1.0,
             'confirmed': bool(self.confirmed),
+            'provisional': bool(self.confirmed and self.provisional),
             'trusted': bool(self.trusted),
             'band': 'MOBILE',
             'role': 'UPLINK',
@@ -221,6 +226,7 @@ class TrackRegistry:
         for tr in self.tracks.values():
             if tr.confirmed and tr.state(now, act, fad) == LOST:
                 tr.confirmed = False
+                tr.provisional = False
 
     def revisit_due(self, now):
         """Channels worth going back to, soonest first.
@@ -246,14 +252,19 @@ class TrackRegistry:
             if tr.last_hit <= 0.0 or now - tr.last_hit > hot:
                 continue
             st = tr.state(now, act, fad)
+            # A provisional track shows, but has not proved itself: it is
+            # still after the second hit that sounds the alarm, so it stays
+            # on the fast rate like any channel that has not yet been
+            # confirmed.
+            settled = tr.confirmed and not tr.provisional
             if st == ACTIVE:
-                want = slow if tr.confirmed else fast
+                want = slow if settled else fast
             elif st == FADING:
                 want = fast * 1.5
             else:
                 want = cool          # quiet but recent: keep checking back
             period = tr.period_s()
-            if tr.confirmed and period > 0.0:
+            if settled and period > 0.0:
                 # It has a rhythm: follow that rather than a fixed rate.
                 want = max(fast, min(cool, period * 0.5))
             if now - tr.last_seen >= want:

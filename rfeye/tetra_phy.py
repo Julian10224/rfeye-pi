@@ -720,6 +720,10 @@ class PhyResult:
     # this time": nothing looked closely enough to say that, so a screened
     # result must not buy a carrier the silence exemption in SiteRegistry.
     screened: bool = False
+    # True when the signal was too weak for the spectral shape to be
+    # measured, so bandwidth, edge rejection and flatness were not required
+    # and the waveform tests alone decided. See analyse().
+    shape_waived: bool = False
     checks: dict = field(default_factory=dict)
 
     def as_dict(self):
@@ -772,6 +776,16 @@ LIMITS = {
     'phy_uplink_min_frame_ratio': 3.0,
     'phy_uplink_min_slot_quantisation': 0.45,
     'phy_uplink_min_bursts': 3,
+    # The weak-burst floor (0.10.3). Below phy_shape_min_snr_db the -10 dB
+    # bandwidth walk runs into the noise and reads the whole ~40 kHz window,
+    # so a real 25 kHz burst failed "bandwidth" there while its modulation
+    # was already unmistakable. Measured on simulated single-slot bursts:
+    # the pi/4-DQPSK tests pass from 8 dB, the shape tests only from 14 dB.
+    # Below the shape floor a sensitive uplink is judged on the waveform
+    # alone, down to phy_uplink_min_snr_db. Empty channels measure 0.6-1.6 dB
+    # here, so the floor admits no extra noise to the heavy tests.
+    'phy_uplink_min_snr_db': 5.0,
+    'phy_shape_min_snr_db': 12.0,
 }
 
 
@@ -856,6 +870,25 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
         'flatness': res.flatness_db <= lim['phy_max_flatness_db'],
         'centre': abs(res.tuner_error_hz) <= lim['phy_max_centre_error_hz'],
     }
+    if sensitive:
+        # A spectral shape is only a measurement well above the noise. The
+        # occupied bandwidth is walked out to the -10 dB points, and with a
+        # burst 10 dB up those points are the noise floor itself: a real
+        # 25 kHz single-slot burst read 34-40 kHz and failed, while its
+        # symbol-rate and four-phase scores were already far past their
+        # limits. Up to 0.10.2 that cost about 6 dB -- a single slot needed
+        # 14 dB to be recognised, a subslot 16. Below phy_shape_min_snr_db
+        # the shape tests are therefore not asked, and the waveform tests
+        # below -- 18 kbaud pi/4-DQPSK against decoy rates -- decide on their
+        # own. They rejected every decoy tried (other baud rates, FSK, 4FSK,
+        # FM, gated noise, impulses, a carrier) and 300 empty channels. The
+        # centre check stays: it is what keeps a strong neighbour's skirt
+        # from counting as a burst on this channel.
+        checks['snr'] = res.snr_db >= lim['phy_uplink_min_snr_db']
+        if res.snr_db < lim['phy_shape_min_snr_db']:
+            for key in ('bandwidth', 'boundary', 'flatness'):
+                checks.pop(key, None)
+            res.shape_waived = True
     if not full and not all(checks.values()):
         return _finish(res, checks, lim)
 

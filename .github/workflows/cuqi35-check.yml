@@ -352,13 +352,32 @@ jobs:
           grep -q 'snapshot_phy_rows' rfeye/sdr_backend.py rfeye/config.py
           ! grep -q 'site_results)\[:12\]' rfeye/sdr_backend.py
           grep -q '"uplink_sweep_band": True' rfeye/config.py
-          grep -q '"uplink_unknown_confirm_dwells": 2' rfeye/config.py
+          # 0.10.3: one hit shows everywhere, as a Blu Eye warns on the pulse;
+          # the second hit, a strong one or a partner decides the full alarm.
+          grep -q '"uplink_unknown_confirm_dwells": 1' rfeye/config.py
+          grep -q '"uplink_single_hit_full_db": 14.0' rfeye/config.py
+          grep -q 'self.provisional = not loud' rfeye/tetra_detector.py
+          grep -q "alert_provisional" rfeye/sdr_backend.py rfeye/app.py
+          grep -q 'last_provisional_beep' rfeye/app.py
+          ! grep -q 'if lv < 0.15:' rfeye/app.py
+          # and a weak burst is judged on its waveform: the -10 dB bandwidth
+          # of a burst 10 dB up is the noise floor, which cost 6 dB of reach.
+          grep -q "'phy_uplink_min_snr_db': 5.0" rfeye/tetra_phy.py
+          grep -q "'phy_shape_min_snr_db': 12.0" rfeye/tetra_phy.py
+          grep -q 'res.shape_waived = True' rfeye/tetra_phy.py
+          grep -q "phy_uplink_min_snr_db',5.0)) if sensitive" rfeye/sdr_backend.py
+          grep -q "sensitive weak: " scripts/tetra-phy-selftest.py
+          # and every bar carries the C2000 carrier number, as a Blu Eye does.
+          grep -q 'def carrier_number' rfeye/tetra_detector.py
+          grep -q "row\['channel'\]=carrier_number" rfeye/sdr_backend.py
+          grep -q '"CH %d"%chan' rfeye/compact_ui_draw.py
+          grep -q 'def _check_alert_sound' scripts/app-selftest.py
           grep -q 'need_trusted if f in trust else need_unknown' rfeye/tetra_detector.py
           grep -q 'def confirmed_channels' rfeye/tetra_detector.py
           ! grep -q 'if self.sites.locked(now):$' rfeye/sdr_backend.py
           grep -q 'def check_vehicle_on_an_unlocked_carrier' scripts/detector-selftest.py
           grep -q 'def check_unlocked_receiver_still_hears' scripts/detector-selftest.py
-          grep -q 'def check_unknown_channel_needs_two_hits' scripts/detector-selftest.py
+          grep -q 'def check_single_hit_is_provisional' scripts/detector-selftest.py
           # The dwell planner may not spend a whole 0.52 s capture on the one
           # channel the DC guard left behind: 47,1,47,1 over a band pass.
           grep -q 'candidates.append(anchor - lim)' rfeye/tetra_detector.py
@@ -496,7 +515,7 @@ jobs:
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['detector_profile_version']==11
+          assert c['detector_profile_version']==12
           # Detector profile v8 acceptance limits. A fresh install must ship
           # the calibrated values from scripts/tetra-phy-selftest.py, so a
           # silent drift here is a build failure rather than a field surprise.
@@ -538,7 +557,14 @@ jobs:
           assert c['uplink_follow_dwells']==8
           assert c['uplink_sensitive']==True
           assert c['uplink_sweep_band'] is True, 'the band is swept, not just the partners'
-          assert c['uplink_unknown_confirm_dwells']==2
+          assert c['uplink_unknown_confirm_dwells']==1, 'one hit shows, as on a Blu Eye'
+          assert c['uplink_single_hit_full_db']==14.0
+          assert c['phy_uplink_min_snr_db']==5.0
+          assert c['phy_shape_min_snr_db']==12.0
+          assert c['phy_uplink_min_snr_db'] < c['phy_min_snr_db'] < c['phy_shape_min_snr_db']
+          assert c['ui_level_weak_db']==c['phy_uplink_min_snr_db'], 'the weakest detection has a bar'
+          assert c['tetra_carrier_base_hz']==300000000.0
+          assert c['show_channel'] is True
           assert c['scan_pipeline'] is True
           assert c['site_pass_share']==5
           assert c['snapshot_phy_rows']==64

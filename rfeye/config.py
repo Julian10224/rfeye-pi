@@ -130,6 +130,12 @@ DEFAULTS = {
     "phy_uplink_min_frame_ratio": 3.0,
     "phy_uplink_min_slot_quantisation": 0.45,
     "phy_uplink_min_bursts": 3,
+    # A sensitive uplink below phy_shape_min_snr_db is judged on its
+    # waveform alone, down to phy_uplink_min_snr_db. The -10 dB bandwidth
+    # cannot be measured on a burst only 10 dB up, and asking for it cost
+    # about 6 dB: a single slot needed 14 dB, now 8. See tetra_phy.analyse.
+    "phy_uplink_min_snr_db": 5.0,
+    "phy_shape_min_snr_db": 12.0,
 
     # Sensitive detection. The alarm fires on a short uplink
     # control/registration burst -- what a moving mobile keys up crossing
@@ -212,13 +218,18 @@ DEFAULTS = {
     # unit that already held six carriers -- half the receiver's time
     # re-proving a lock that no longer gates the alarm.
     "site_pass_share": 5,
-    # How many verified hits a channel *outside* the locked partners needs.
-    # One hit is enough on a partner, where the site lock corroborates it; two
-    # orders of magnitude more channels are swept now, so elsewhere the second
-    # hit is required again. The follow-up parks the next dwells back on a
-    # window that just produced a hit, so that second look costs about a second
-    # rather than a whole sweep.
-    "uplink_unknown_confirm_dwells": 2,
+    # How many verified hits a channel *outside* the locked partners needs
+    # before it shows. One, since 0.10.3, as a Blu Eye does: it warns on the
+    # pulse. Two had it hearing a vehicle on any other carrier in 4% of
+    # simulated 45 s drive-bys, because at ~4% listening time the second
+    # burst almost never landed in a capture. What the second hit still
+    # decides is how loud: see uplink_single_hit_full_db.
+    "uplink_unknown_confirm_dwells": 1,
+    # A single hit on a channel no locked site vouches for is provisional --
+    # a bar and one short beep -- unless it is at least this strong (the
+    # yellow part of the bar), or until a second hit or a site lock backs it
+    # up. Only then does the running alarm sound.
+    "uplink_single_hit_full_db": 14.0,
     # 100 is a peak hold over the dwell's ~146 spectrum rows. 98 kept the top
     # three of them, and a single 14 ms TETRA slot is four -- so the level of
     # the shortest real transmission was averaged away before any test saw it.
@@ -302,11 +313,20 @@ DEFAULTS = {
     # band lanes get one. Without it a channel that never stops
     # transmitting is due every round and nothing else is measured.
     "uplink_track_run": 2,
-    "ui_level_weak_db": 8.0,
+    # The bottom of the bar follows the weakest burst that can now be
+    # recognised (phy_uplink_min_snr_db). At 8 dB a detection between 5 and
+    # 8 dB would have shown no bar and made no sound.
+    "ui_level_weak_db": 5.0,
     "ui_level_strong_db": 26.0,
 
     "tetra_channel_spacing_hz": 25_000.0,
     "tetra_raster_offset_hz": 12_500.0,
+    # ETSI EN 300 392-2 numbers a carrier from the band's base frequency:
+    # downlink = 300 MHz + carrier * 25 kHz + 12.5 kHz in the 380-400 MHz
+    # band, and an uplink shares its downlink's number. 381.1875 MHz is
+    # carrier 3647, the number a C2000 terminal itself reports; the uplink
+    # band runs 3600-3799. Shown under each bar.
+    "tetra_carrier_base_hz": 300_000_000.0,
     "tetra_channel_half_width_hz": 9000.0,
 
     "sdr_stop_join_s": 8.0,
@@ -359,10 +379,13 @@ DEFAULTS = {
     "buzzer_red_gap_ms": 55,
     "brightness": 1.0,
     "show_frequency": True,
+    # The C2000 carrier number under each bar (0.10.3), as a Blu Eye shows
+    # its channel number.
+    "show_channel": True,
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.2",
+    "app_version": "0.10.3",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -379,12 +402,12 @@ DEFAULTS = {
 # while the source code said otherwise. They are therefore only written when
 # they actually differ from the shipped default -- a deliberate field
 # override survives, an accidental fossil does not.
-_DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_")
+_DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_", "ui_level_")
 _DETECTOR_KEYS = (
     "sample_rate", "fft_size", "duplex_split_hz",
     "mobile_band_start_hz", "mobile_band_end_hz",
     "mobile_percentile",
-    "tetra_channel_spacing_hz", "tetra_raster_offset_hz",
+    "tetra_channel_spacing_hz", "tetra_raster_offset_hz", "tetra_carrier_base_hz",
     "tetra_channel_half_width_hz", "allow_cli_sdr_fallback",
     "usb_reset_max_attempts", "phy_timing_phases",
 )
@@ -455,11 +478,16 @@ def load_config():
     # need it. The site state is rebuilt too: locks made under the old
     # occupancy measurement are not evidence for the new one, and re-locking
     # costs about a minute.
-    if int(saved.get("detector_profile_version", 0) or 0) < 11:
+    #
+    # Profile 12 (0.10.3) lowers the weak-burst floor and lets one hit show.
+    # ui_level_* was saved verbatim until now -- it was not counted as a
+    # detector constant -- so without the reset the bar would keep its old
+    # 8 dB bottom and a 5-8 dB detection would show nothing and stay silent.
+    if int(saved.get("detector_profile_version", 0) or 0) < 12:
         for key in list(DEFAULTS):
             if is_detector_key(key):
                 cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 11
+    cfg["detector_profile_version"] = 12
     for obsolete in (
         # pre-v7 leftovers
         "threshold_db", "threshold_min_db", "threshold_max_db",

@@ -153,6 +153,7 @@ class App:
         self._dim_overlay = None
         self._dim_alpha = -1
         self.last_beep = 0.0
+        self.last_provisional_beep = 0.0
         # One supply warning per session, shown over whatever page is up and
         # dismissed with a button. Scanning runs in its own thread and is not
         # touched by any of this -- the notice reports the problem, it does
@@ -996,9 +997,23 @@ class App:
         if not peaks:
             return
 
-        lv = max(float(p.get("level", 0.0)) for p in peaks)
-        if lv < 0.15:
+        # One weak hit on a channel no locked site vouches for: one short
+        # beep per hit, as a Blu Eye gives for a single pulse, not the running
+        # alarm. A second hit, a strong one or a locked site's channel turns
+        # it into the alarm below.
+        if snap.get("alert_provisional"):
+            at = float(snap.get("provisional_hit_at", 0.0) or 0.0)
+            if at > self.last_provisional_beep:
+                self.last_provisional_beep = at
+                self.buzzer.beep_pattern(
+                    [(int(self.cfg.get("buzzer_green_ms", 185)), 0)])
+                self.last_beep = time.time()
             return
+
+        # Every alert sounds, however weak. There used to be a floor at 0.15,
+        # which on the 0.10.3 scale is 8 dB: exactly the bursts this release
+        # learned to recognise would have been shown and never heard.
+        lv = max(float(p.get("level", 0.0)) for p in peaks)
 
         # TMB12A03 has one fixed internal tone, so make the LOW/MEDIUM/HIGH
         # zones deliberately different by rhythm rather than tiny pitch changes.
@@ -1150,33 +1165,43 @@ class App:
         for col, p in enumerate(peaks):
             lv = clamp(float(p.get("level", 0.0)))
             active = int(round(lv * nseg))
+            if p.get("freq_hz", 0):
+                # A real detection always lights at least one segment; see
+                # compact_ui_draw.
+                active = max(1, active)
             x = x_positions[col]
             for i in range(nseg):
                 y = top + (nseg - 1 - i) * (seg_h + gap)
                 color = self._level_color(i, nseg) if i < active else SEG_OFF
                 pygame.draw.rect(self.ui, color, (x, y, seg_w, seg_h), border_radius=3)
 
+            # The C2000 carrier number under each bar, as a Blu Eye shows its
+            # channel number, and the frequency under that. Two lines: on one
+            # the pair is wider than the 125 px between columns.
+            live = bool(p.get("freq_hz", 0))
+            fcol = (132, 184, 210) if live else (74, 96, 110)
+            if self.cfg.get("show_channel", True):
+                chan = int(p.get("channel", 0) or 0)
+                self._text(f"CH {chan}" if (live and chan) else "CH ----",
+                           x + seg_w//2, 613, self.font_s, fcol, center=True)
             if self.cfg.get("show_frequency", True):
-                if p.get("freq_hz", 0):
-                    ftxt = f'{p["freq_hz"] / 1e6:.3f} MHz'
-                    fcol = (132, 184, 210)
-                else:
-                    ftxt = ['381.000 MHz','382.500 MHz','384.000 MHz'][col]
-                    fcol = (74, 96, 110)
-                self._text(ftxt, x + seg_w//2, 617, self.font_s, fcol, center=True)
+                ftxt = (f'{p["freq_hz"] / 1e6:.3f} MHz' if live
+                        else ['381.000 MHz', '382.500 MHz', '384.000 MHz'][col])
+                self._text(ftxt, x + seg_w//2, 631, self.font_s, (74, 96, 110),
+                           center=True)
 
         max_lv = float(snap.get("mobile_level", 0.0))
         if status not in ("LIVE", "DEMO"):
             state, col = (("POWER LOW", RED) if snap.get("power_warning")
                           else ("NOT CONNECTED", RED))
         elif (status == "LIVE" and not snap.get("network_locked")
-              and max_lv <= 0.15):
+              and max_lv <= 0.15 and not snap.get("mobile_confirmed")):
             state, col = "NO NETWORK", BLUE_BRIGHT
         elif max_lv > 0.72:
             state, col = "HIGH", RED
         elif max_lv > 0.43:
             state, col = "MEDIUM", YELLOW
-        elif max_lv > 0.15:
+        elif max_lv > 0.15 or snap.get("mobile_confirmed"):
             state, col = "LOW", GREEN
         else:
             state, col = "CLEAR", DIM

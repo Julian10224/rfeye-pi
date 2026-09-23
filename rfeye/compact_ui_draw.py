@@ -117,26 +117,42 @@ def draw_main(app, snap):
     while len(peaks)<3: peaks.append({"level":0.0,"freq_hz":0.0})
     if not hasattr(app,"_last_peak_freqs"):
         app._last_peak_freqs=[381_000_000.0,382_500_000.0,384_000_000.0]
+        app._last_peak_channels=[0,0,0]
     for col,p in enumerate(peaks):
-        x=[16,112,208][col]; level=_clamp(float(p.get("level",0.0))); active=int(round(level*10))
+        x=[16,112,208][col]; level=_clamp(float(p.get("level",0.0)))
+        freq=float(p.get("freq_hz",0.0) or 0.0)
+        # A real detection always lights at least one segment. Since 0.10.3
+        # a burst from 5 dB is recognised, and at the bottom of the scale
+        # that rounded to no bar at all -- a detection nobody could see.
+        active=int(round(level*10))
+        if freq>0.0:
+            active=max(1,active)
+            app._last_peak_freqs[col]=freq
+            app._last_peak_channels[col]=int(p.get("channel",0) or 0)
         for i in range(10):
             yy=90+(9-i)*21; color=app._level_color(i,10) if i<active else SEG_OFF
             pygame.draw.rect(app.ui,color,(x,yy,80,17),border_radius=3)
+        # Under each bar the C2000 carrier number, as a Blu Eye shows its
+        # channel number, then the frequency. A column that has never held
+        # a signal says so rather than inventing a channel.
+        chan=app._last_peak_channels[col]
+        live=freq>0.0
+        if app.cfg.get("show_channel",True):
+            app._text(("CH %d"%chan) if chan else "CH ----",x+40,322,app.font_s,
+                      (132,184,210) if live else DIM,center=True)
         if app.cfg.get("show_frequency",True):
-            freq=float(p.get("freq_hz",0.0) or 0.0)
-            if freq>0.0 and level>=0.15:
-                app._last_peak_freqs[col]=freq
-            shown=app._last_peak_freqs[col]
-            app._text(f'{shown/1e6:.3f}',x+40,322,app.font_s,(132,184,210),center=True)
-            app._text("MHz",x+40,342,app.font_s,DIM,center=True)
+            app._text(f'{app._last_peak_freqs[col]/1e6:.3f}',x+40,342,app.font_s,DIM,center=True)
     lv=float(snap.get("mobile_level",0.0))
     if status not in ("LIVE","DEMO"):
         state,col=("POWER",RED) if snap.get("power_warning") else ("NO SDR",RED)
-    elif status=="LIVE" and not snap.get("network_locked") and lv<=0.15:
+    elif (status=="LIVE" and not snap.get("network_locked") and lv<=0.15
+          and not snap.get("mobile_confirmed")):
         state,col="NO NET",BLUE_BRIGHT
     elif lv>0.72: state,col="HIGH",RED
     elif lv>0.43: state,col="MEDIUM",YELLOW
-    elif lv>0.15: state,col="LOW",GREEN
+    # Anything shown is at least LOW, however weak: a 5-8 dB detection sits
+    # below 0.15 on the bar and read CLEAR next to its own green segment.
+    elif lv>0.15 or snap.get("mobile_confirmed"): state,col="LOW",GREEN
     else: state,col="CLEAR",DIM
     pygame.draw.rect(app.ui,PANEL,(0,360,320,120))
     for rect in [(8,374,94,90),(112,374,96,90),(218,374,94,90)]: pygame.draw.rect(app.ui,(17,20,25),rect,border_radius=11)

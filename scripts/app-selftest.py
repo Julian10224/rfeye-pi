@@ -681,6 +681,40 @@ def _check_demo_needs_confirming(a):
         a.page = "main"
 
 
+def _check_alert_sound(a):
+    """A provisional alert beeps once per hit; every full alert sounds.
+
+    0.10.3 shows a single weak hit on a channel no locked site vouches for
+    with one short beep per hit, as a Blu Eye does for a pulse, and keeps the
+    running alarm for a second hit, a strong one or a partner channel. It also
+    dropped the 0.15 floor under the alarm: on the new scale that is 8 dB,
+    exactly the bursts the release learned to recognise.
+    """
+    beeps=[]
+    real=a.buzzer.beep_pattern
+    a.buzzer.beep_pattern=lambda pattern,*x,**k: beeps.append(list(pattern))
+    keep=(a.cfg.get("muted"),a.ready_chime_done,a.last_beep,a.last_provisional_beep)
+    try:
+        a.cfg["muted"]=False; a.ready_chime_done=True
+        a.last_beep=0.0; a.last_provisional_beep=0.0
+        weak={"freq_hz":382437500.0,"channel":3697,"level":0.05}
+        prov={"status":"LIVE","peaks":[weak],"mobile_confirmed":True,
+              "alert_provisional":True,"provisional_hit_at":100.0}
+        a._sound_logic(prov); a._sound_logic(prov); a._sound_logic(prov)
+        assert len(beeps)==1 and len(beeps[0])==1, beeps
+        a._sound_logic(dict(prov,provisional_hit_at=104.0))
+        assert len(beeps)==2, "a new hit is a new beep"
+        del beeps[:]
+        a.last_beep=0.0
+        a._sound_logic(dict(prov,alert_provisional=False))
+        assert beeps, "a weak full alert must still sound"
+        a._draw_main(dict(a.backend.snapshot(),peaks=[weak],mobile_confirmed=True,
+                          mobile_level=0.05,alert_provisional=True))
+    finally:
+        a.buzzer.beep_pattern=real
+        (a.cfg["muted"],a.ready_chime_done,a.last_beep,a.last_provisional_beep)=keep
+
+
 def main():
     _check_config_migration()
 
@@ -916,6 +950,7 @@ def main():
 
     a.running=False
     a.backend.stop()
+    _check_alert_sound(a)
     a.buzzer.close()
     pygame.quit()
     _tmp.cleanup()

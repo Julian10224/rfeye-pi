@@ -1,6 +1,6 @@
-# RF Eye 0.10.2 for Raspberry Pi
+# RF Eye 0.10.3 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.10.2 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.10.3 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.10.2 appliance path:
+The installer reproduces the working 0.10.3 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,12 +84,14 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.10.2
+## User interface in 0.10.3
 
 The compact profile contains:
 
 - 320x480 portrait home screen
-- three RF activity meters with retained MHz labels
+- three RF activity meters, each with the C2000 carrier number and the
+  frequency underneath (`CH 3647` / `381.188`), as a Blu Eye shows its
+  channel number
 - settings gear and large touch targets
 - Sound/Mute on the home screen, and the number of verified C2000
   downlink carriers where the spectrum button used to be
@@ -459,6 +461,125 @@ scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
 
+### What a Blu Eye does, and how close one dongle gets (0.10.3)
+
+The Blu Eye 2 manual (LCD display, V2024.10; the GO is derived from the Blu
+Eye 2) describes what the device does, if not how:
+
+- it detects the short periodic pulses with which a TETRA terminal keeps its
+  place in the network, also when nobody is talking, and warns **per
+  detection** -- in its standard audio mode one beep every 4 s, in adaptive
+  mode one, two or three beeps by signal strength;
+- calls and data messages get their own sound, a double tone;
+- up to three signals at once, each with its own green-to-red strength bar and,
+  optionally, its channel number underneath;
+- a *City mode* threshold below which signals are only shown.
+
+The "4 seconds" in that manual is the rhythm of its warning beep. How often a
+terminal actually transmits it leaves at "a certain interval"; the website
+says every few seconds. Whatever it is, something that sees 14 ms pulses every
+few seconds and warns on each is listening to the band nearly all the time.
+
+Measured against that on 0.10.2, in the code itself:
+
+| | 0.10.2 |
+| --- | --- |
+| weakest single slot recognised | 14 dB |
+| weakest subslot recognised | 16 dB |
+| share of time the locked site's uplinks are heard | ~26% |
+| share of time any other channel is heard | ~4% |
+
+and through the whole backend, with a Pi-realistic clock (capture 0.52 s at
+the 45% ECO share), a strong vehicle bursting every 4 s and 45 s in range,
+24 runs each:
+
+| vehicle | alert within 10 s | 20 s | 45 s |
+| --- | --- | --- | --- |
+| on the uplink of the locked site | 46% | 83% | 100% |
+| on any other carrier | 0% | 0% | **4%** |
+| no lock at all | 0% | 0% | **0%** |
+
+Two causes, both fixed here.
+
+**The shape of a weak burst was being measured below where it can be.** The
+occupied bandwidth is walked out to the -10 dB points; with a burst only 10 dB
+up those points are the noise floor, and a real 25 kHz single slot read
+34-40 kHz and failed `bandwidth`. Its modulation was unmistakable long before
+that -- symbol-rate score 0.34 and selectivity 1.9 at 8 dB, against limits of
+0.20 and 1.35. Below `phy_shape_min_snr_db` (12 dB) a sensitive uplink is now
+judged on the waveform tests alone, down to `phy_uplink_min_snr_db` (5 dB):
+
+| | 0.10.2 | 0.10.3 |
+| --- | --- | --- |
+| single slot | 14 dB | **8 dB** |
+| subslot | 16 dB | **12 dB** |
+
+Six decibels is roughly one and a half to two times the distance, depending on
+the terrain. What it must not do is buy noise back, so the same weak range was
+put through everything that is not TETRA: 300 empty channels and, at 6-20 dB,
+pi/4-DQPSK at 16 and 24 kbaud, FSK, 4FSK, FM voice, gated noise, impulses and a
+carrier -- none passed. Empty channels measure 0.6-1.6 dB, so the lower floor
+admits no extra noise to the heavy tests and costs the Pi nothing. The strict
+path and the downlink lock are untouched, and a strong burst still has to pass
+its shape. `scripts/tetra-phy-selftest.py` asserts all of it.
+
+**A second hit was required before anything showed.** At ~4% listening time
+the second burst almost never lands in a capture, so a vehicle on another
+carrier was recognised in 4% of drive-bys. One verified hit now shows
+everywhere, as a Blu Eye warns on the pulse -- but not all of it is the alarm:
+
+| | shown | sound |
+| --- | --- | --- |
+| one weak hit, channel not named by a locked site | bar | one short beep per hit |
+| a second hit, a hit of 14 dB or more (`uplink_single_hit_full_db`, the yellow part of the bar), or a locked site's channel | bar | the running alarm |
+
+A provisional channel keeps its follow-up, because it still has the second
+hit to find; a track that has earned the alarm keeps it while it lives; and a
+weak newcomer does not quieten an alarm that is still being held. Where a
+freak single pass could ever land is the one short beep.
+
+Driven through the whole 0.10.3 backend exactly as above -- a vehicle
+bursting every 4 s, 45 s in range, the Pi-realistic clock -- with a strong
+signal and with a 10 dB one that 0.10.2 could not recognise at all:
+
+| vehicle | shown within 10 s | 20 s | 45 s | 0.10.2 at 45 s |
+| --- | --- | --- | --- | --- |
+| locked site's uplink, strong | 71% | 96% | 100% | 100% |
+| locked site's uplink, 10 dB | 54% | 96% | 100% | 0% |
+| another carrier, strong | 13% | 21% | 40% | 4% |
+| another carrier, 10 dB | 6% | 15% | 34% (full alarm 11%) | 0% |
+| no lock, strong | 8% | 14% | 40% | 0% |
+| no lock, 10 dB | 8% | 18% | 40% (full alarm 1%) | 0% |
+
+(24 runs for the partner rows, 120-144 for the others.) A weak vehicle away
+from the locked site mostly shows as the provisional bar and beep: its second
+burst still has to land in a capture before the running alarm sounds, and at
+this listening time that is what stays rare.
+
+The bottom of the bar moved with the floor (`ui_level_weak_db` 8 -> 5 dB), a
+real detection always lights at least one segment, the status word says LOW
+rather than CLEAR while anything is shown, and the 0.15 floor under the alarm
+sound is gone -- on the new scale it was 8 dB, exactly the bursts this release
+learned to recognise.
+
+**The channel number under each bar** is the ETSI EN 300 392-2 carrier number:
+downlink = 300 MHz + carrier x 25 kHz + 12.5 kHz, and an uplink carries its
+downlink's number. 381.1875 MHz is `CH 3647`, the number a C2000 terminal
+reports for its cell; the uplink band is 3600-3799. A column that has never
+held a signal says `CH ----`.
+
+Detector profile 12 resets the detector constants once, including
+`ui_level_*`, which until now was saved verbatim -- without the reset the bar
+would keep its old 8 dB bottom on every existing unit. The site state is
+rebuilt with it; re-locking takes about a minute.
+
+**What one dongle still cannot do.** It hears 1.2 of the 5 MHz uplink band,
+45% of the time. That is the remaining difference with a device that hears the
+whole band continuously, and it is hardware: a receiver of 6 MHz or more that
+takes in 380-385 MHz at once, or a second dongle. The simulated numbers above
+are simulations -- white noise, a 4 s interval that is an assumption, and a
+few per cent of sampling spread -- not measurements on the road.
+
 ### The same principle, applied twice more (0.10.1)
 
 Two things 0.10.0 left half-done, both found by reading it back.
@@ -749,7 +870,9 @@ heard the crew's radio -- an alert after the stop rather than before it.
 - every 25 kHz channel of 380-385 MHz goes through the same waveform test;
 - partner channels of locked carriers are swept first and still confirm on a
   single hit -- the site lock corroborates them;
-- every other channel needs **two** verified hits. Sweeping two hundred
+- every other channel needs **two** verified hits (until 0.10.3, where one
+  hit shows and the second decides the full alarm -- see *What a Blu Eye
+  does* below). Sweeping two hundred
   channels instead of two multiplies the opportunities for a freak accept by
   the same factor, so the single-hit rule is kept where it was priced. The
   follow-up is what keeps the second hit cheap: one verified hit parks the
@@ -1089,7 +1212,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.10.2 uses a **TMB12A03 active buzzer**:
+RF Eye 0.10.3 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1238,7 +1361,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.10.2**.
+`VERSION` and `rfeye/config.py` identify this release as **0.10.3**.
 
 Build the OTA package with:
 

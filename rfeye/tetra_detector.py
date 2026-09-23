@@ -316,6 +316,27 @@ def plan_dwell(freqs, sample_rate, max_offset_hz=100_000.0,
     return centre, [(f, f - centre) for f in group]
 
 
+def carrier_number(freq_hz, cfg=None):
+    """The ETSI TETRA carrier number of a C2000 channel.
+
+    EN 300 392-2 numbers carriers from the band's base frequency: downlink =
+    base + carrier * 25 kHz + offset, which in the 380-400 MHz band is 300 MHz
+    and +12.5 kHz. An uplink channel carries its downlink's number, so
+    381.1875 MHz and 391.1875 MHz are both carrier 3647 -- the number a C2000
+    terminal reports for the cell it is on. The uplink band is 3600-3799.
+    """
+    cfg = cfg or {}
+    f = float(freq_hz)
+    lo = float(cfg.get('mobile_band_start_hz', 380e6))
+    hi = float(cfg.get('mobile_band_end_hz', 385e6))
+    if lo <= f < hi:
+        f += float(cfg.get('duplex_split_hz', 10e6))
+    base = float(cfg.get('tetra_carrier_base_hz', 300e6))
+    offset = float(cfg.get('tetra_raster_offset_hz', 12500.0))
+    step = max(1.0, float(cfg.get('tetra_channel_spacing_hz', 25000.0)))
+    return int(round((f - base - offset) / step))
+
+
 class UplinkAlarm:
     """Confirm/clear hysteresis over verified uplink transmissions.
 
@@ -341,6 +362,11 @@ class UplinkAlarm:
         self.last_hit = 0.0
         self.peaks = []
         self.streak = 0
+        # True while everything on screen rests on single weak hits: shown,
+        # one short beep per hit, but not the running alarm. And when the
+        # latest such hit was, so the display can beep once per hit.
+        self.provisional = False
+        self.provisional_hit_at = 0.0
 
     def reset(self):
         self.tracks = TrackRegistry(self.cfg)
@@ -349,6 +375,8 @@ class UplinkAlarm:
         self.last_hit = 0.0
         self.peaks = []
         self.streak = 0
+        self.provisional = False
+        self.provisional_hit_at = 0.0
 
     def confirmed_channels(self):
         """Uplink channels whose alert is already up.
@@ -358,8 +386,19 @@ class UplinkAlarm:
         and following it further only costs the rest of the band its turn --
         which, sweeping two hundred channels, is the whole band rather than the
         two partners it used to be.
+
+        A provisional channel still has something to prove -- the second hit
+        that turns one short beep into the alarm -- so it keeps its follow-up.
         """
-        return {int(round(float(r.freq_hz))) for r in self.peaks} if self.confirmed else set()
+        if not self.confirmed:
+            return set()
+        out = set()
+        for r in self.peaks:
+            f = int(round(float(r.freq_hz)))
+            tr = self.tracks.get(f, create=False)
+            if tr is None or not tr.provisional:
+                out.add(f)
+        return out
 
     def update(self, verified, watched=(), now=None, trusted=()):
         """``verified`` are the PhyResults that passed; ``watched`` is every
@@ -385,10 +424,15 @@ class UplinkAlarm:
         # in the backend is what keeps that affordable: one verified hit parks
         # the next dwells back on that window, so the second look costs about a
         # second rather than a whole sweep.
+        # Since 0.10.3 one verified hit shows everywhere, as a Blu Eye warns on
+        # the pulse. Two hits outside the partners had a vehicle on any other
+        # carrier recognised in 4% of simulated drive-bys: at about 4% listening
+        # time per channel the second burst almost never lands in a capture.
+        # What is still guarded is the full alarm -- see ``provisional`` below.
         trust = {int(round(float(f))) for f in trusted}
         if bool(self.cfg.get('uplink_sensitive', False)):
             need_trusted = 1
-            need_unknown = max(1, int(self.cfg.get('uplink_unknown_confirm_dwells', 2)))
+            need_unknown = max(1, int(self.cfg.get('uplink_unknown_confirm_dwells', 1)))
         else:
             need_trusted = max(1, int(self.cfg.get('uplink_confirm_dwells', 2)))
             need_unknown = need_trusted
@@ -429,17 +473,38 @@ class UplinkAlarm:
                 tr.forget_stale_hits(span_f)
         self.tracks.prune(now)
 
+        full_db = float(self.cfg.get('uplink_single_hit_full_db', 14.0))
         qualified = []
+        fresh_provisional = False
         for f, r in hits.items():
             tr = self.tracks.get(f, now, create=False)
             if tr is None:
                 continue
             need_f = need_trusted if f in trust else need_unknown
             if len(tr.hit_visits) >= need_f:
+                # How loud. A second hit, a locked site that names this
+                # channel, or a single hit strong enough to show yellow is the
+                # full alarm, and a track that has earned it keeps it while it
+                # lives. Anything less is shown with one short beep per hit --
+                # the Blu Eye's green, which is also where a freak single pass
+                # would land if one ever got through.
+                if (f in trust or len(tr.hit_visits) >= 2
+                        or float(r.snr_db) >= full_db):
+                    tr.proven = True
+                tr.provisional = not tr.proven
+                fresh_provisional = fresh_provisional or tr.provisional
                 tr.confirmed = True
                 tr.confirmed_at = now
                 qualified.append(r)
 
+        if fresh_provisional:
+            self.provisional_hit_at = now
+        # Provisional only while nothing on screen has earned the alarm: a
+        # proven track still inside its hold keeps it sounding even when a
+        # weak newcomer is what just hit.
+        loud = any(tr.confirmed and not tr.provisional
+                   and now - tr.last_hit <= hold
+                   for tr in list(self.tracks.tracks.values()))
         if qualified:
             self.confirmed = True
             self.last_hit = now
@@ -463,14 +528,19 @@ class UplinkAlarm:
 
             self.peaks = sorted(qualified, key=_lvl, reverse=True)
             self.level = clamp(max(_lvl(r) for r in qualified))
+            self.provisional = not loud
         elif self.confirmed and now - self.last_hit <= hold:
             # Hold through the gap between transmissions, fading the bar so
             # the display shows the alert ageing rather than freezing.
             age = (now - self.last_hit) / max(hold, 1e-6)
             self.level = clamp(self.level * (1.0 - 0.35 * age))
+            # Whichever track hit within the hold decides: the alert is held
+            # on self.last_hit, so at least one did.
+            self.provisional = not loud
         else:
             self.tracks.expire_confirmations(now)
             self.confirmed = False
+            self.provisional = False
             self.level = 0.0
             self.peaks = []
             self.streak = max([len(tr.hit_visits)

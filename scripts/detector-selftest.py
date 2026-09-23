@@ -747,34 +747,90 @@ def check_unlocked_receiver_still_hears():
             b.running = False
 
 
-def check_unknown_channel_needs_two_hits():
-    """One hit confirms on a partner channel; two are needed elsewhere.
+def check_single_hit_is_provisional():
+    """One hit shows everywhere; the full alarm still wants corroboration.
 
-    Sweeping the whole band means two orders of magnitude more channels for a
-    freak accept to land on, so the single-hit rule that sensitive mode was
-    priced for is kept only where the site lock corroborates it. The follow-up
-    is what keeps the second hit cheap: it parks the next dwells back on the
-    window that just produced one.
+    Until 0.10.3 a channel outside the locked partners needed two hits before
+    anything showed, and in simulated 45 s drive-bys that recognised a vehicle
+    on another carrier 4% of the time: at about 4% listening time per channel
+    the second burst almost never lands in a capture. A Blu Eye warns on the
+    pulse. So one hit shows now -- a bar and one short beep -- and what the
+    second hit, a strong signal or a site lock still decides is whether the
+    running alarm sounds. The follow-up keeps working a provisional channel,
+    because it still has that second hit to find.
     """
-    print(chr(10) + "22. one hit on a partner, two on an unknown channel")
-    from tetra_detector import UplinkAlarm
+    print(chr(10) + "22. one hit shows; a second, a strong one or a partner sounds the alarm")
+    from tetra_detector import UplinkAlarm, carrier_number
     from tetra_phy import PhyResult
     cfg = dict(DEFAULTS)
     partner, stranger = 381_187_500.0, 382_437_500.0
 
-    def hit(f):
+    def hit(f, snr=9.0):
         r = PhyResult(freq_hz=f, role="UPLINK"); r.ok = True; r.quality = 0.6
+        r.snr_db = snr
         return r
 
+    both = [partner, stranger]
     a = UplinkAlarm(cfg)
-    ok, _, _ = a.update([hit(partner)], [partner, stranger], 1000.0, trusted=[partner])
-    check("one hit on a locked partner confirms", ok)
+    ok, _, _ = a.update([hit(partner)], both, 1000.0, trusted=[partner])
+    check("one weak hit on a locked partner is the full alarm", ok and not a.provisional)
 
     a = UplinkAlarm(cfg)
-    ok, _, _ = a.update([hit(stranger)], [partner, stranger], 1000.0, trusted=[partner])
-    check("one hit on an unknown channel does not", not ok)
-    ok, _, _ = a.update([hit(stranger)], [partner, stranger], 1001.0, trusted=[partner])
-    check("the second hit on it does", ok)
+    ok, _, _ = a.update([hit(stranger)], both, 1000.0, trusted=[partner])
+    check("one weak hit on an unknown channel shows", ok)
+    check("  provisionally, with the moment of the hit for its one beep",
+          a.provisional and a.provisional_hit_at == 1000.0)
+    check("  and the follow-up keeps working it",
+          int(stranger) not in a.confirmed_channels())
+    check("  and it is looked at again at the fast rate, not the settled one",
+          any(int(t.freq_hz) == int(stranger) for t in a.tracks.revisit_due(1001.0)))
+    ok, _, _ = a.update([], both, 1002.0, trusted=[partner])
+    check("  held between transmissions, still provisional", ok and a.provisional)
+    ok, _, _ = a.update([hit(stranger)], both, 1004.0, trusted=[partner])
+    check("the second hit on it sounds the alarm", ok and not a.provisional)
+    check("  and ends the follow-up", int(stranger) in a.confirmed_channels())
+
+    a = UplinkAlarm(cfg)
+    ok, _, _ = a.update([hit(stranger, 18.0)], both, 1000.0, trusted=[partner])
+    check("a single hit strong enough to show yellow is the alarm at once",
+          ok and not a.provisional)
+
+    a = UplinkAlarm(cfg)
+    a.update([hit(partner)], both, 1000.0, trusted=[partner])
+    ok, _, _ = a.update([hit(stranger)], both, 1005.0, trusted=[partner])
+    check("a weak newcomer does not quieten an alarm that is still held",
+          ok and not a.provisional)
+
+    check("channels are numbered as C2000 numbers them",
+          carrier_number(381_187_500.0, cfg) == 3647
+          and carrier_number(391_187_500.0, cfg) == 3647
+          and carrier_number(380_012_500.0, cfg) == 3600
+          and carrier_number(384_987_500.0, cfg) == 3799)
+
+    # Through the whole backend: a weak vehicle on a carrier with no lock is
+    # shown provisionally, named by channel, and a strong one sounds at once.
+    for snr, want_prov, label in ((9.0, True, "weak"), (24.0, False, "strong")):
+        with tempfile.TemporaryDirectory() as d:
+            air = FakeAir(interferers=[(stranger, "control_burst")], snr_db=snr)
+            b = make_backend(air, os.path.join(d, "sites.json"))
+            try:
+                seen = None
+                for _ in range(24):
+                    b._scan_cycle()
+                    snap = b.snapshot()
+                    if snap["mobile_confirmed"]:
+                        seen = snap
+                        break
+                check("a %s vehicle on an unlocked carrier shows" % label, seen is not None)
+                if seen is not None:
+                    check("  %s" % ("provisionally" if want_prov else "as the full alarm"),
+                          bool(seen.get("alert_provisional")) == want_prov,
+                          "alert_provisional=%s" % seen.get("alert_provisional"))
+                    chans = [p.get("channel") for p in seen["peaks"]]
+                    check("  with its channel number under the bar",
+                          carrier_number(stranger, cfg) in chans, str(chans))
+            finally:
+                b.running = False
 
 
 def check_capture_pipeline():
@@ -1450,7 +1506,7 @@ def main():
     check_sensitive_control_burst()
     check_vehicle_on_an_unlocked_carrier()
     check_unlocked_receiver_still_hears()
-    check_unknown_channel_needs_two_hits()
+    check_single_hit_is_provisional()
     check_capture_pipeline()
     check_radio_duty_limit()
     check_follow_up_outlasts_a_repeat()

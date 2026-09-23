@@ -376,7 +376,8 @@ def sensitive_uplink():
     # the peak-held spectrum was noisiest. The walk is smoothed since 0.9.34;
     # this is the check that would have caught it, so it sweeps positions
     # rather than trusting one.
-    for n_slots, snr in ((0.5, 25), (0.5, 18), (1, 25), (1, 18), (2, 12)):
+    for n_slots, snr in ((0.5, 25), (0.5, 18), (1, 25), (1, 18), (2, 12),
+                         (1, 10), (1, 8), (0.5, 12)):
         missed = []
         for k in range(8):
             start = 0.04 + k * 0.115
@@ -393,11 +394,63 @@ def sensitive_uplink():
             FAILURES.append("sensitive: %s-slot burst at %d dB missed %d of 8 "
                             "positions (%s)" % (n_slots, snr, len(missed),
                                                 "; ".join(missed)))
-    # The `(2, 12)` row above is the stated floor: at 12 dB a *single* burst is
-    # not reliably separable from noise by the occupied-bandwidth measurement,
-    # in any release, and two slots are. That is a limit of the measurement,
-    # not a threshold anyone chose, so it is asserted where it holds rather
-    # than claimed where it does not.
+    # Until 0.10.3 `(2, 12)` was the stated floor: at 12 dB a *single* burst
+    # was not separable from noise by the occupied-bandwidth measurement. That
+    # was true of the measurement and not of the signal -- its modulation was
+    # unmistakable from 8 dB -- so below phy_shape_min_snr_db the waveform
+    # tests decide on their own now, and the last three rows are the new
+    # floor: one slot from 8 dB, a subslot from 12 (it was 14 and 16). A
+    # subslot at 10 dB passes at 5 of these 8 positions -- the peak-held
+    # level of 7 ms of signal sometimes lands under phy_uplink_min_snr_db --
+    # so 12 is what is asserted.
+
+    # Which is only worth having if it does not buy noise back. Everything
+    # below is weak -- the range where the shape tests are no longer asked --
+    # and none of it is TETRA, so none of it may pass. The strict path is
+    # untouched, so a lone weak burst is still no call.
+    weak_decoys = [
+        ("empty channel", lambda sd: sim.control_burst(dur, SR, seed=sd, n_slots=0,
+                                                       freq_offset_hz=90_000.0)),
+        ("pi/4-DQPSK at 16 kbaud", lambda sd: sim.dqpsk_carrier(
+            dur, SR, 16000.0, seed=sd, freq_offset_hz=90_000.0)),
+        ("pi/4-DQPSK at 24 kbaud", lambda sd: sim.dqpsk_carrier(
+            dur, SR, 24000.0, seed=sd, freq_offset_hz=90_000.0)),
+        ("FSK data", lambda sd: sim.fsk_data(dur, SR, freq_offset_hz=90_000.0)),
+        ("4FSK data", lambda sd: sim.fsk4_data(dur, SR, freq_offset_hz=90_000.0)),
+        ("FM voice", lambda sd: sim.nfm_voice(dur, SR, freq_offset_hz=90_000.0)),
+        ("impulsive noise", lambda sd: sim.impulse_noise(dur, SR)),
+        ("CW spur", lambda sd: sim.cw_tone(dur, SR, freq_offset_hz=90_000.0)),
+    ]
+    for name, make in weak_decoys:
+        passed = []
+        for snr in (6, 8, 10, 12):
+            for k in range(2):
+                seed = 901 + 13 * k + snr
+                r = phy.analyse(cap(make(seed), snr, seed + 5), 90_000.0,
+                                role="UPLINK", freq_hz=380_100_000.0,
+                                limits=sens, decim=56)
+                if r.ok:
+                    passed.append("%d dB" % snr)
+        ROWS.append(("sensitive weak: " + name, "UPLINK", False, r))
+        if passed:
+            FAILURES.append("sensitive: weak %s accepted as TETRA (%s)"
+                            % (name, ", ".join(passed)))
+    weak = cap(sim.control_burst(dur, SR, seed=947, n_slots=1,
+                                 freq_offset_hz=90_000.0), 9, 953)
+    rs = phy.analyse(weak, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
+                     limits=sens, decim=56)
+    if not (rs.ok and rs.shape_waived):
+        FAILURES.append("sensitive: a 9 dB single slot was not judged on its "
+                        "waveform (%s, shape_waived=%s)" % (rs.reason, rs.shape_waived))
+    if phy.analyse(weak, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
+                   decim=56).ok:
+        FAILURES.append("sensitive: strict mode accepted a weak lone burst")
+    strong = cap(sim.control_burst(dur, SR, seed=949, n_slots=1,
+                                   freq_offset_hz=90_000.0), 25, 955)
+    rs = phy.analyse(strong, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
+                     limits=sens, decim=56)
+    if rs.shape_waived or "bandwidth" not in rs.checks:
+        FAILURES.append("sensitive: a strong burst was let off its shape tests")
 
 
 def main():

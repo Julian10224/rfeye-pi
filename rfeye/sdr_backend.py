@@ -49,7 +49,8 @@ import numpy as np
 
 import tetra_phy
 from tetra_phy import Channelizer, PhyResult, clamp
-from tetra_detector import SiteRegistry, UplinkAlarm, plan_dwell, raster_snap
+from tetra_detector import (SiteRegistry, UplinkAlarm, carrier_number, plan_dwell,
+                            raster_snap)
 from power import PowerLadder, read_soc_temp, read_uv_alarm
 
 try:
@@ -284,6 +285,7 @@ class SDRBackend:
         self.peaks=[]; self.mobile_peaks=[]; self.site_peaks=[]
         self.mobile_level=0.; self.site_level=0.
         self.activity_confidence=0.; self.mobile_confirmed=False
+        self.alert_provisional=False; self.provisional_hit_at=0.
         self.spectrum_freqs=np.array([],dtype=np.float64)
         self.spectrum_db=np.array([],dtype=np.float32)
         self.noise_floor_db=-100.; self.last_update=0.; self.demo_active=False
@@ -360,6 +362,7 @@ class SDRBackend:
                 self.peaks=[]; self.mobile_peaks=[]; self.site_peaks=[]
                 self.mobile_level=0.; self.site_level=0.
                 self.activity_confidence=0.; self.mobile_confirmed=False
+                self.alert_provisional=False
                 self.demo_active=False; self.alarm.reset()
                 self._follow=[]; self._follow_left=0
                 self.detector_state='SEARCHING'; self.last_phy=[]
@@ -539,6 +542,10 @@ class SDRBackend:
                 'site_level':float(self.site_level),
                 'activity_confidence':float(self.activity_confidence),
                 'mobile_confirmed':bool(self.mobile_confirmed),
+                # One weak hit on a channel no locked site vouches for: shown,
+                # with one short beep per hit, not the running alarm.
+                'alert_provisional':bool(self.alert_provisional),
+                'provisional_hit_at':float(self.provisional_hit_at),
                 'freqs':self.spectrum_freqs.copy(),'spectrum':self.spectrum_db.copy(),
                 'noise':float(self.noise_floor_db),
                 'driver_path':str(self.driver_path),
@@ -1157,8 +1164,12 @@ class SDRBackend:
                 pct=(float(self.cfg.get('phy_uplink_sensitive_percentile',100.))
                      if sensitive else 92.0)
                 prep=ch.shape_prepared(percentile=pct)
-                floor=(float(self.cfg.get('phy_min_snr_db',8.0))
-                       -max(0.,float(self.cfg.get('phy_screen_margin_db',2.0))))
+                # The same floor the waveform test applies: lower for a
+                # sensitive uplink since 0.10.3, where a weak burst is judged
+                # on its modulation rather than its shape.
+                lowest=(float(self.cfg.get('phy_uplink_min_snr_db',5.0)) if sensitive
+                        else float(self.cfg.get('phy_min_snr_db',8.0)))
+                floor=lowest-max(0.,float(self.cfg.get('phy_screen_margin_db',2.0)))
                 levels=tetra_phy.screen_levels(prep,[o for _,o in members])
                 for freq,offset in members:
                     if float(levels.get(float(offset),99.0))<floor:
@@ -1598,6 +1609,8 @@ class SDRBackend:
             nshow=int(self.cfg.get('max_signals',3))
             shown=[tr.as_dict(now,weak,strong) for tr in
                    self.alarm.tracks.top(now,nshow)]
+            for row in shown:
+                row['channel']=carrier_number(row['freq_hz'],self.cfg)
             if confirmed and not shown:
                 # The alert is being held through a gap between transmissions,
                 # and the track that raised it has gone quiet -- which is what
@@ -1622,6 +1635,8 @@ class SDRBackend:
                 self.site_level=float(max([s['quality'] for s in locked],default=0.))
                 self.activity_confidence=float(level)
                 self.mobile_confirmed=bool(confirmed)
+                self.alert_provisional=bool(confirmed and self.alarm.provisional)
+                self.provisional_hit_at=float(self.alarm.provisional_hit_at)
                 self.last_phy=phy_rows
                 self.last_update=now; self.status='LIVE'; self.error=''
                 self.demo_active=False; self.last_good_scan=now; self.scan_failures=0
@@ -1672,6 +1687,7 @@ class SDRBackend:
                     self.peaks=[]; self.mobile_peaks=[]; self.site_peaks=[]
                     self.mobile_level=0.; self.site_level=0.
                     self.activity_confidence=0.; self.mobile_confirmed=False
+                    self.alert_provisional=False
                     self.alarm.reset()
                     self.spectrum_freqs=np.array([],dtype=np.float64)
                     self.spectrum_db=np.array([],dtype=np.float32)
@@ -1681,7 +1697,8 @@ class SDRBackend:
     @staticmethod
     def _peak_row(r):
         """PhyResult -> the peak dict the UI and recordings consume."""
-        return {'freq_hz':float(r.freq_hz),'level':float(r.quality),
+        return {'freq_hz':float(r.freq_hz),'channel':carrier_number(r.freq_hz),
+                'level':float(r.quality),
                 'signal_strength':float(r.quality),'confidence':float(r.quality),
                 'quality':float(r.quality),'snr_db':float(r.snr_db),
                 'rf_snr_db':float(r.snr_db),'duty':float(r.duty),
@@ -1703,7 +1720,8 @@ class SDRBackend:
               .04+.85*max(0,math.sin(t*.28+3.1))**12]
         base=float(self.cfg.get('mobile_band_start_hz',380e6))
         span=float(self.cfg.get('mobile_band_end_hz',385e6))-base
-        peaks=[{'freq_hz':base+span*(.2+i*.3),'snr_db':8+v*30,'rf_snr_db':8+v*24,
+        peaks=[{'freq_hz':base+span*(.2+i*.3),'channel':carrier_number(base+span*(.2+i*.3)),
+                'snr_db':8+v*30,'rf_snr_db':8+v*24,
                 'signal_strength':v,'level':v,'quality':v,'confidence':min(1,.2+v*.8),
                 'band':'MOBILE','role':'UPLINK','reason':'DEMO','last_seen':t}
                for i,v in enumerate(vals) if v>.12]
