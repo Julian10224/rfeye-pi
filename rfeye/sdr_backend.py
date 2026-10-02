@@ -329,6 +329,12 @@ class SDRBackend:
         # about to start. See App._wait_for_gap.
         self.capture_ended_at=0.0
         self.quiet_until=0.0
+        # The panel and the radio take turns, in both directions; see
+        # claim_panel. ``air`` makes "is a capture running / is a frame on
+        # its way" one question with one answer.
+        self.air=threading.Lock()
+        self.panel_until=0.0
+        self.panel_wants=False
         self._gain_backoff={'up':0.,'down':0.}; self._gain_clean_since={'up':0.,'down':0.}
         # How much of the time an uplink channel is actually being listened
         # to, averaged over the band: capture seconds times the share of the
@@ -929,7 +935,7 @@ class SDRBackend:
             # plain retune. Reading unsettled samples into a 0.9 s dwell would
             # corrupt the very timing measurements the dwell exists for.
             settle=0.030 if self.sdr.rate_changed else 0.006
-            self.capture_idle.clear()
+            self._begin_capture()
             try:
                 self.sdr.read_complex(max(4096,int(sr*settle)),
                                       abort=lambda: not self.running)
@@ -942,6 +948,65 @@ class SDRBackend:
         except Exception as e:
             self._close_direct_sdr()
             raise RuntimeError('librtlsdr read failed: '+str(e))
+
+    def claim_panel(self,hold_s=0.35,timeout_s=1.5):
+        """The UI asks for the air: one frame, with no capture under it.
+
+        The panel's SPI clock is 16.67 MHz (the core clock over 24), and its
+        23rd harmonic is 383.333 MHz -- inside the uplink band, 4 kHz from the
+        centre of carrier 3733. A frame written while the radio is reading
+        puts that line 57 dB over the noise and the ADC on its rails. Kept as
+        evidence within a minute of 0.10.8 starting:
+
+            OVERLOAD uplink clip 6.0% rms 49 at 383.4625 MHz
+            REJECTED CH 3733 383.3375 MHz 16.1 dB FAIL:four_phase,...
+
+        -- 66 ms of a frame that had started before the capture did. It is
+        also what "FAIL:flatness on 383.3375" beside a police car on
+        2 October was: the unit's own screen, updating the recording page,
+        which cost that capture and then 4 dB of uplink gain for 25 seconds.
+
+        0.10.6 and 0.10.7 had the frame wait for the radio, with a time limit
+        and not at all for a touch, and nothing made the radio wait for the
+        frame -- which is on the wire for 147 ms *after* the app has handed
+        it over. Now each waits for the other. The UI waits here until no
+        capture is running, then holds the air for ``hold_s``; the radio
+        (``_begin_capture``) does not start a read while the air is held or
+        while the UI is waiting for it. The cost is at most ``hold_s`` of
+        listening per frame that actually changed, against a whole capture
+        and a gain step lost.
+
+        Returns False if no gap came within ``timeout_s`` -- the frame then
+        goes out regardless, so a wedged radio can never freeze the screen.
+        """
+        end=time.monotonic()+max(0.0,float(timeout_s))
+        self.panel_wants=True
+        try:
+            while True:
+                with self.air:
+                    if self.capture_idle.is_set():
+                        self.panel_until=time.monotonic()+max(0.0,float(hold_s))
+                        return True
+                if time.monotonic()>=end:
+                    return False
+                self.capture_idle.wait(0.02)
+        finally:
+            self.panel_wants=False
+
+    def _begin_capture(self):
+        """The radio's side of ``claim_panel``: wait for a frame to be gone.
+
+        Bounded, so the screen can never stop the radio for long either.
+        """
+        end=time.monotonic()+max(0.0,float(self.cfg.get('ui_quiet_radio_wait_s',1.0)))
+        while self.running:
+            with self.air:
+                now=time.monotonic()
+                if (not self.panel_wants and now>=self.panel_until) or now>=end:
+                    self.capture_idle.clear()
+                    return
+            time.sleep(0.005)
+        self.capture_idle.clear()
 
     @staticmethod
     def _band_of(centre):
@@ -967,11 +1032,12 @@ class SDRBackend:
 
         On 2 October a unit stood beside a police car for a minute and stayed
         silent. power.log held the one trace of anything: an uplink capture
-        with 13.7% of its samples on the rails -- five TETRA slots' worth,
-        almost to the sample -- of which the detector had looked at 25
-        channels of the 80 it contained and found nothing. The capture itself
-        was gone a second later, so whether that was the car could not be
-        settled. The next one is kept.
+        with 13.7% of its samples on the rails. The capture itself was gone a
+        second later, and 0.10.8 was shipped on a reading of the one result
+        row that survived -- a terminal's linearisation carrier -- that was
+        wrong. The first capture kept by this function, a minute after that
+        release started, showed what it really was: the unit's own panel (see
+        claim_panel). A result row is not the samples.
 
         Rate limited per ``key`` and capped in number, oldest first out: a
         spur that fails the same way all day must not fill the card or push

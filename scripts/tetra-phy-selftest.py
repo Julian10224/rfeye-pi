@@ -438,9 +438,10 @@ def sensitive_uplink():
     # A terminal linearises its transmitter on a bare carrier before it sends
     # (EN 300 392-2, the linearisation burst), and the peak hold keeps that
     # carrier's bin next to the modulated burst's spectrum. Up to 0.10.7 the
-    # flatness test called that a spur and stopped: recorded beside a police
-    # car as 17 dB, 21.1 kHz wide, 15 Hz off the raster, "FAIL:flatness". The
-    # simulator had never keyed a carrier, so nothing here had ever said so.
+    # flatness test called that a spur and stopped. The simulator had never
+    # keyed a carrier, so nothing here had ever said so. (It has not been
+    # seen on air either: the field row 0.10.8 took for one was the unit's
+    # own panel. These cases are what the change rests on.)
     def keyed(n_slots, carrier_ms, start, seed):
         burst = sim.control_burst(dur, SR, seed=seed, n_slots=n_slots,
                                   start_frac=start, freq_offset_hz=90_000.0)

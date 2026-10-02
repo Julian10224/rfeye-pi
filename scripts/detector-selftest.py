@@ -1507,6 +1507,22 @@ def check_gain_and_hits_log():
             except RuntimeError:
                 pass
             check("  and lets go when a read fails", b.capture_idle.is_set())
+            # ...and, since 0.10.9, waits for a frame that is on its way to
+            # the panel: the SPI clock's 23rd harmonic is 383.333 MHz.
+            fake.fail = False; fake.seen = []; b.sdr = fake
+            check("the panel gets the air when the radio is idle",
+                  b.claim_panel(hold_s=0.25, timeout_s=0.5)
+                  and b.panel_until > time.monotonic() + 0.15)
+            t0 = time.monotonic()
+            SDRBackend._samples(b, 381_000_000.0, 2_016_000, 8192)
+            check("and the radio does not read until the frame is gone",
+                  time.monotonic() - t0 >= 0.2, "%.2f s" % (time.monotonic() - t0))
+            b.capture_idle.clear()
+            t0 = time.monotonic()
+            check("while the radio reads, the panel does not get it",
+                  not b.claim_panel(hold_s=0.25, timeout_s=0.2)
+                  and 0.15 <= time.monotonic() - t0 < 0.6)
+            b.capture_idle.set()
             b.sdr = None
         finally:
             b.running = False
@@ -1537,11 +1553,11 @@ def check_gain_and_hits_log():
 def check_whole_window():
     """An uplink dwell measures everything its capture holds.
 
-    Recorded on 2 October beside a police car: one uplink capture with 13.7%
-    of its samples on the rails -- five slots of a transmitter at full scale,
-    to within a tenth of a percent -- and no alert. The dwell had been aimed
-    at what was left of the sweep queue and measured 25 channels; the capture
-    held 80. Partner dwells were worse: four or five channels each.
+    The recording made on 2 October beside a police car: eleven uplink dwells
+    that measured 3, 4, 4, 5, 5, 5, 25, 25, 48, 48 and 48 channels of the 80
+    each capture held -- a tenth of the band at a time. A dwell aimed at the
+    partners of the locked site measured the partners; a sweep dwell measured
+    what was left of its queue.
     """
     print(chr(10) + "32. an uplink dwell measures its whole window")
     import sdr_backend as sb

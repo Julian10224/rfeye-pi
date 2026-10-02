@@ -422,10 +422,13 @@ class App:
         sent at all, which at idle is every frame. And a frame that did
         change waits for the radio to finish the capture it is in, up to
         ``ui_quiet_capture_wait_s``, so the SPI burst lands in the gap between
-        two captures instead of inside one. A finger on the glass skips the
-        wait: someone using the menu is owed an answer at once, and is not
-        watching the bars. The sound is decided before any of this, so an
-        alert is never held back by it.
+        two captures instead of inside one. The sound is decided before any
+        of this, so an alert is never held back by it.
+
+        What the frame does to the band is not only noise: the SPI clock's
+        23rd harmonic is a line at 383.333 MHz, inside the uplink band. See
+        SDRBackend.claim_panel for that, and for why the radio now waits for
+        the frame as well.
         """
         now = time.monotonic()
         try:
@@ -438,10 +441,25 @@ class App:
             self.frames_skipped += 1
             return False
         touching = now - float(getattr(self, "ui_touch_at", 0.0)) < 1.5
-        if bool(self.cfg.get("ui_quiet_capture", True)) and not touching:
-            idle = getattr(self.backend, "capture_idle", None)
-            if idle is not None:
-                self._wait_for_gap(idle)
+        if bool(self.cfg.get("ui_quiet_capture", True)):
+            claim = getattr(self.backend, "claim_panel", None)
+            if claim is not None:
+                # Since 0.10.9 the two take turns in both directions, and a
+                # touch waits as well -- for one capture at most. It used to
+                # skip the wait, on the reasoning that someone in the menu is
+                # not watching the bars; but the menu is where a recording is
+                # started, and the frame that answered the tap put the ADC on
+                # its rails beside the very car being recorded. See
+                # SDRBackend.claim_panel.
+                wait = float(self.cfg.get(
+                    "ui_quiet_touch_wait_s" if touching else "ui_quiet_capture_wait_s",
+                    0.7 if touching else 1.5))
+                claim(hold_s=float(self.cfg.get("ui_quiet_panel_hold_s", 0.35)),
+                      timeout_s=max(0.0, wait))
+            elif not touching:
+                idle = getattr(self.backend, "capture_idle", None)
+                if idle is not None:
+                    self._wait_for_gap(idle)
         self._present_rotated()
         pygame.display.flip()
         self._shown_sig = sig

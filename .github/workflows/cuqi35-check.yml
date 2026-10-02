@@ -417,6 +417,14 @@ jobs:
           grep -q 'hear=%.1f%%' rfeye/sdr_backend.py
           grep -q 'def check_whole_window' scripts/detector-selftest.py
           grep -q 'after %.0f ms of carrier' scripts/tetra-phy-selftest.py
+          # 0.10.9: the panel's SPI clock has a harmonic at 383.333 MHz. The
+          # frame waits for the capture and the capture for the frame.
+          grep -q 'def claim_panel' rfeye/sdr_backend.py
+          grep -q 'def _begin_capture' rfeye/sdr_backend.py
+          grep -q 'self._begin_capture()' rfeye/sdr_backend.py
+          grep -q 'claim(hold_s=' rfeye/app.py
+          grep -q '"ui_quiet_panel_hold_s": 0.35' rfeye/config.py
+          grep -q 'the radio waits for the frame to be gone' scripts/app-selftest.py
           test "$(grep -c 'pygame.display.flip()' rfeye/app.py)" -le 3
           grep -q 'need_trusted if f in trust else need_unknown' rfeye/tetra_detector.py
           grep -q 'def confirmed_channels' rfeye/tetra_detector.py
@@ -620,6 +628,9 @@ jobs:
           assert c['ui_quiet_capture'] is True, 'the panel must not refresh inside a capture'
           assert 1.0 <= c['ui_quiet_capture_wait_s'] <= 2.5, 'long enough to outlast one capture'
           assert c['ui_refresh_s'] >= 10.0
+          assert 0.2 <= c['ui_quiet_panel_hold_s'] <= 0.5, 'a frame is 147 ms on the wire, after the hand-over'
+          assert 0.55 <= c['ui_quiet_touch_wait_s'] <= 1.0, 'one capture, no more'
+          assert c['ui_quiet_radio_wait_s'] >= c['ui_quiet_panel_hold_s']
           assert c['scan_pipeline'] is True
           assert c['site_pass_share']==5
           assert c['snapshot_phy_rows']==96

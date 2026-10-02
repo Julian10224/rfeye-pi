@@ -1,6 +1,6 @@
-# RF Eye 0.10.8 for Raspberry Pi
+# RF Eye 0.10.9 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.10.8 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.10.9 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.10.8 appliance path:
+The installer reproduces the working 0.10.9 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.10.8
+## User interface in 0.10.9
 
 The compact profile contains:
 
@@ -461,7 +461,7 @@ scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
 
-### Beside a police car, and silent (0.10.8)
+### Beside a police car, and silent (0.10.8, corrected in 0.10.9)
 
 Field report, 2 October: the unit stood next to a police car for a minute with
 a recording running, and did nothing. What it had on disk afterwards:
@@ -470,11 +470,11 @@ a recording running, and did nothing. What it had on disk afterwards:
 hits.log     does not exist: nothing verified since 0.10.4
 power.log    HB cap=22% limit=22% duty=22% ... uv=1   every minute of the drive
              GAIN uplink 37.2 -> 33.2 dB (clip 13.7%, rms 68)        19:05:00
-recording    383.3375 MHz  snr 17.2  bw 21094  boundary 12.6  centre -15 Hz
+recording    383.3375 MHz  snr 17.2  bw 21094  boundary 12.6
              flatness 28.8                               FAIL:flatness
 ```
 
-Each of those lines is a separate fault, and any one of them was enough.
+Each of those lines is a separate fault.
 
 **1. The radio was listening a fifth of the time, for no reason.** The rail
 was fine for the whole drive -- the under-voltage count never moved in 26
@@ -506,51 +506,87 @@ measured, on the unit's own recording of an empty band at gain 37.2:
 That roll-off is the tuner's IF filter and takes signal and noise down
 together, so the level against the noise holds out to the edge.
 
-**3. The one transmission it did measure, it turned down.** The uplink capture
-at 19:05:00 had 13.7% of its samples on the ADC rails. Five TETRA slots are
-70.8 ms, 13.6% of a 520 ms capture, and a full-scale signal for that long
-reads rms 67: a transmitter a few metres away, keyed for five slots. In the
-same capture channel 383.3375 MHz held the width, the edges and the raster of
-a TETRA carrier to 15 Hz -- with one line standing 29 dB out of it, which the
-flatness test calls a spur. It was not the receiver's: measured afterwards at
-four tuner centres, this unit's own lines are a 576 kHz comb (382.464,
-383.040, 383.616 MHz ...) and 384.000, and 383.3375 is flat noise. It is what a
-terminal does: it linearises its transmitter on an unmodulated carrier before
-it sends, and the peak-held spectrum keeps that carrier's bin beside the
-burst's. The simulator had never keyed a carrier, so no test had ever said
-so. Reproduced with 3 ms of carrier ahead of one slot, 0.10.7 answers
-`FAIL:flatness` at any level.
-
-Since 0.10.8 a failed flatness no longer ends the analysis of an uplink. The
-samples go on to the waveform tests, with the boxes that hold a bare carrier
-(`carrier_boxes`: every phase step the same) left out of the symbol-rate
-measurement -- 7 ms of carrier otherwise outvotes the slot behind it. A bare
-spur never gets that far, because its level against the noise is a median and
-reads about 1 dB; keyed noise with a carrier in it, TETRA-wide noise with a
-carrier in it and a keyed bare carrier are all in the regression suite at
-14-32 dB, with every earlier decoy, and none passes.
-
-How much of this was the car cannot be proved: the capture was gone a second
-later. **So the next one is kept.** `~/.local/state/rfeye/evidence/` holds the
-raw IQ of every uplink capture that hits the rails (`*_overload.iq8`, at most
-one per 10 s, twelve kept) and of every capture in which something at least
-15 dB strong was turned down (`*_reject.iq8`, one per channel per hour, four
-kept), and `hits.log` says so:
+**3. The unit jammed itself, and 0.10.8 misread it (corrected in 0.10.9).**
+The uplink capture at 19:05:00 had 13.7% of its samples on the ADC rails, and
+in it channel 383.3375 MHz read 17 dB, 21 kHz wide, with a line standing 29 dB
+out of it: `FAIL:flatness`. 0.10.8 took that for a terminal linearising on a
+bare carrier before sending, and said so here. It was wrong, and what showed
+it was the one thing 0.10.8 got right about this: it kept the next such
+capture. That arrived 43 seconds after the release started, on a desk:
 
 ```text
-2026-10-02T19:05:00 OVERLOAD uplink clip 13.7% rms 68 at 382.9125 MHz -> evidence/...
-2026-10-02T19:05:00 REJECTED CH 3733 383.3375 MHz 17.2 dB FAIL:... -> evidence/...
+OVERLOAD uplink clip 6.0% rms 49 at 383.4625 MHz -> evidence/..._overload.iq8
+REJECTED CH 3733 383.3375 MHz 16.1 dB FAIL:four_phase,rate_selectivity,symbol_rate
 ```
 
-`scripts/analyse-capture.py` reads them. A hit that had a carrier line in it
-says `line`.
+The same channel, with no police car anywhere. In the samples: a burst that
+was already running when the capture began and ended 66 ms into it, a line at
+**383.3331 MHz** 57 dB over the noise, and nothing else. The panel's SPI clock
+is the 400 MHz core clock over 24, 16.667 MHz, and 23 times that is
+383.333 MHz. It was the unit's own screen -- on 2 October, the recording page
+being drawn. The earlier check that "383.3375 is flat noise at four tuner
+centres" was made with the app stopped, which is to say with the panel
+still: it tested for a spur that only exists while a frame is on the wire.
 
-What it adds up to, as the share of the time any one uplink channel is being
-listened to: about 2% during that minute (22% of the time on the air, three
-quarters of it on the uplink, a tenth of the band at a time), against roughly
-12% in ECO and 27% in Max power now. `power.log` writes the measured figure
-every minute as `hear=`. It is still one dongle that hears a third of the band
-at a time; a Blu Eye hears all of it all of the time.
+So what that frame cost beside the police car was real, just not what 0.10.8
+said: one capture on the rails, and then 4 dB of uplink gain for 25 of the 60
+seconds, because the overload guard stepped down for it. Whether the car
+transmitted at all in that minute is not known. With about 2% of the time on
+any one channel, it would have had to be lucky to be heard.
+
+**The panel and the radio now take turns, in both directions** (0.10.9,
+`SDRBackend.claim_panel`). 0.10.6 and 0.10.7 made a changed frame wait for
+the capture in progress -- with a time limit, not at all for a touch, and with
+nothing making the radio wait for the frame, which is on the wire for about
+147 ms *after* the app has handed it over. Now:
+
+| | |
+| --- | --- |
+| a frame that changed | waits until no capture is running, then holds the air for `ui_quiet_panel_hold_s` (0.35 s) |
+| the radio | does not start a read while the air is held, or while a frame is waiting for it |
+| a touch | waits as well, for one capture at most (`ui_quiet_touch_wait_s`, 0.7 s) -- the menu is where a recording is started |
+| a radio that never finishes, a panel that never stops asking | each is waited for at most 1.5 s / 1.0 s, so neither can freeze the other |
+
+The cost is at most 0.35 s of listening per frame that actually changed --
+none at idle, where no frame changes -- against a whole capture and a gain
+step lost.
+
+**Moving the harmonic out of the band** would be the other cure, and is not
+done. The SPI clock comes from `speed=18000000` in `/boot/firmware/config.txt`
+(root, so not something an update can change) through an even divider of the
+core clock, and the core clock itself moves between 400 and 250 MHz with load
+and under-voltage. Only one point of that is measured -- 16.667 MHz, the line
+at 383.333 MHz -- and a speed that is clean at 400 MHz can put a harmonic
+straight back into the band at 250. Until that is measured on the panel, the
+turn-taking above is what keeps the line out of the captures, and it does not
+depend on where the line is.
+
+**The flatness change of 0.10.8 stays, on what it actually rests on.** A
+failed flatness no longer ends the analysis of an uplink: the samples go on to
+the waveform tests, with the boxes that hold a bare carrier (`carrier_boxes`)
+left out of the symbol-rate measurement. The case for it is a simulation -- a
+terminal's linearisation burst is a real thing (EN 300 392-2), 3 ms of carrier
+ahead of one slot made 0.10.7 answer `FAIL:flatness` at any level, and
+sixteen regression cases cover it -- not a field observation. The panel's own
+line, measured on air, is still turned down, by the modulation tests instead,
+as are keyed noise with a carrier in it, TETRA-wide noise with a carrier in it
+and a keyed bare carrier at 14-32 dB.
+
+**What is kept as evidence.** `~/.local/state/rfeye/evidence/` holds the raw
+IQ of every uplink capture that hits the rails (`*_overload.iq8`, at most one
+per 10 s, twelve kept) and of every capture in which something at least 15 dB
+strong was turned down (`*_reject.iq8`, one per channel per hour, four kept),
+and `hits.log` names the file. `scripts/analyse-capture.py` reads them. A hit
+that had a carrier line in it says `line`. The lesson of this section is the
+reason they exist: a result row is not the samples.
+
+What 1 and 2 add up to, as the share of the time any one uplink channel is
+being listened to: about 2% during that minute (22% of the time on the air,
+three quarters of it on the uplink, a tenth of the band at a time), against
+**9.4% measured** on the same unit in ECO an hour later, six carriers locked
+-- `power.log` writes it every minute as `hear=`. Max power allows the radio
+about twice the share ECO does. It is still one dongle that hears a third of
+the band at a time; a Blu Eye hears all of it all of the time.
 
 ### The unit was jamming itself (0.10.6)
 
@@ -593,6 +629,12 @@ next cannot start before this cycle's analysis is done; inside a pause the
 radio has announced (`quiet_until`); or when the radio is not scanning at all.
 Failing those it waits for the next capture to end, at most
 `ui_quiet_capture_wait_s` (1.5 s).
+
+That still left the radio free to start a capture under a frame, and a touch
+free to send one into a capture. Since 0.10.9 the two take turns in both
+directions, and the reason turned out to be sharper than noise: the SPI
+clock's 23rd harmonic is a line at 383.333 MHz. See "Beside a police car"
+above.
 
 What software cannot fix is the 2.5 dB the processor itself adds, and the
 proximity that makes all of this possible. The cure for both is distance: the
@@ -1467,7 +1509,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.10.8 uses a **TMB12A03 active buzzer**:
+RF Eye 0.10.9 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1616,7 +1658,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.10.8**.
+`VERSION` and `rfeye/config.py` identify this release as **0.10.9**.
 
 Build the OTA package with:
 

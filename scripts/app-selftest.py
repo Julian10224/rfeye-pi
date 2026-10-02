@@ -810,7 +810,70 @@ def _check_quiet_display(a):
         a.ui_touch_at = time.monotonic()
         waited = toggled_frame()
         assert len(flips) == 9 and waited < 0.12, waited
+
+        # All of the above is the path for a backend that cannot be asked.
+        # The real one can, since 0.10.9, and then the two take turns in both
+        # directions: the frame waits for the capture, and the radio waits
+        # for the frame -- which is on the wire for 147 ms after the app has
+        # handed it over, with its SPI clock's 23rd harmonic at 383.333 MHz.
+        import types as _types
+        be = a.backend
+        be.air = _th.Lock(); be.panel_until = 0.0; be.panel_wants = False
+        be.running = True
+        if not hasattr(be, "cfg"):
+            be.cfg = a.cfg
+        be.claim_panel = _types.MethodType(_REAL_BACKEND.claim_panel, be)
+        be._begin_capture = _types.MethodType(_REAL_BACKEND._begin_capture, be)
+        a.ui_touch_at = 0.0
+        a.cfg["ui_quiet_capture_wait_s"] = 1.5
+        idle.clear()
+        _th.Timer(0.20, idle.set).start()
+        waited = toggled_frame()
+        assert len(flips) == 10 and 0.15 <= waited < 0.65, waited
+        held = be.panel_until - time.monotonic()
+        assert 0.2 < held <= 0.36, ("the air is held for the frame", held)
+        t0 = time.monotonic(); be._begin_capture(); took = time.monotonic() - t0
+        assert 0.15 <= took < 0.6, ("the radio waits for the frame to be gone", took)
+        assert not idle.is_set(), "and only then is it capturing"
+        # The frame that wants out while a capture runs gets the next gap,
+        # not the one after: the radio does not start again while it waits.
+        started = []
+
+        def radio():
+            time.sleep(0.15)
+            idle.set()                       # this capture is over...
+            be._begin_capture()              # ...and the next one wants to start
+            started.append(time.monotonic())
+        th = _th.Thread(target=radio); th.start()
+        waited = toggled_frame()
+        shown = time.monotonic()
+        th.join(2.0)
+        assert len(flips) == 11 and 0.1 <= waited < 0.5, waited
+        assert started and started[0] - shown >= 0.25, (
+            "the next capture began under the frame", started[0] - shown)
+        idle.set()
+        # A finger on the glass waits as well -- but for one capture at most.
+        be.panel_until = 0.0
+        a.cfg["ui_quiet_touch_wait_s"] = 0.3
+        idle.clear(); a.ui_touch_at = time.monotonic()
+        _th.Timer(0.10, idle.set).start()
+        waited = toggled_frame()
+        assert len(flips) == 12 and 0.05 <= waited < 0.28, waited
+        idle.clear(); a.ui_touch_at = time.monotonic()
+        waited = toggled_frame()
+        assert len(flips) == 13 and 0.25 <= waited < 0.7, (
+            "a radio that never finishes cannot freeze the screen", waited)
+        # And a panel that keeps asking cannot stop the radio for ever.
+        be.cfg["ui_quiet_radio_wait_s"] = 0.2
+        be.panel_until = time.monotonic() + 5.0
+        t0 = time.monotonic(); be._begin_capture(); took = time.monotonic() - t0
+        assert 0.15 <= took < 0.6, took
     finally:
+        for name in ("claim_panel", "_begin_capture", "air", "panel_until", "panel_wants"):
+            if name in getattr(a.backend, "__dict__", {}):
+                delattr(a.backend, name)
+        a.cfg.pop("ui_quiet_touch_wait_s", None)
+        a.cfg.pop("ui_quiet_radio_wait_s", None)
         appmod.pygame.display.flip = real_flip
         a.page, a.cfg["muted"], a.running = keep[0], keep[1], keep[3]
         if keep[2] is None:

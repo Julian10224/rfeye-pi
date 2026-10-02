@@ -386,6 +386,16 @@ DEFAULTS = {
     # ui_refresh_s repaints regardless, so a lost frame cannot stay lost.
     "ui_quiet_capture": True,
     "ui_quiet_capture_wait_s": 1.5,
+    # Since 0.10.9 the radio waits for the frame as well. A frame is on the
+    # wire for about 147 ms after the app hands it over, and its SPI clock
+    # (16.667 MHz, measured) has its 23rd harmonic at 383.333 MHz, in the
+    # uplink band: the air is held for ui_quiet_panel_hold_s
+    # per frame that changed, a touch waits at most ui_quiet_touch_wait_s (one
+    # capture) for it, and the radio never waits longer than
+    # ui_quiet_radio_wait_s on the panel.
+    "ui_quiet_panel_hold_s": 0.35,
+    "ui_quiet_touch_wait_s": 0.7,
+    "ui_quiet_radio_wait_s": 1.0,
     "ui_refresh_s": 30.0,
     "power_notice_timeout_s": 30.0,
     "low_power_scan_pause_s": 1.5,
@@ -431,7 +441,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.8",
+    "app_version": "0.10.9",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

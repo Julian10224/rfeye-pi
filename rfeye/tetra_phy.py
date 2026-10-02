@@ -919,21 +919,21 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
             # A carrier line in the passband is not held against an uplink.
             #
             # Flatness is there so that a spur is not taken for a carrier, and
-            # until 0.10.8 it ended the analysis on the spot. On 2 October a
-            # unit stood beside a police car and measured, in a capture that
-            # had hit the ADC rails for exactly five slots:
+            # until 0.10.8 it ended the analysis on the spot. A terminal
+            # linearises its transmitter on an unmodulated carrier before it
+            # sends (EN 300 392-2, the linearisation burst), and the peak hold
+            # keeps that carrier's bin beside the modulated burst's spectrum:
+            # simulated with 3 ms of carrier ahead of one slot, 0.10.7
+            # answered FAIL:flatness at any level.
             #
-            #     383.3375 MHz  17.2 dB  bw 21.1 kHz  edge 12.6 dB
-            #                   centre -15 Hz  flatness 28.8 dB  FAIL:flatness
-            #
-            # -- the width, the edges and the raster of a TETRA carrier to
-            # 15 Hz, with one line standing 29 dB out of it. It was no spur of
-            # the receiver: the same channel was flat noise forty seconds
-            # later and at home. It is what a terminal does: it linearises its
-            # transmitter on an unmodulated carrier before it sends, and the
-            # peak hold keeps that carrier's bin beside the modulated burst's
-            # spectrum. Reproduced with a 3 ms carrier ahead of one slot, the
-            # same verdict comes back, at any level.
+            # That is a simulation, not a field result. 0.10.8 said a row
+            # recorded beside a police car -- 383.3375 MHz, 17 dB, 21 kHz
+            # wide, flatness 28.8 -- was such a terminal. It was not: it was
+            # the unit's own panel, whose SPI clock has a harmonic at
+            # 383.333 MHz (see SDRBackend.claim_panel). The change is kept
+            # because the reasoning below holds either way, and because that
+            # very line, measured on air since, is still turned down -- by
+            # four_phase, rate_selectivity and symbol_rate instead.
             #
             # The line alone proves nothing either way, so it no longer
             # decides: the samples go on to the waveform tests, which are what

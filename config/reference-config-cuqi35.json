@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.10.8",
+  "app_version": "0.10.9",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -113,6 +113,9 @@
   "low_power_ui_fps": 8,
   "ui_quiet_capture": true,
   "ui_quiet_capture_wait_s": 1.5,
+  "ui_quiet_panel_hold_s": 0.35,
+  "ui_quiet_touch_wait_s": 0.7,
+  "ui_quiet_radio_wait_s": 1.0,
   "ui_refresh_s": 30.0,
   "low_power_scan_pause_s": 1.5,
   "site_rescan_s": 120.0,
