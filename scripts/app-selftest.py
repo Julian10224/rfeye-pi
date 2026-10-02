@@ -729,6 +729,67 @@ def _check_alert_sound(a):
         (a.cfg["muted"],a.ready_chime_done,a.last_beep,a.last_provisional_beep)=keep
 
 
+def _check_quiet_display(a):
+    """The panel is only written when the picture changed, between captures.
+
+    Its SPI bus is wideband noise in the receiver's band for the 137 ms a
+    frame takes: measured, +4.7 dB and a quarter of the captures saturated
+    while it refreshed. Until 0.10.6 a frame went down it three to eight
+    times a second whether or not anything had changed.
+    """
+    import threading as _th
+    flips = []
+    real_flip = appmod.pygame.display.flip
+    appmod.pygame.display.flip = lambda: flips.append(time.monotonic())
+    keep = (a.page, a.cfg.get("muted"), a.cfg.get("ui_quiet_capture_wait_s"), a.running)
+    had_idle = hasattr(a.backend, "capture_idle")
+    try:
+        # An app that is shutting down does not wait for anything; this one
+        # may have been stopped by the frame-guard test before it.
+        a.running = True
+        a.page = "main"; a._shown_sig = None; a._shown_at = 0.0; a.ui_touch_at = 0.0
+        a.ui_wake.clear()
+        a._frame()
+        assert len(flips) == 1, flips
+        a._frame(); a._frame()
+        assert len(flips) == 1, "an unchanged frame must not go to the panel"
+        assert a.frames_skipped >= 2
+        a.cfg["muted"] = not a.cfg.get("muted", False)
+        a._frame()
+        assert len(flips) == 2, "a changed frame must"
+        a._shown_at = time.monotonic() - 100.0
+        a._frame()
+        assert len(flips) == 3, "and a stale panel is repainted regardless"
+
+        # A changed frame waits for the radio to finish its capture...
+        idle = _th.Event()
+        a.backend.capture_idle = idle
+        _th.Timer(0.20, idle.set).start()
+        a.cfg["muted"] = not a.cfg["muted"]
+        t0 = time.monotonic(); a._frame(); waited = time.monotonic() - t0
+        assert len(flips) == 4 and 0.15 <= waited < 0.65, waited
+        # ...but never for long, even if the radio never says it is done...
+        idle.clear(); a.cfg["ui_quiet_capture_wait_s"] = 0.2
+        a.cfg["muted"] = not a.cfg["muted"]
+        t0 = time.monotonic(); a._frame(); waited = time.monotonic() - t0
+        assert len(flips) == 5 and 0.15 <= waited < 0.65, waited
+        # ...and not at all with a finger on the glass.
+        a.ui_touch_at = time.monotonic()
+        a.cfg["muted"] = not a.cfg["muted"]
+        t0 = time.monotonic(); a._frame(); waited = time.monotonic() - t0
+        assert len(flips) == 6 and waited < 0.12, waited
+    finally:
+        appmod.pygame.display.flip = real_flip
+        a.page, a.cfg["muted"], a.running = keep[0], keep[1], keep[3]
+        if keep[2] is None:
+            a.cfg.pop("ui_quiet_capture_wait_s", None)
+        else:
+            a.cfg["ui_quiet_capture_wait_s"] = keep[2]
+        if not had_idle and hasattr(a.backend, "capture_idle"):
+            del a.backend.capture_idle
+        a.ui_touch_at = 0.0; a._shown_sig = None
+
+
 def main():
     _check_config_migration()
 
@@ -965,6 +1026,7 @@ def main():
     a.running=False
     a.backend.stop()
     _check_alert_sound(a)
+    _check_quiet_display(a)
     a.buzzer.close()
     pygame.quit()
     _tmp.cleanup()

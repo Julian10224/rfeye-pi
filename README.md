@@ -1,6 +1,6 @@
-# RF Eye 0.10.5 for Raspberry Pi
+# RF Eye 0.10.6 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.10.5 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.10.6 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.10.5 appliance path:
+The installer reproduces the working 0.10.6 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.10.5
+## User interface in 0.10.6
 
 The compact profile contains:
 
@@ -460,6 +460,43 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### The unit was jamming itself (0.10.6)
+
+The overload guard of 0.10.4, once it started saying what it saw, reported a
+capture clipping about every half minute on one unit -- but only while the app
+was running. The same scan loop run headless on the same unit, with the panel
+showing a still picture, never clipped once in 110 s. So the three cases were
+measured directly, capturing 380-385 MHz at a fixed gain:
+
+| | noise level | saturated captures |
+| --- | --- | --- |
+| panel still, processor idle | 9.3 | 0 of 31 |
+| processor busy, panel still | 12.4 (+2.5 dB) | 0 of 27 |
+| panel refreshing | 16.0 (+4.7 dB) | **8 of 31** |
+| panel still again | 9.0 | 0 of 18 |
+
+The MHS35 panel hangs on an 18 MHz SPI bus a few centimetres from the antenna.
+A full frame is 307 kB, 137 ms of wideband noise in the band the receiver is
+listening to, and until this release the UI loop sent one three to eight
+times a second whether or not a single pixel had changed -- fastest during an
+alert, when the bars are up, which is exactly when the next burst matters.
+
+Two rules now (`App._show`):
+
+- **A frame identical to the one on the panel is not sent.** At idle that is
+  every frame, so the SPI bus is silent. A repaint every `ui_refresh_s` (30 s)
+  makes sure a lost frame cannot stay lost.
+- **A frame that did change waits for the radio.** The backend raises
+  `capture_idle` whenever it is not reading; the UI holds a changed frame for
+  at most `ui_quiet_capture_wait_s` (0.7 s) so the burst lands in the gap
+  between two captures instead of inside one. A finger on the glass skips the
+  wait, and the sound is decided before any of it, so an alert is never held
+  back.
+
+What software cannot fix is the 2.5 dB the processor itself adds, and the
+proximity that makes all of this possible. The cure for both is distance: the
+antenna on a lead, away from the Pi and the panel.
 
 ### Two units, one deaf: what was measured, and what 0.10.4 changes
 
@@ -1330,7 +1367,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.10.5 uses a **TMB12A03 active buzzer**:
+RF Eye 0.10.6 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1479,7 +1516,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.10.5**.
+`VERSION` and `rfeye/config.py` identify this release as **0.10.6**.
 
 Build the OTA package with:
 

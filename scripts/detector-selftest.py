@@ -1397,6 +1397,37 @@ def check_gain_and_hits_log():
             b.cfg["gain"] = "auto"
             check("a unit told to use auto still can", b._gain_for("up") == "auto")
             b.cfg["gain"] = 37.2
+
+            # The panel's SPI traffic is noise in the band, so the UI holds a
+            # frame back until the radio is between captures. For that the
+            # radio has to say when it is reading -- and let go if a read dies.
+            class _FakeSdr:
+                rate_changed = False; lib_path = ""; lib_knows_model = True
+                def __init__(self): self.seen = []; self.fail = False
+                def configure(self, *a): pass
+                def tune(self, c): pass
+                def reset(self): pass
+                def close(self): pass
+                def read_complex(self, count, abort=None):
+                    self.seen.append(b.capture_idle.is_set())
+                    if self.fail:
+                        raise RuntimeError("usb gone")
+                    return (rng.standard_normal(count)
+                            + 1j * rng.standard_normal(count)).astype(np.complex64)
+            fake = _FakeSdr()
+            b.sdr = fake
+            check("the radio is idle until it reads", b.capture_idle.is_set())
+            SDRBackend._samples(b, 381_000_000.0, 2_016_000, 8192)
+            check("it says so while it is reading",
+                  len(fake.seen) == 2 and not any(fake.seen), str(fake.seen))
+            check("  and when it has finished", b.capture_idle.is_set())
+            fake.fail = True
+            try:
+                SDRBackend._samples(b, 381_000_000.0, 2_016_000, 8192)
+            except RuntimeError:
+                pass
+            check("  and lets go when a read fails", b.capture_idle.is_set())
+            b.sdr = None
         finally:
             b.running = False
 

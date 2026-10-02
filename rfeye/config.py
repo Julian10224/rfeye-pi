@@ -353,6 +353,14 @@ DEFAULTS = {
     "low_power_mode": True,
     "low_power_ui_fps": 8,
     "low_power_idle_ui_fps": 3,
+    # The panel's SPI bus is wideband noise in the band while a frame goes
+    # down it (measured: +4.7 dB, and a quarter of the captures saturated).
+    # A frame is sent only when it differs from the one on the panel, and
+    # then between two captures, waiting at most this long for the radio.
+    # ui_refresh_s repaints regardless, so a lost frame cannot stay lost.
+    "ui_quiet_capture": True,
+    "ui_quiet_capture_wait_s": 0.7,
+    "ui_refresh_s": 30.0,
     "power_notice_timeout_s": 30.0,
     "low_power_scan_pause_s": 1.5,
     # Once a network is locked the uplink watch is the job, and a TETRA slot
@@ -397,7 +405,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.5",
+    "app_version": "0.10.6",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

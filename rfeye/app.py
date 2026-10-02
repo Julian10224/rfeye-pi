@@ -6,6 +6,7 @@ import time
 import threading
 import subprocess
 import traceback
+import zlib
 from pathlib import Path
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
@@ -154,6 +155,13 @@ class App:
         self._dim_alpha = -1
         self.last_beep = 0.0
         self.last_provisional_beep = 0.0
+        # What is on the panel now, when it was put there, and when a finger
+        # last touched it; see _show.
+        self._shown_sig = None
+        self._shown_at = 0.0
+        self.ui_touch_at = 0.0
+        self.frames_shown = 0
+        self.frames_skipped = 0
         # One supply warning per session, shown over whatever page is up and
         # dismissed with a button. Scanning runs in its own thread and is not
         # touched by any of this -- the notice reports the problem, it does
@@ -390,8 +398,60 @@ class App:
             self._draw_power_notice()
 
         self._apply_brightness()
+        self._show()
+
+    def _show(self):
+        """Put the frame on the panel -- only if it changed, and between captures.
+
+        The panel hangs on an 18 MHz SPI bus a few centimetres from the
+        antenna, and every frame sent down it is 137 ms of wideband noise in
+        the band the receiver is listening to. Measured on a reference unit,
+        capturing 380-385 MHz at a fixed gain:
+
+            panel still                 noise 9.3   saturated captures  0 of 31
+            processor busy, panel still noise 12.4                      0 of 27
+            panel refreshing            noise 16.0                      8 of 31
+
+        So a refreshing panel raised the noise by 4.7 dB and wiped out a
+        quarter of the captures outright -- and until 0.10.6 the loop pushed
+        a frame three to eight times a second whether or not a single pixel
+        had changed, and fastest of all during an alert, which is exactly
+        when the next burst matters.
+
+        Two rules follow. A frame identical to the one on the panel is not
+        sent at all, which at idle is every frame. And a frame that did
+        change waits for the radio to finish the capture it is in, up to
+        ``ui_quiet_capture_wait_s``, so the SPI burst lands in the gap between
+        two captures instead of inside one. A finger on the glass skips the
+        wait: someone using the menu is owed an answer at once, and is not
+        watching the bars. The sound is decided before any of this, so an
+        alert is never held back by it.
+        """
+        now = time.monotonic()
+        try:
+            sig = zlib.crc32(self.ui.get_buffer().raw)
+        except Exception:
+            sig = None                       # cannot tell: show it
+        stale = now - self._shown_at >= max(
+            1.0, float(self.cfg.get("ui_refresh_s", 30.0)))
+        if sig is not None and sig == self._shown_sig and not stale:
+            self.frames_skipped += 1
+            return False
+        touching = now - float(getattr(self, "ui_touch_at", 0.0)) < 1.5
+        if bool(self.cfg.get("ui_quiet_capture", True)) and not touching:
+            idle = getattr(self.backend, "capture_idle", None)
+            if idle is not None:
+                end = now + max(0.0, float(
+                    self.cfg.get("ui_quiet_capture_wait_s", 0.7)))
+                while (not idle.is_set() and time.monotonic() < end
+                       and not self.ui_wake.is_set() and self.running):
+                    idle.wait(0.02)
         self._present_rotated()
         pygame.display.flip()
+        self._shown_sig = sig
+        self._shown_at = time.monotonic()
+        self.frames_shown += 1
+        return True
 
     # -- fault reporting ---------------------------------------------------
     def _note_frame_error(self, exc):
@@ -467,6 +527,12 @@ class App:
     def _events(self):
         for e in pygame.event.get():
             self.ui_wake_at = time.monotonic()
+            if e.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
+                          pygame.MOUSEMOTION, pygame.KEYDOWN,
+                          getattr(pygame, "FINGERDOWN", -1),
+                          getattr(pygame, "FINGERUP", -1),
+                          getattr(pygame, "FINGERMOTION", -1)):
+                self.ui_touch_at = self.ui_wake_at
             if e.type == pygame.QUIT:
                 self.running = False
             elif e.type == pygame.KEYDOWN:

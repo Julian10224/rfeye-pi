@@ -88,6 +88,7 @@ def install(app):
                                 # Cut the idle wait short so a slower idle
                                 # frame rate never costs response time.
                                 app.ui_wake_at=now
+                                app.ui_touch_at=now
                                 wake=getattr(app,'ui_wake',None)
                                 if wake is not None: wake.set()
                             pending=False; dirty=False

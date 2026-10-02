@@ -319,6 +319,10 @@ class SDRBackend:
         # What the ADC is seeing, per band, and how much gain overload has
         # taken off; see _watch_overload.
         self.adc_rms=0.; self.adc_clip=0.
+        # Set while the radio is not reading. The panel's SPI traffic is
+        # noise in the band, so the UI waits on this before sending a frame;
+        # see App._show.
+        self.capture_idle=threading.Event(); self.capture_idle.set()
         self._gain_backoff={'up':0.,'down':0.}; self._gain_clean_since={'up':0.,'down':0.}
         self._alert_logged='CLEAR'
         self.detector_state='SEARCHING'
@@ -902,9 +906,13 @@ class SDRBackend:
             # plain retune. Reading unsettled samples into a 0.9 s dwell would
             # corrupt the very timing measurements the dwell exists for.
             settle=0.030 if self.sdr.rate_changed else 0.006
-            self.sdr.read_complex(max(4096,int(sr*settle)),
-                                  abort=lambda: not self.running)
-            iq=self.sdr.read_complex(int(count),abort=lambda: not self.running)
+            self.capture_idle.clear()
+            try:
+                self.sdr.read_complex(max(4096,int(sr*settle)),
+                                      abort=lambda: not self.running)
+                iq=self.sdr.read_complex(int(count),abort=lambda: not self.running)
+            finally:
+                self.capture_idle.set()
             self._check_capture(iq)
             return iq
         except Exception as e:
