@@ -315,7 +315,7 @@ class SDRBackend:
         self._power_bits=None; self._power_pending=[]
         self._uv_alarm={}; self._uv_alarm_last=None; self._uv_alarm_at=0.
         self._uv_events=0; self._uv_counted_at=0.; self._soc_temp=None
-        self._power_log_at=0.; self._sdr_lost_at=0.
+        self._power_log_at=0.; self._power_hb_at=0.; self._sdr_lost_at=0.
         # What the ADC is seeing, per band, and how much gain overload has
         # taken off; see _watch_overload.
         self.adc_rms=0.; self.adc_clip=0.
@@ -725,7 +725,12 @@ class SDRBackend:
             self._power_log(now,'STEP UP %d%% -> %d%% after %d min without trouble'%(
                 round(before*100),round(self.ladder.cap*100),
                 round(self.ladder._step_s()/60.0)))
-        if now-self._power_log_at>=max(10.0,float(self.cfg.get('power_log_heartbeat_s',60.0))):
+        # On its own clock. It used to share one with every other line, so a
+        # unit that logged a dip every twenty seconds never wrote a minute
+        # line at all -- and that is the unit whose duty, gain and
+        # temperature are most worth having.
+        if now-self._power_hb_at>=max(10.0,float(self.cfg.get('power_log_heartbeat_s',60.0))):
+            self._power_hb_at=now
             temp=('%.1fC'%self._soc_temp) if self._soc_temp is not None else '?'
             self._power_log(now,'HB cap=%d%% limit=%d%% duty=%d%% pipe=%s temp=%s '
                             'uv=%d sdr=%s bus=%s next=%ds gain=%s clip=%.1f%% %s'%(
@@ -735,7 +740,7 @@ class SDRBackend:
                 str(self.status).replace(' ','_'),
                 'yes' if self._sdr_present() else 'no',
                 round(self.ladder.next_step_s(now)),
-                str(self._gain_for('up')),100.0*self.adc_clip,
+                self._gain_text(),100.0*self.adc_clip,
                 self._power_detail or '-'))
 
     def _power_log(self,now,text):
@@ -918,6 +923,13 @@ class SDRBackend:
             return 'auto'
         return max(0.0,float(gain)-float(self._gain_backoff.get(band,0.)))
 
+    def _gain_text(self):
+        """Both halves' gain for the log, e.g. ``37.2`` or ``33.2/37.2``."""
+        up,down=self._gain_for('up'),self._gain_for('down')
+        if up=='auto':
+            return 'auto'
+        return ('%.1f'%up) if up==down else ('%.1f/%.1f'%(up,down))
+
     def _watch_overload(self,iq,band,now=None):
         """Keep the 8-bit ADC out of clipping, per band.
 
@@ -948,6 +960,7 @@ class SDRBackend:
         limit=float(self.cfg.get('gain_clip_limit',0.05))
         step=max(0.5,float(self.cfg.get('gain_backoff_step_db',4.0)))
         most=max(0.0,float(self.cfg.get('gain_backoff_max_db',24.0)))
+        before=self._gain_for(band)
         if self.adc_clip>limit:
             self._gain_backoff[band]=min(most,self._gain_backoff[band]+step)
             self._gain_clean_since[band]=now
@@ -957,6 +970,14 @@ class SDRBackend:
             elif now-self._gain_clean_since[band]>=float(self.cfg.get('gain_recover_s',20.0)):
                 self._gain_backoff[band]=max(0.0,self._gain_backoff[band]-step)
                 self._gain_clean_since[band]=now
+        after=self._gain_for(band)
+        if after!=before:
+            # Said out loud, with what was seen: the first unit to run this
+            # stepped down twice in its first minute and there was no way to
+            # tell afterwards whether that was a transmitter close by or a
+            # mistake.
+            self._power_log(now,'GAIN %slink %.1f -> %.1f dB (clip %.1f%%, rms %.0f)'%(
+                band,before,after,100.0*self.adc_clip,self.adc_rms))
 
     def _timed_samples(self,centre,sr,count):
         """``_samples`` with the time the dongle spent streaming accounted for.
@@ -1773,7 +1794,15 @@ class SDRBackend:
             # or the dongle -- could give, so the ladder steps down. Only the
             # moment it is lost counts: every failed open while it is gone is
             # the same incident, not a reason to keep stepping.
-            if self.last_good_scan and self.scan_failures==0 and not self._sdr_lost_at:
+            # ...and a capture that was cut short because the app is being
+            # stopped is not a failure of anything. Up to 0.10.4 every clean
+            # stop -- an update installing, the service restarting -- was
+            # written down as "SDR lost: capture aborted" and cost the ladder a
+            # step and a strike, so a unit that was only ever restarted worked
+            # its way down to the floor and stayed there for hours.
+            stopping=(not self.running) or ('capture aborted' in low)
+            if (self.last_good_scan and self.scan_failures==0
+                    and not self._sdr_lost_at and not stopping):
                 t=time.time()
                 gone=not self._sdr_present()
                 why='SDR lost: '+('off the USB bus' if gone else err[:60])

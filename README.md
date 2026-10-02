@@ -1,6 +1,6 @@
-# RF Eye 0.10.4 for Raspberry Pi
+# RF Eye 0.10.5 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.10.4 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.10.5 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.10.4 appliance path:
+The installer reproduces the working 0.10.5 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.10.4
+## User interface in 0.10.5
 
 The compact profile contains:
 
@@ -557,6 +557,27 @@ false hit; the one thing above the noise was a steady carrier on 383.3375 MHz,
 correctly refused as not four-phase. No terminal transmitted nearby in those
 minutes, which is what `hits.log` is for: the test that is still owed is a
 drive past a real vehicle, and now the unit will say what it heard.
+
+**What the first hour on the units showed (0.10.5).** Two things, both read
+straight out of `power.log`:
+
+```text
+DROP SDR lost: librtlsdr read failed: capture aborted at 22% -> cap 22%
+HB ... gain=29.200000000000003 clip=0.0%
+```
+
+The first is a clean stop -- an update installing, the service restarting --
+being counted as a lost dongle since 0.10.2. Each one cost the power ladder a
+step and a strike, so a unit that was only ever restarted worked its way to
+the 22% floor and was held there for hours. A capture cut short because the
+app is stopping is no longer an incident. The second is the overload guard
+having stepped the uplink down twice in its first minute, with nothing left to
+say why. It now writes each step with what it saw
+(`GAIN uplink 37.2 -> 33.2 dB (clip 7.4%, rms 96)`), and the minute line shows
+both halves' gain properly. That minute line also has its own clock now: it
+shared one with every other line, so the unit that logged a supply dip every
+twenty seconds never wrote one -- exactly the unit whose duty, gain and
+temperature were most worth having.
 
 ### What a Blu Eye does, and how close one dongle gets (0.10.3)
 
@@ -1309,7 +1330,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.10.4 uses a **TMB12A03 active buzzer**:
+RF Eye 0.10.5 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1458,7 +1479,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.10.4**.
+`VERSION` and `rfeye/config.py` identify this release as **0.10.5**.
 
 Build the OTA package with:
 

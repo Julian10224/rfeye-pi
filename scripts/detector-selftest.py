@@ -1261,6 +1261,20 @@ def check_power_ladder():
             check("a working dongle scans", ok and bool(b.last_good_scan))
             good = b._samples
 
+            # A clean stop cuts the capture short. Up to 0.10.4 that was
+            # written down as "SDR lost: capture aborted" and cost a step and
+            # a strike, so every update and every restart pushed the unit
+            # towards the floor.
+            def aborted(centre, sr, count):
+                raise RuntimeError("librtlsdr read failed: capture aborted")
+            b._samples = aborted
+            b._scan_cycle()
+            check("a capture cut short by a clean stop is not a lost dongle",
+                  b.ladder.incidents == 0 and not b._sdr_lost_at and b.ladder.cap == 1.0,
+                  "incidents %d cap %.2f" % (b.ladder.incidents, b.ladder.cap))
+            b._samples = good
+            b._scan_cycle()
+
             def gone(centre, sr, count):
                 raise RuntimeError("librtlsdr read failed: boom")
             b._samples = gone
@@ -1358,6 +1372,9 @@ def check_gain_and_hits_log():
                   abs(b._gain_for("down") - 33.2) < 1e-9, "%.1f dB, clip %.0f%%" % (
                       b._gain_for("down"), 100 * b.adc_clip))
             check("  and leaves the other band alone", b._gain_for("up") == 37.2)
+            plog = open(os.path.join(d, "power.log")).read()
+            check("  and says so, with what it saw",
+                  "GAIN downlink 37.2 -> 33.2 dB (clip " in plog, plog[-120:])
             for k in range(12):
                 b._watch_overload(noise(110.0), "down", t + 1 + k)
             check("  down to a floor, not to nothing",

@@ -383,6 +383,11 @@ jobs:
           grep -q 'def _log_hits' rfeye/sdr_backend.py
           grep -q "with_name('hits.log')" rfeye/sdr_backend.py
           grep -q 'def check_gain_and_hits_log' scripts/detector-selftest.py
+          # 0.10.5: a clean stop is not a lost dongle (it cost the ladder a
+          # step and a strike on every restart), and a gain step says why.
+          grep -q "stopping=(not self.running) or ('capture aborted' in low)" rfeye/sdr_backend.py
+          grep -q "'GAIN %slink %.1f -> %.1f dB" rfeye/sdr_backend.py
+          grep -q 'def _gain_text' rfeye/sdr_backend.py
           grep -q 'need_trusted if f in trust else need_unknown' rfeye/tetra_detector.py
           grep -q 'def confirmed_channels' rfeye/tetra_detector.py
           ! grep -q 'if self.sites.locked(now):$' rfeye/sdr_backend.py
