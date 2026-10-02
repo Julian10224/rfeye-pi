@@ -94,12 +94,19 @@ DEFAULTS = {
     # plain noise at 250 kS/s, 1.008 MS/s, 2.016 MS/s and in rtl_power -- they
     # are 391.1875 and 391.7625, 1150 kHz higher. So units locked phantom
     # carriers and watched their non-existent uplinks. At 2.016 MS/s the
-    # dongle's own filter is in use, and one dwell spans +-600 kHz: a whole
+    # dongle's own filter is in use, and one dwell spans most of a megahertz: a whole
     # site's uplinks in one or two dwells instead of one channel per dwell.
     "phy_sample_rate": 2_016_000,
     "phy_dwell_log2": 20,
     "phy_decimation": 56,
-    "phy_max_offset_hz": 600_000.0,
+    # How far from the tuner centre a channel is still measured. It was
+    # +-600 kHz, which takes five dwells to cross 380-385 MHz; the capture
+    # itself is 2.016 MHz wide, so two fifths of every one was thrown away.
+    # Measured on a reference unit's own recording (noise, 382.46 MHz, gain
+    # 37.2): flat within 0.8 dB out to +-775 kHz, -1.6 dB at -825, -0.2 at
+    # +825, -2.6 at -875, -0.8 at +875 -- the tuner's IF filter, which takes
+    # signal and noise down together. At +-850 kHz the band is three dwells.
+    "phy_max_offset_hz": 850_000.0,
     "phy_timing_phases": 8,
     # Cheap level check before the waveform test. A swept band is nearly
     # all empty -- 205 of 208 channels on the field unit were flat noise --
@@ -188,16 +195,24 @@ DEFAULTS = {
     # The power ladder (0.10.2): the most the radio may stream, learned from
     # the supply. A fresh under-voltage or a dongle that drops off the bus
     # takes it straight to power_ladder_drop_to; every power_ladder_step_s of
-    # trouble-free listening climbs one step; and the step it failed on stays
-    # off limits for power_ladder_retry_s, doubling each time it fails there
-    # again, so it settles below what this supply can carry instead of
-    # climbing back into the same failure. 1.0 means "whatever the mode
-    # allows". Remembered across reboots in power-state.json.
+    # trouble-free listening climbs one step. 1.0 means "whatever the mode
+    # allows".
+    #
+    # Since 0.10.8 only a lost dongle is held against the step it happened
+    # on: that step stays off limits for power_ladder_retry_s, doubling once,
+    # and that is what power-state.json carries across a reboot. An
+    # under-voltage never takes the radio below the safe step, and
+    # power_ladder_floor_dips of them at that step inside
+    # power_ladder_floor_window_s mean the rail sags whatever the radio does
+    # -- so the radio is no longer limited for it. See power.py for the unit
+    # that spent a drive at 22% because of the old rules.
     "power_ladder": [0.22, 0.30, 0.35, 0.40, 0.45, 0.55, 0.70, 0.85, 1.0],
     "power_ladder_drop_to": 0.30,
     "power_ladder_step_s": 300.0,
     "power_ladder_retry_s": 1800.0,
     "power_ladder_debounce_s": 30.0,
+    "power_ladder_floor_dips": 3,
+    "power_ladder_floor_window_s": 1800.0,
     "power_ladder_persist": True,
     # The kernel's under-voltage alarm is a file read, so it is watched every
     # couple of seconds; power.log gets a line per event and per minute.
@@ -212,7 +227,7 @@ DEFAULTS = {
     # up to 48 channels; at 12 a recording kept a quarter of what the
     # receiver saw, which is how a drive past a vehicle could be analysed
     # afterwards and answer nothing.
-    "snapshot_phy_rows": 64,
+    "snapshot_phy_rows": 96,
     # One cycle in this many goes to the 390-395 MHz band pass once a
     # site is locked. It was one in two, measured at 9 of 22 cycles on a
     # unit that already held six carriers -- half the receiver's time
@@ -271,7 +286,13 @@ DEFAULTS = {
     # The same window for a channel with no locked partner. Wider,
     # because something that reports in every few seconds is silent on
     # most looks and its two hits land several visits apart.
-    "uplink_confirm_visits_unknown": 10,
+    #
+    # Thirty since 0.10.8, for the same length of time. A visit used to be
+    # one sweep dwell in ten; with every dwell measuring its whole window a
+    # channel is visited about one dwell in three, so ten visits had shrunk
+    # from a minute and a half to half a minute. uplink_state_max_age_s is
+    # still what bounds it in seconds.
+    "uplink_confirm_visits_unknown": 30,
     "uplink_state_max_age_s": 90.0,
     "uplink_alert_hold_s": 12.0,
     # After a verified uplink hit, how many dwells go straight back to that
@@ -334,6 +355,11 @@ DEFAULTS = {
     "allow_cli_sdr_fallback": False,
     "keep_last_iq": True,
     "rf_record_iq": True,
+    # Captures kept as raw IQ next to hits.log without anyone asking: an
+    # uplink capture that hits the rails, and one holding something at least
+    # evidence_strong_db strong that the waveform test turned down. 2 MB each.
+    "evidence_keep": 12,
+    "evidence_strong_db": 15.0,
     "mobile_band_start_hz": 380_000_000,
     "mobile_band_end_hz": 385_000_000,
     "site_band_start_hz": 390_000_000,
@@ -405,7 +431,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.7",
+    "app_version": "0.10.8",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -510,11 +536,16 @@ def load_config():
     # ui_level_* was saved verbatim until now -- it was not counted as a
     # detector constant -- so without the reset the bar would keep its old
     # 8 dB bottom and a 5-8 dB detection would show nothing and stay silent.
-    if int(saved.get("detector_profile_version", 0) or 0) < 12:
+    #
+    # Profile 13 (0.10.8) widens the dwell from +-600 to +-850 kHz. The
+    # reference config writes phy_max_offset_hz out, so every installed unit
+    # holds the old width explicitly and would keep crossing the band in
+    # five dwells instead of three.
+    if int(saved.get("detector_profile_version", 0) or 0) < 13:
         for key in list(DEFAULTS):
             if is_detector_key(key):
                 cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 12
+    cfg["detector_profile_version"] = 13
     for obsolete in (
         # pre-v7 leftovers
         "threshold_db", "threshold_min_db", "threshold_max_db",

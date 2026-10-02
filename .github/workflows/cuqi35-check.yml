@@ -402,6 +402,21 @@ jobs:
           grep -q 'def _wait_for_gap' rfeye/app.py
           grep -q 'self.capture_ended_at=time.monotonic()' rfeye/sdr_backend.py
           grep -q 'self.quiet_until = time.monotonic() + pause' rfeye/sdr_backend.py
+          # 0.10.8: beside a police car and silent. A dwell measures all it
+          # captured; an under-voltage is not a lost dongle; a terminal's
+          # linearisation carrier is not a spur; and what the detector could
+          # not explain is kept as raw IQ.
+          grep -q 'for f in self._uplink_band_channels():' rfeye/sdr_backend.py
+          grep -q 'what=self.ladder.dip(now,why,in_use=in_use)' rfeye/sdr_backend.py
+          grep -q 'def dip' rfeye/power.py
+          grep -q 'STATE_SCHEMA = 2' rfeye/power.py
+          grep -q 'MAX_HOLD_S = 3600.0' rfeye/power.py
+          grep -q 'def carrier_boxes' rfeye/tetra_phy.py
+          grep -q "checks.pop('flatness')" rfeye/tetra_phy.py
+          grep -q 'def _keep_evidence' rfeye/sdr_backend.py
+          grep -q 'hear=%.1f%%' rfeye/sdr_backend.py
+          grep -q 'def check_whole_window' scripts/detector-selftest.py
+          grep -q 'after %.0f ms of carrier' scripts/tetra-phy-selftest.py
           test "$(grep -c 'pygame.display.flip()' rfeye/app.py)" -le 3
           grep -q 'need_trusted if f in trust else need_unknown' rfeye/tetra_detector.py
           grep -q 'def confirmed_channels' rfeye/tetra_detector.py
@@ -546,7 +561,7 @@ jobs:
           assert c['display_profile']=='cuqi35'
           assert (c['ui_width'],c['ui_height'])==(320,480)
           assert (c['physical_width'],c['physical_height'])==(480,320)
-          assert c['detector_profile_version']==12
+          assert c['detector_profile_version']==13
           # Detector profile v8 acceptance limits. A fresh install must ship
           # the calibrated values from scripts/tetra-phy-selftest.py, so a
           # silent drift here is a build failure rather than a field surprise.
@@ -554,7 +569,10 @@ jobs:
           assert c['phy_dwell_log2']==20
           assert c['phy_decimation']==56
           assert c['phy_timing_phases']==8
-          assert c['phy_max_offset_hz']==600000.0
+          assert c['phy_max_offset_hz']==850000.0
+          assert 6*c['phy_max_offset_hz'] >= c['mobile_band_end_hz']-c['mobile_band_start_hz'], \
+              'the uplink band in three dwells'
+          assert c['phy_max_offset_hz'] <= 0.45*c['phy_sample_rate'], 'inside the capture'
           assert c['phy_min_snr_db']==8.0
           assert c['phy_min_occupied_bw_hz']==14000.0
           assert c['phy_max_occupied_bw_hz']==30000.0
@@ -604,7 +622,7 @@ jobs:
           assert c['ui_refresh_s'] >= 10.0
           assert c['scan_pipeline'] is True
           assert c['site_pass_share']==5
-          assert c['snapshot_phy_rows']==64
+          assert c['snapshot_phy_rows']==96
           assert 0.2 <= c['sdr_duty_eco'] <= 0.8, 'ECO limits the radio'
           assert c['sdr_duty_max_power'] > c['sdr_duty_eco']
           assert c['uplink_follow_s']==7.0
@@ -612,7 +630,7 @@ jobs:
           assert c['phy_screen_margin_db']==2.0
           assert c['track_hot_s']==60.0
           assert c['ui_level_strong_db'] > c['ui_level_weak_db']
-          assert c['uplink_confirm_visits_unknown']==10
+          assert c['uplink_confirm_visits_unknown']==30
           assert c['uplink_track_run']==2
           assert c['sdr_duty_idle'] < c['sdr_duty_eco']
           assert 'sdr_duty_recover' not in c, 'replaced by the power ladder'
@@ -621,6 +639,8 @@ jobs:
           assert min(c['power_ladder']) < c['power_ladder_drop_to'], 'room below the safe step'
           assert c['power_ladder_step_s']==300.0
           assert c['power_ladder_retry_s'] >= c['power_ladder_step_s']
+          assert c['power_ladder_floor_dips'] >= 2, 'one dip is not a pattern'
+          assert c['power_ladder_floor_window_s'] >= c['power_ladder_step_s']
           assert c['power_ladder_drop_to'] < c['scan_pipeline_min_duty'] <= c['sdr_duty_idle'],               'serial at the recovery steps, the pipeline at the normal share'
           assert c['phy_uplink_sensitive_percentile']==100.0
           assert c['tetra_channel_spacing_hz']==25000.0

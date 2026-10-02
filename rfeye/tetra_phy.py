@@ -470,6 +470,28 @@ def power_envelope(bb, rate, hop_s=1.0 / 1125.0):
     return p.astype(np.float64), float(rate) / box
 
 
+def carrier_boxes(bb, n_boxes):
+    """Which envelope boxes hold a bare carrier rather than modulation.
+
+    One number per box: how nearly every sample-to-sample phase step in it is
+    the same step. An unmodulated carrier turns by a constant angle and scores
+    1; pi/4-DQPSK at two samples a symbol changes its step every other sample
+    and scores about a half; noise scores next to nothing. Used to keep a
+    terminal's linearisation carrier out of the symbol-rate test -- see the
+    flatness note in ``analyse``.
+    """
+    bb = np.asarray(bb)
+    n_boxes = int(n_boxes)
+    box = len(bb) // max(1, n_boxes)
+    if n_boxes < 1 or box < 4:
+        return np.zeros(max(n_boxes, 1), dtype=bool)
+    x = bb[:n_boxes * box].reshape(n_boxes, box)
+    d = x[:, 1:] * np.conj(x[:, :-1])
+    coherent = np.abs(np.sum(d, axis=1))
+    total = np.sum(np.abs(d), axis=1) + 1e-20
+    return (coherent / total) > 0.9
+
+
 def _line_power(x, t, f0, harmonics):
     """Summed spectral line power of ``x`` at ``f0`` and its harmonics."""
     total = 0.0
@@ -724,6 +746,10 @@ class PhyResult:
     # measured, so bandwidth, edge rejection and flatness were not required
     # and the waveform tests alone decided. See analyse().
     shape_waived: bool = False
+    # True when a carrier line stood in an otherwise TETRA-shaped uplink
+    # channel and the flatness test was therefore not held against it. See
+    # analyse().
+    carrier_line: bool = False
     checks: dict = field(default_factory=dict)
 
     def as_dict(self):
@@ -889,6 +915,35 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
             for key in ('bandwidth', 'boundary', 'flatness'):
                 checks.pop(key, None)
             res.shape_waived = True
+        elif not checks['flatness']:
+            # A carrier line in the passband is not held against an uplink.
+            #
+            # Flatness is there so that a spur is not taken for a carrier, and
+            # until 0.10.8 it ended the analysis on the spot. On 2 October a
+            # unit stood beside a police car and measured, in a capture that
+            # had hit the ADC rails for exactly five slots:
+            #
+            #     383.3375 MHz  17.2 dB  bw 21.1 kHz  edge 12.6 dB
+            #                   centre -15 Hz  flatness 28.8 dB  FAIL:flatness
+            #
+            # -- the width, the edges and the raster of a TETRA carrier to
+            # 15 Hz, with one line standing 29 dB out of it. It was no spur of
+            # the receiver: the same channel was flat noise forty seconds
+            # later and at home. It is what a terminal does: it linearises its
+            # transmitter on an unmodulated carrier before it sends, and the
+            # peak hold keeps that carrier's bin beside the modulated burst's
+            # spectrum. Reproduced with a 3 ms carrier ahead of one slot, the
+            # same verdict comes back, at any level.
+            #
+            # The line alone proves nothing either way, so it no longer
+            # decides: the samples go on to the waveform tests, which are what
+            # tell 18 kbaud pi/4-DQPSK from everything else. A bare spur never
+            # gets here -- its level against the noise is a median, and reads
+            # about 1 dB -- and a carrier with something that is not TETRA
+            # around it still has the bandwidth, the edges and the modulation
+            # to answer for.
+            checks.pop('flatness')
+            res.carrier_line = True
     if not full and not all(checks.values()):
         return _finish(res, checks, lim)
 
@@ -950,6 +1005,18 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
     # An uplink is silent for most of the dwell, so the symbol-rate test must
     # only look at the samples where the mobile is actually keyed up.
     mask = timing['on_mask'] if (role == 'UPLINK' and res.duty < 0.9) else None
+    if mask is not None and sensitive:
+        # A terminal's linearisation carrier is keyed up, so it is in the mask
+        # -- and a bare carrier scores the same at every symbol rate, which is
+        # exactly what the selectivity test rejects. With 7 ms of it ahead of
+        # a single slot the slot's own modulation was outvoted. The boxes that
+        # hold a carrier, and one either side for the ramp between the two,
+        # are left out; what remains has to be TETRA by itself, and a channel
+        # that holds nothing but a carrier is left with nothing.
+        cw = carrier_boxes(bb, len(mask))
+        if np.any(cw):
+            cw = cw | np.roll(cw, 1) | np.roll(cw, -1)
+            mask = np.asarray(mask, dtype=bool) & ~cw
     mod = modulation_scores(bb, rate, mask=mask, timing_phases=timing_phases,
                             min_m=0.0 if full else lim['phy_min_dqpsk_m'])
     res.dqpsk_m = mod['dqpsk_m']

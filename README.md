@@ -1,6 +1,6 @@
-# RF Eye 0.10.7 for Raspberry Pi
+# RF Eye 0.10.8 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.10.7 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.10.8 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.10.7 appliance path:
+The installer reproduces the working 0.10.8 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.10.7
+## User interface in 0.10.8
 
 The compact profile contains:
 
@@ -221,7 +221,7 @@ to pass the full waveform test.
 **The survey is no longer the only path.** Every channel it can score goes to
 the front of the queue, best-looking first, followed by *every* remaining
 raster channel in the band. The survey can reorder the work but cannot hide
-any of it. Since 0.9.26 one dwell spans +-600 kHz, so a full pass of the band
+any of it. Since 0.9.26 one dwell spans +-600 kHz (+-850 since 0.10.8), so a full pass of the band
 is a handful of dwells rather than fifty, and it keeps running after the first
 lock: a TETRA site operates several carriers and a handset can be on any of
 them, so stopping at the first would leave real uplink channels unwatched.
@@ -414,7 +414,7 @@ traffic carrier does not slowly unlock itself.
 each verified downlink names exactly one uplink channel where handsets on that
 site transmit: a verified downlink at 391.2375 MHz means handsets transmit at
 381.2375 MHz. The uplink search is therefore a short watch list rather than a
-blind sweep of 200 channels, and one dwell covers +-600 kHz of it at once.
+blind sweep of 200 channels, and one dwell covers +-600 kHz of it at once (+-850 since 0.10.8).
 
 An alert means: a handset physically near this receiver is transmitting on a
 carrier belonging to a base station this device independently verified.
@@ -439,7 +439,7 @@ because every one of them kept its handset keyed for the whole test.
 
 0.9.26 changes both halves:
 
-- **A wide dwell.** One 2.016 MS/s capture covers +-600 kHz, so a site's
+- **A wide dwell.** One 2.016 MS/s capture covers +-600 kHz (+-850 since 0.10.8), so a site's
   uplink channels take one or two dwells instead of one each. A quiet wide
   dwell costs about 0.67 s to read and 0.47 s to analyse on the Pi 3 B+ at the
   900 MHz ceiling -- the same as one narrow channel used to.
@@ -460,6 +460,97 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### Beside a police car, and silent (0.10.8)
+
+Field report, 2 October: the unit stood next to a police car for a minute with
+a recording running, and did nothing. What it had on disk afterwards:
+
+```text
+hits.log     does not exist: nothing verified since 0.10.4
+power.log    HB cap=22% limit=22% duty=22% ... uv=1   every minute of the drive
+             GAIN uplink 37.2 -> 33.2 dB (clip 13.7%, rms 68)        19:05:00
+recording    383.3375 MHz  snr 17.2  bw 21094  boundary 12.6  centre -15 Hz
+             flatness 28.8                               FAIL:flatness
+```
+
+Each of those lines is a separate fault, and any one of them was enough.
+
+**1. The radio was listening a fifth of the time, for no reason.** The rail
+was fine for the whole drive -- the under-voltage count never moved in 26
+minutes -- but the power ladder of 0.10.2 was on its lowest step and was going
+to stay there: 219 incidents and 43 strikes counted against 22%, the step off
+limits for four hours at a time, all of it carried across every reboot. Those
+strikes were under-voltage alarms on a weak supply, and they had arrived at
+22% exactly as they had at 40%. Limiting the radio was not what that rail
+needed, so it bought nothing. See the power ladder section for the new rules.
+
+**2. A dwell measured a fraction of what it captured.** One capture is
+2.016 MHz wide: 80 channels. The eleven uplink dwells in the recording
+measured 3, 4, 4, 5, 5, 5, 25, 25, 48, 48 and 48 of them -- a dwell aimed at
+the partners of the locked site measured the partners, a sweep dwell what was
+left of its queue -- twenty on average, a tenth of the band. The level screen
+costs the same for one channel as for all of them, so the rest was thrown
+away for nothing. Since 0.10.8 every uplink dwell measures every channel in
+its window, whichever lane aimed it, and the window is +-850 kHz instead of
++-600: 68 channels, the band in three dwells instead of five. The width is
+measured, on the unit's own recording of an empty band at gain 37.2:
+
+| offset from the tuner centre | noise level |
+| --- | --- |
+| up to +-775 kHz | within 0.8 dB |
+| -825 / +825 kHz | -1.6 / -0.2 dB |
+| -875 / +875 kHz | -2.6 / -0.8 dB |
+| -975 / +975 kHz | -4.1 / -2.9 dB |
+
+That roll-off is the tuner's IF filter and takes signal and noise down
+together, so the level against the noise holds out to the edge.
+
+**3. The one transmission it did measure, it turned down.** The uplink capture
+at 19:05:00 had 13.7% of its samples on the ADC rails. Five TETRA slots are
+70.8 ms, 13.6% of a 520 ms capture, and a full-scale signal for that long
+reads rms 67: a transmitter a few metres away, keyed for five slots. In the
+same capture channel 383.3375 MHz held the width, the edges and the raster of
+a TETRA carrier to 15 Hz -- with one line standing 29 dB out of it, which the
+flatness test calls a spur. It was not the receiver's: measured afterwards at
+four tuner centres, this unit's own lines are a 576 kHz comb (382.464,
+383.040, 383.616 MHz ...) and 384.000, and 383.3375 is flat noise. It is what a
+terminal does: it linearises its transmitter on an unmodulated carrier before
+it sends, and the peak-held spectrum keeps that carrier's bin beside the
+burst's. The simulator had never keyed a carrier, so no test had ever said
+so. Reproduced with 3 ms of carrier ahead of one slot, 0.10.7 answers
+`FAIL:flatness` at any level.
+
+Since 0.10.8 a failed flatness no longer ends the analysis of an uplink. The
+samples go on to the waveform tests, with the boxes that hold a bare carrier
+(`carrier_boxes`: every phase step the same) left out of the symbol-rate
+measurement -- 7 ms of carrier otherwise outvotes the slot behind it. A bare
+spur never gets that far, because its level against the noise is a median and
+reads about 1 dB; keyed noise with a carrier in it, TETRA-wide noise with a
+carrier in it and a keyed bare carrier are all in the regression suite at
+14-32 dB, with every earlier decoy, and none passes.
+
+How much of this was the car cannot be proved: the capture was gone a second
+later. **So the next one is kept.** `~/.local/state/rfeye/evidence/` holds the
+raw IQ of every uplink capture that hits the rails (`*_overload.iq8`, at most
+one per 10 s, twelve kept) and of every capture in which something at least
+15 dB strong was turned down (`*_reject.iq8`, one per channel per hour, four
+kept), and `hits.log` says so:
+
+```text
+2026-10-02T19:05:00 OVERLOAD uplink clip 13.7% rms 68 at 382.9125 MHz -> evidence/...
+2026-10-02T19:05:00 REJECTED CH 3733 383.3375 MHz 17.2 dB FAIL:... -> evidence/...
+```
+
+`scripts/analyse-capture.py` reads them. A hit that had a carrier line in it
+says `line`.
+
+What it adds up to, as the share of the time any one uplink channel is being
+listened to: about 2% during that minute (22% of the time on the air, three
+quarters of it on the uplink, a tenth of the band at a time), against roughly
+12% in ECO and 27% in Max power now. `power.log` writes the measured figure
+every minute as `hear=`. It is still one dongle that hears a third of the band
+at a time; a Blu Eye hears all of it all of the time.
 
 ### The unit was jamming itself (0.10.6)
 
@@ -1277,7 +1368,7 @@ a physical distance.
 The verification dwell runs at 2.016 MS/s: exactly 112x the 18000 baud symbol
 rate, so decimating by 56 gives a 36 kS/s channel baseband with an exact
 symbol clock and no resampling. Each dwell is 2^20 samples (0.520 s, about 9
-TDMA frames) and covers channels up to 600 kHz either side of the tuner. The
+TDMA frames) and covers channels up to 850 kHz either side of the tuner. The
 tuner is deliberately offset from every channel under test so the RTL-SDR DC
 spike never lands on a carrier being measured. Until 0.9.26 the dwell ran at
 288 kS/s; see *Phantom carriers at 288 kS/s* for why it no longer does.
@@ -1376,7 +1467,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.10.7 uses a **TMB12A03 active buzzer**:
+RF Eye 0.10.8 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1525,7 +1616,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.10.7**.
+`VERSION` and `rfeye/config.py` identify this release as **0.10.8**.
 
 Build the OTA package with:
 
@@ -1797,8 +1888,8 @@ the app started is counted once per boot, however often the app restarts.
 | a fresh under-voltage, or a working dongle that stops | straight to 30% |
 | the radio fails again at or below 30% | 22% |
 | five minutes of listening without trouble | one step up: 30, 35, 40, 45, 55, 70, 85%, no cap |
-| the step it failed on | off limits for 30 min; 60 if it fails there again, doubling to 4 h |
-| a reboot | starts where it left off (`power-state.json`) |
+| the step it failed on | off limits for 30 min; 60 if it fails there again, doubling to 4 h (one hour at most since 0.10.8) |
+| a reboot | starts where it left off (`power-state.json`; since 0.10.8 only what a lost dongle taught) |
 
 A dip and the dongle dropping a second later are one incident, not two steps.
 Only time the dongle is actually working counts as calm: a receiver that is
@@ -1808,6 +1899,26 @@ and Max power apply underneath, so a fully recovered ECO unit is not held back
 at all. Remembering the step that failed is what turns
 `normal -> SDR drops -> reset -> normal -> SDR drops` into a unit that settles
 just below what its supply can carry and tries the next step up rarely.
+
+**0.10.8: an under-voltage is not a lost dongle.** The table above made no
+difference between the two, and the first unit to spend a week on a weak
+supply showed what that costs: 219 incidents, 43 strikes on the lowest step,
+a four-hour hold renewed at every dip and carried through every reboot -- and
+dips arriving at 22% exactly as they had at 40%. It drove for half an hour on
+a rail that was fine, at 22%. So:
+
+| | |
+| --- | --- |
+| a working dongle that stops | as above: 30%, the step it was on off limits for 30 min, 60 if it fails there again -- and no longer than that |
+| an under-voltage while the radio runs | to 30%, never below; nothing is put off limits and nothing is carried into the next boot |
+| three of them inside half an hour with the radio already at 30% or less | `SUPPLY WEAK`: the rail sags whatever the radio does, so the radio is given back its share and under-voltage no longer limits it this boot |
+| an under-voltage from before the radio started | written down (`NOTE`), costs nothing -- a car dips at every start |
+| a dongle lost within 30 s of a dip | one incident, held against the step the radio was on before the dip |
+| a `power-state.json` from 0.10.2-0.10.7 | not believed |
+
+The debug page's Supply row then reads `WEAK SUPPLY x12`: a supply to fix,
+not a state that will pass. The dongle going is still what the ladder is
+there for, and still handled as before.
 
 **No overlap at the recovery steps.** Below 40% (`scan_pipeline_min_duty`)
 capture and analysis take turns again. One thread already streams about a

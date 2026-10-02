@@ -104,8 +104,13 @@ def _check_config_migration():
             # Every unit up to 0.10.3 has "auto" saved, at the current
             # profile, so no profile reset will ever replace it. It filled
             # the ADC with noise alone; the measured fixed gain takes over.
-            ("0.10.3 unit on auto gain", {"detector_profile_version": 12,
+            ("0.10.3 unit on auto gain", {"detector_profile_version": 13,
                                           "gain": "auto"}),
+            # Every install up to 0.10.7 has the +-600 kHz dwell written out
+            # by the reference config; profile 13 has to replace it or the
+            # band stays five dwells wide.
+            ("0.10.7 reference install", {"detector_profile_version": 12,
+                                          "phy_max_offset_hz": 600000.0}),
         ):
             with tempfile.TemporaryDirectory() as d:
                 path = os.path.join(d, "config.json")
@@ -138,7 +143,7 @@ def _check_config_migration():
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "config.json")
             with open(path, "w") as fh:
-                json.dump({"detector_profile_version": 12, "gain": 28.0}, fh)
+                json.dump({"detector_profile_version": 13, "gain": 28.0}, fh)
             os.environ["RFEYE_CONFIG"] = path
             importlib.reload(cfgmod)
             assert cfgmod.load_config()["gain"] == 28.0

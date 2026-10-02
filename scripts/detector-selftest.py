@@ -1174,8 +1174,8 @@ def check_power_ladder():
         check("trouble drops straight to the safe step, not one at a time",
               lad.event(t, "SDR lost", in_use=0.45) and abs(lad.cap - 0.30) < 1e-9,
               "%.2f" % lad.cap)
-        check("the dip and the dongle going a second later are one incident",
-              not lad.event(t + 1.0, "under-voltage", in_use=0.30)
+        check("the dongle going and the rail dipping a second later are one incident",
+              lad.dip(t + 1.0, "under-voltage", in_use=0.30) == "same"
               and abs(lad.cap - 0.30) < 1e-9 and lad.incidents == 1)
 
         def calm(t0, seconds, live=True):
@@ -1210,26 +1210,83 @@ def check_power_ladder():
         t4 = calm(t4, 302.0)
         check("holding the old ceiling for a full step clears it",
               lad.cap > 0.45 and lad.ceiling == 0.0, "%.2f" % lad.cap)
-        again = PowerLadder(cfg, path, boot_id="boot-b")
-        check("where it stands survives a reboot", abs(again.cap - lad.cap) < 1e-9,
-              "%.2f vs %.2f" % (again.cap, lad.cap))
+        again = PowerLadder(cfg, path, boot_id="boot-a")
+        check("an app restart in the same boot carries on where it was",
+              abs(again.cap - lad.cap) < 1e-9, "%.2f vs %.2f" % (again.cap, lad.cap))
+
+        # What a lost dongle taught outlives a reboot; what a dip did does not.
+        lost = os.path.join(d, "lost.json")
+        y = PowerLadder(cfg, lost, boot_id="boot-l")
+        y.event(t, "SDR lost", in_use=0.45)
+        y2 = PowerLadder(cfg, lost, boot_id="boot-m")
+        check("after a reboot the step the dongle was lost on is still off limits",
+              abs(y2.cap - 0.40) < 1e-9 and y2.blocked(t + 60.0),
+              "%.2f" % y2.cap)
 
         boot = os.path.join(d, "boot.json")
         x = PowerLadder(cfg, boot, boot_id="boot-c")
-        check("a dip at power-up drops to the safe step",
-              x.boot_dip(t) and abs(x.cap - 0.30) < 1e-9 and x.ceiling == 0.0)
+        check("a dip before the radio started is noted and costs nothing",
+              x.boot_dip(t) and x.cap == 1.0 and x.ceiling == 0.0, "%.2f" % x.cap)
         x2 = PowerLadder(cfg, boot, boot_id="boot-c")
-        check("an app restart in the same boot does not take it twice",
-              not x2.boot_dip(t + 100.0) and x2.incidents == 1)
-        check("a dip the radio cannot have caused never goes under the safe step",
-              x2.event(t + 200.0, "under-voltage before start")
-              and abs(x2.cap - 0.30) < 1e-9)
+        check("an app restart in the same boot does not note it twice",
+              not x2.boot_dip(t + 100.0))
+
+        # An under-voltage is a hint, not a failure of the step it came on.
+        dips = os.path.join(d, "dips.json")
+        z = PowerLadder(cfg, dips, boot_id="boot-d")
+        check("a dip takes the radio to the safe step",
+              z.dip(t, "rail low", in_use=0.45) == "drop" and abs(z.cap - 0.30) < 1e-9)
+        check("and puts no step off limits",
+              z.ceiling == 0.0 and z.strikes == 0 and not z.blocked(t + 1.0))
+        check("a dip at the safe step takes nothing more",
+              z.dip(t + 40.0, "rail low", in_use=0.30) == "floor"
+              and abs(z.cap - 0.30) < 1e-9, "%.2f" % z.cap)
+        z3 = PowerLadder(cfg, dips, boot_id="boot-e")
+        check("and none of it is carried into the next boot", z3.cap == 1.0,
+              "%.2f" % z3.cap)
+        z.dip(t + 80.0, "rail low", in_use=0.30)
+        check("three dips at the safe step: limiting the radio is not the cure",
+              z.dip(t + 120.0, "rail low", in_use=0.30) == "weak" and z.weak_supply
+              and z.cap == 1.0, "%.2f" % z.cap)
+        check("after which a dip is no longer acted on",
+              z.dip(t + 200.0, "rail low", in_use=0.45) == "ignored" and z.cap == 1.0)
+        check("but a lost dongle still is",
+              z.event(t + 300.0, "SDR lost", in_use=0.45)
+              and abs(z.cap - 0.30) < 1e-9 and abs(z.ceiling - 0.45) < 1e-9)
+
+        w = PowerLadder(cfg, None, boot_id="boot-w")
+        w.dip(t, "rail low", in_use=0.45)
+        check("a dongle lost a moment after a dip fails the step it was on before it",
+              w.event(t + 2.0, "SDR lost", in_use=0.30)
+              and abs(w.ceiling - 0.45) < 1e-9 and abs(w.cap - 0.30) < 1e-9
+              and w.incidents == 1,
+              "ceiling %.2f cap %.2f incidents %d" % (w.ceiling, w.cap, w.incidents))
+
+        f = PowerLadder(cfg, None, boot_id="boot-f")
+        f.event(t, "SDR lost", in_use=0.45)
         check("the radio failing at the safe step goes one further down",
-              x2.event(t + 300.0, "SDR lost", in_use=0.30)
-              and abs(x2.cap - 0.22) < 1e-9, "%.2f" % x2.cap)
+              f.event(t + 300.0, "SDR lost", in_use=0.30)
+              and abs(f.cap - 0.22) < 1e-9, "%.2f" % f.cap)
         check("and not below the floor",
-              x2.event(t + 400.0, "SDR lost", in_use=0.22)
-              and abs(x2.cap - 0.22) < 1e-9)
+              f.event(t + 400.0, "SDR lost", in_use=0.22)
+              and abs(f.cap - 0.22) < 1e-9)
+        for k in range(8):
+            f.event(t + 500.0 + 100.0 * k, "SDR lost", in_use=0.22)
+        check("no step stays off limits for more than an hour",
+              f.ceiling_until - f.last_drop <= 3600.0 + 1.0,
+              "%.0f s after %d strikes" % (f.ceiling_until - f.last_drop, f.strikes))
+
+        # The state file of a unit that ran 0.10.2-0.10.7 on a weak supply.
+        old = os.path.join(d, "old.json")
+        with open(old, "w") as fh:
+            fh.write('{"cap": 0.22, "ceiling": 0.22, "ceiling_until": %f, '
+                     '"strikes": 43, "last_failed": 0.22, "last_drop": %f, '
+                     '"incidents": 219, "last_why": "rail below 4.63 V"}'
+                     % (t + 14400.0, t))
+        o = PowerLadder(cfg, old, boot_id="boot-o")
+        check("strikes earned from under-voltage under the old rules are not believed",
+              o.cap == 1.0 and o.strikes == 0 and o.ceiling == 0.0,
+              "cap %.2f strikes %d" % (o.cap, o.strikes))
 
         # The backend: the limit, the pipeline, and the dongle going.
         air = FakeAir(downlinks=[391_187_500.0])
@@ -1315,23 +1372,37 @@ def check_power_ladder():
             b2._power_tick(t0)
             check("the supply is read before the dongle has had a chance to fail",
                   b2._power_bits == 0x50000)
-            check("a dip before the radio started drops to the safe step, once",
-                  abs(b2.ladder.cap - 0.30) < 1e-9 and b2.ladder.ceiling == 0.0,
+            check("a dip before the radio started costs the radio nothing",
+                  b2.ladder.cap == 1.0 and b2.ladder.ceiling == 0.0,
                   "%.2f" % b2.ladder.cap)
             b2._power_checked = 0.0
             b2._power_tick(t0 + 40.0)
-            check("the since-boot bit alone does not keep taking it down",
-                  b2.ladder.incidents == 1, "%d" % b2.ladder.incidents)
+            check("and the since-boot bit alone never does",
+                  b2.ladder.incidents == 0 and b2.ladder.cap == 1.0,
+                  "%d" % b2.ladder.incidents)
             word[0] = "0x50005"
             b2._power_checked = 0.0
             b2._power_tick(t0 + 80.0)
-            check("the rail low right now is a new incident",
-                  b2.ladder.incidents == 2 and b2.ladder.cap < 0.30,
+            check("the rail low right now takes the radio to the safe step",
+                  b2.ladder.incidents == 1 and abs(b2.ladder.cap - 0.30) < 1e-9,
                   "%d, %.2f" % (b2.ladder.incidents, b2.ladder.cap))
             text = supply_text(b2.snapshot())
-            check("and the debug page says so", "LOW NOW" in text and "cap 22%" in text,
+            check("and the debug page says so", "LOW NOW" in text and "cap 30%" in text,
                   text)
             check("in 22 characters", len(text) <= 22, "%d" % len(text))
+            for k in (120.0, 160.0, 200.0):
+                b2._power_checked = 0.0
+                b2._power_tick(t0 + k)
+            check("a rail that stays low at the safe step stops costing the radio",
+                  b2.ladder.weak_supply and b2.ladder.cap == 1.0
+                  and b2.snapshot()["power_weak"], "%.2f" % b2.ladder.cap)
+            text = supply_text(b2.snapshot())
+            check("and the page says what is wrong instead",
+                  text.startswith("WEAK SUPPLY") and len(text) <= 22, text)
+            log = open(os.path.join(d, "b", "power.log")).read()
+            check("power.log tells the three apart",
+                  "NOTE under-voltage before start" in log and "DROP rail below" in log
+                  and "SUPPLY WEAK" in log, log[-300:])
         finally:
             sb.shutil.which, sb.subprocess.run = real_which, real_run
             b2.running = False
@@ -1459,6 +1530,121 @@ def check_gain_and_hits_log():
             check("  with the alert rising", "ALERT CLEAR -> " in log)
             check("  and clearing again", "-> CLEAR" in log.split("ALERT CLEAR -> ", 1)[-1],
                   log[-200:])
+        finally:
+            b.running = False
+
+
+def check_whole_window():
+    """An uplink dwell measures everything its capture holds.
+
+    Recorded on 2 October beside a police car: one uplink capture with 13.7%
+    of its samples on the rails -- five slots of a transmitter at full scale,
+    to within a tenth of a percent -- and no alert. The dwell had been aimed
+    at what was left of the sweep queue and measured 25 channels; the capture
+    held 80. Partner dwells were worse: four or five channels each.
+    """
+    print(chr(10) + "32. an uplink dwell measures its whole window")
+    import sdr_backend as sb
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "a"))
+        quiet = FakeAir()
+        b = make_backend(quiet, os.path.join(d, "a", "sites.json"))
+        try:
+            band = b._uplink_band_channels()
+            seen = {int(round(f)): 0 for f in band}
+            sizes = []
+            dwells = 12
+            for _ in range(dwells):
+                b._watch_work(time.time())
+                sizes.append(len(b.dwell_channels))
+                for f in b.dwell_channels:
+                    seen[int(round(f))] += 1
+            check("every dwell measures the width of its capture",
+                  min(sizes) >= 60, "channels per dwell %s" % sizes)
+            check("so the band is crossed in three or four dwells, not five or six",
+                  b._uplink_sweeps >= 3, "%d sweeps in %d dwells" % (b._uplink_sweeps, dwells))
+            least = min(seen.values())
+            check("and no channel is left behind",
+                  least >= dwells // 5,
+                  "least-heard channel in %d of %d dwells" % (least, dwells))
+        finally:
+            b.running = False
+
+        # A transmitter the dwell was not aimed at, near the edge of its window.
+        os.makedirs(os.path.join(d, "b"))
+        target = 381_212_500.0
+        other = target + 800_000.0
+        air = FakeAir(uplinks=[other], snr_db=16.0)
+        b = make_backend(air, os.path.join(d, "b", "sites.json"))
+        try:
+            res = b._verify([target], "UPLINK")
+            hit = [r for r in res if abs(r.freq_hz - other) < 1.0]
+            check("a transmitter 800 kHz from where the dwell was aimed is measured",
+                  bool(hit), "%d channels measured" % len(res))
+            check("and recognised", bool(hit) and hit[0].ok,
+                  hit[0].reason if hit else "not measured")
+            air.uplinks = []
+            air.interferers = [(target + 825_000.0, "control_burst")]
+            res = b._verify([target], "UPLINK")
+            hit = [r for r in res if abs(r.freq_hz - (target + 825_000.0)) < 1.0]
+            check("as is one slot of it, at the very edge",
+                  bool(hit) and hit[0].ok, hit[0].reason if hit else "not measured")
+            ok = [r for r in res if r.ok]
+            check("on that channel and no other", len(ok) == 1,
+                  ", ".join("%.4f" % (r.freq_hz / 1e6) for r in ok))
+        finally:
+            b.running = False
+
+        # What the detector could not explain is kept, so the next time it
+        # can be.
+        os.makedirs(os.path.join(d, "c"))
+        b = make_backend(FakeAir(), os.path.join(d, "c", "sites.json"))
+        try:
+            rng = np.random.default_rng(5)
+            n = 1 << 16
+            iq = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 6.0)
+            iq[n // 2: n // 2 + n // 5] = 127.5 + 127.5j          # on the rails
+            iq = iq.astype(np.complex64)
+            now = time.time()
+            b._watch_overload(iq, "up", now, centre=382_900_000.0, sr=2_016_000)
+            ev = os.path.join(d, "c", "evidence")
+            files = sorted(os.listdir(ev)) if os.path.isdir(ev) else []
+            check("an uplink capture that hits the rails is kept as raw IQ",
+                  len([x for x in files if x.endswith("_overload.iq8")]) == 1, str(files))
+            raw = [x for x in files if x.endswith(".iq8")]
+            check("sample for sample",
+                  bool(raw) and os.path.getsize(os.path.join(ev, raw[0])) == 2 * n)
+            log = open(os.path.join(d, "c", "hits.log")).read()
+            check("and hits.log says so, with where it was listening",
+                  "OVERLOAD uplink" in log and "382.9000 MHz" in log
+                  and "evidence/" in log, log[-200:])
+            b._watch_overload(iq, "up", now + 2.0, centre=382_900_000.0, sr=2_016_000)
+            check("not every capture of the same transmission",
+                  len(os.listdir(ev)) == len(files), str(os.listdir(ev)))
+            b._watch_overload(iq, "down", now + 60.0, centre=392_900_000.0, sr=2_016_000)
+            check("and not the downlink, which is strong beside any mast",
+                  len(os.listdir(ev)) == len(files))
+            for k in range(20):
+                b._watch_overload(iq, "up", now + 100.0 + 11.0 * k,
+                                  centre=382_900_000.0, sr=2_016_000)
+            kept = [x for x in os.listdir(ev) if x.endswith(".iq8")]
+            check("the card cannot fill with them",
+                  len(kept) <= int(b.cfg.get("evidence_keep", 12)), "%d kept" % len(kept))
+        finally:
+            b.running = False
+
+        os.makedirs(os.path.join(d, "e"))
+        # Noise keyed like TETRA: strong, the right width, and not TETRA. (A
+        # bare carrier reads as no level at all, so a spur fills nothing.)
+        air = FakeAir(interferers=[(381_512_500.0, "gated_noise")], snr_db=24.0)
+        b = make_backend(air, os.path.join(d, "e", "sites.json"))
+        try:
+            b._verify([381_212_500.0], "UPLINK")
+            b._verify([381_212_500.0], "UPLINK")
+            log_path = os.path.join(d, "e", "hits.log")
+            log = open(log_path).read() if os.path.exists(log_path) else ""
+            check("something strong the waveform test turned down is kept too, once",
+                  log.count("REJECTED CH") == 1 and "381.5125 MHz" in log, log[-200:])
         finally:
             b.running = False
 
@@ -1656,6 +1842,7 @@ def main():
     check_priority_lanes()
     check_power_ladder()
     check_gain_and_hits_log()
+    check_whole_window()
 
     print()
     if FAILURES:

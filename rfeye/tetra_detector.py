@@ -246,11 +246,16 @@ class SiteRegistry:
         return [round(s['freq_hz'] - split) for s in self.locked(now)]
 
 
+# How far a channel under test must sit from the tuner centre, where the
+# RTL-SDR's DC spike is.
+DC_GUARD_HZ = 20_000.0
+
+
 def plan_dwell(freqs, sample_rate, max_offset_hz=100_000.0,
-               dc_guard_hz=20_000.0, spacing_hz=CHANNEL_SPACING_HZ):
+               dc_guard_hz=DC_GUARD_HZ, spacing_hz=CHANNEL_SPACING_HZ):
     """Choose a tuner centre covering as many of ``freqs`` as possible.
 
-    One dwell holds many 25 kHz channels -- +-600 kHz of them at 2.016 MS/s --
+    One dwell holds many 25 kHz channels -- +-850 kHz of them at 2.016 MS/s --
     so a group of nearby carriers is checked in a single capture.
 
     The RTL-SDR's DC spike sits exactly at the tuner centre, so no member may

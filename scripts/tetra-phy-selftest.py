@@ -219,7 +219,7 @@ def constants_sanity():
 
 
 def wide_dwell():
-    """The shipping dwell: 2.016 MS/s, decimated by 56, channels to 600 kHz out.
+    """The shipping dwell: 2.016 MS/s, decimated by 56, channels to 850 kHz out.
 
     Profile 10 moved verification off 288 kS/s because the RTL2832U hands back
     real carriers from 1.15 MHz away as if they were on the channel under test
@@ -231,9 +231,9 @@ def wide_dwell():
     dur = (1 << 20) / sr
     base_snr = 15.0
     positives_ = (
-        ("wide: uplink 15 dB at the window edge", "UPLINK", -587_500.0, 15.0),
+        ("wide: uplink 15 dB at the window edge", "UPLINK", -837_500.0, 15.0),
         ("wide: uplink 20 dB", "UPLINK", 137_500.0, 20.0),
-        ("wide: downlink 20 dB at the other edge", "DOWNLINK", 587_500.0, 20.0),
+        ("wide: downlink 20 dB at the other edge", "DOWNLINK", 837_500.0, 20.0),
     )
     comps = []
     for i, (_, role, off, snr) in enumerate(positives_):
@@ -435,6 +435,71 @@ def sensitive_uplink():
         if passed:
             FAILURES.append("sensitive: weak %s accepted as TETRA (%s)"
                             % (name, ", ".join(passed)))
+    # A terminal linearises its transmitter on a bare carrier before it sends
+    # (EN 300 392-2, the linearisation burst), and the peak hold keeps that
+    # carrier's bin next to the modulated burst's spectrum. Up to 0.10.7 the
+    # flatness test called that a spur and stopped: recorded beside a police
+    # car as 17 dB, 21.1 kHz wide, 15 Hz off the raster, "FAIL:flatness". The
+    # simulator had never keyed a carrier, so nothing here had ever said so.
+    def keyed(n_slots, carrier_ms, start, seed):
+        burst = sim.control_burst(dur, SR, seed=seed, n_slots=n_slots,
+                                  start_frac=start, freq_offset_hz=90_000.0)
+        n = len(burst)
+        t = np.arange(n, dtype=np.float64) / SR
+        a = int(start * n) - int((carrier_ms / 1000.0 + 0.002) * SR)
+        b = a + int(carrier_ms / 1000.0 * SR)
+        gate = np.zeros(n, dtype=np.float32)
+        gate[max(0, a):max(0, b)] = 1.0
+        carrier = gate * np.exp(2j * math.pi * 90_000.0 * t)
+        return (burst + carrier).astype(np.complex64)
+
+    for n_slots, carrier_ms, snr in ((1, 3.0, 25), (1, 7.0, 25), (1, 7.0, 16),
+                                     (3, 7.0, 20), (0.5, 3.0, 25)):
+        missed = []
+        for k in range(8):
+            start = 0.06 + k * 0.11
+            r = phy.analyse(cap(keyed(n_slots, carrier_ms, start, 1201 + k),
+                                snr, 1251 + k), 90_000.0, role="UPLINK",
+                            freq_hz=380_100_000.0, limits=sens, decim=56)
+            if not r.ok:
+                missed.append("%.2f:%s" % (start, r.reason))
+        ROWS.append(("sensitive: %s slots after %.0f ms of carrier, %d dB"
+                     % (n_slots, carrier_ms, snr), "UPLINK", True, r))
+        if missed:
+            FAILURES.append("sensitive: %s-slot burst after %.0f ms of carrier at "
+                            "%d dB missed %d of 8 positions (%s)"
+                            % (n_slots, carrier_ms, snr, len(missed), "; ".join(missed)))
+    # Which must not let in what flatness used to keep out. Everything below
+    # is strong, so the shape tests are asked, and none of it is TETRA: the
+    # same decoys as the weak set, and the two a waived flatness could most
+    # plausibly admit -- a carrier standing in TETRA-shaped noise, keyed and
+    # continuous.
+    def with_line(sig):
+        t = np.arange(len(sig), dtype=np.float64) / SR
+        return (sig + 0.7 * np.exp(2j * math.pi * 90_000.0 * t)).astype(np.complex64)
+
+    strong_decoys = weak_decoys + [
+        ("keyed noise with a carrier in it", lambda sd: with_line(sim.gated_noise(
+            dur, SR, 22_000.0, 0.0142, 0.0567, 90_000.0, sd))),
+        ("TETRA-wide noise with a carrier in it", lambda sd: with_line(sim.band_noise(
+            dur, SR, 20_000.0, 90_000.0, sd))),
+        ("a keyed bare carrier", lambda sd: keyed(0, 14.0, 0.4, sd)),
+    ]
+    for name, make in strong_decoys:
+        passed = []
+        for snr in (14, 18, 24, 32):
+            for k in range(2):
+                seed = 1301 + 13 * k + snr
+                r = phy.analyse(cap(make(seed), snr, seed + 5), 90_000.0,
+                                role="UPLINK", freq_hz=380_100_000.0,
+                                limits=sens, decim=56)
+                if r.ok:
+                    passed.append("%d dB" % snr)
+        ROWS.append(("sensitive strong: " + name, "UPLINK", False, r))
+        if passed:
+            FAILURES.append("sensitive: strong %s accepted as TETRA (%s)"
+                            % (name, ", ".join(passed)))
+
     weak = cap(sim.control_burst(dur, SR, seed=947, n_slots=1,
                                  freq_offset_hz=90_000.0), 9, 953)
     rs = phy.analyse(weak, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,

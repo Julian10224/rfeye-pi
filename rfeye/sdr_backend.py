@@ -42,14 +42,14 @@ false positives after the fact, and with a real waveform test they are not
 only unnecessary but harmful: each one could also suppress a genuine
 detection.
 """
-import math, os, shutil, subprocess, threading, time, ctypes, ctypes.util
+import json, math, os, shutil, subprocess, threading, time, ctypes, ctypes.util
 from pathlib import Path
 
 import numpy as np
 
 import tetra_phy
 from tetra_phy import Channelizer, PhyResult, clamp
-from tetra_detector import (SiteRegistry, UplinkAlarm, carrier_number, plan_dwell,
+from tetra_detector import (DC_GUARD_HZ, SiteRegistry, UplinkAlarm, carrier_number, plan_dwell,
                             raster_snap)
 from power import PowerLadder, read_soc_temp, read_uv_alarm
 
@@ -330,6 +330,13 @@ class SDRBackend:
         self.capture_ended_at=0.0
         self.quiet_until=0.0
         self._gain_backoff={'up':0.,'down':0.}; self._gain_clean_since={'up':0.,'down':0.}
+        # How much of the time an uplink channel is actually being listened
+        # to, averaged over the band: capture seconds times the share of the
+        # band each capture measured. The one number that says what the
+        # chance of catching a burst is; logged every minute.
+        self._heard_s=0.0; self._heard_epoch=time.time(); self.band_heard=0.0
+        # Captures kept as raw IQ, by reason; see _keep_evidence.
+        self._evidence_at={}; self._hits_lock=threading.Lock()
         self._alert_logged='CLEAR'
         self.detector_state='SEARCHING'
         self.survey_shortlist=[]
@@ -600,6 +607,8 @@ class SDRBackend:
             'power_cap':float(self.ladder.cap),
             'power_events':int(self._uv_events),
             'power_incidents':int(self.ladder.incidents),
+            'power_weak':bool(self.ladder.weak_supply),
+            'band_heard':float(self.band_heard),
             'power_next_step_s':float(self.ladder.next_step_s(time.time())),
             'power_last_event':str(self.ladder.last_why),
             'soc_temp_c':float(self._soc_temp) if self._soc_temp is not None else -1.0,
@@ -723,14 +732,27 @@ class SDRBackend:
             # The kernel alarm and vcgencmd usually both see the same dip.
             if now-self._uv_counted_at>=15.0:
                 self._uv_events+=1; self._uv_counted_at=now
-            if radio:
-                new=self.ladder.event(now,why,in_use=in_use)
-            else:
-                new=self.ladder.boot_dip(now,why)
-            if new:
+            if not radio:
+                # Before the radio ran: written down, and nothing taken for it.
+                if self.ladder.boot_dip(now,why):
+                    self._power_log(now,'NOTE %s: the radio was not running, '
+                                    'so it is not limited for it'%why)
+                continue
+            # A dip is a hint, not a failure of the step it came on -- see
+            # PowerLadder.dip. Only a lost dongle is that, in _scan_cycle.
+            what=self.ladder.dip(now,why,in_use=in_use)
+            if what=='drop':
                 self._power_log(now,'DROP %s at %d%% -> cap %d%%'%(
                     why,round(in_use*100),round(self.ladder.cap*100)))
-            elif radio:
+            elif what=='floor':
+                self._power_log(now,'%s at %d%%: already at the safe share, '
+                                'nothing more to give'%(why,round(in_use*100)))
+            elif what=='weak':
+                self._power_log(now,'SUPPLY WEAK: %s even at %d%% -- limiting the '
+                                'radio does not stop it, so the radio is no longer '
+                                'limited for it this boot (cap %d%%)'%(
+                    why,round(in_use*100),round(self.ladder.cap*100)))
+            elif what=='same':
                 self._power_log(now,'%s (same incident)'%why)
         live=bool(self.status=='LIVE' and self.last_good_scan
                   and now-self.last_good_scan<10.0)
@@ -746,10 +768,12 @@ class SDRBackend:
         if now-self._power_hb_at>=max(10.0,float(self.cfg.get('power_log_heartbeat_s',60.0))):
             self._power_hb_at=now
             temp=('%.1fC'%self._soc_temp) if self._soc_temp is not None else '?'
-            self._power_log(now,'HB cap=%d%% limit=%d%% duty=%d%% pipe=%s temp=%s '
+            self.band_heard=max(0.0,min(1.0,self._heard_s/max(1.0,now-self._heard_epoch)))
+            self._heard_s=0.0; self._heard_epoch=now
+            self._power_log(now,'HB cap=%d%% limit=%d%% duty=%d%% hear=%.1f%% pipe=%s temp=%s '
                             'uv=%d sdr=%s bus=%s next=%ds gain=%s clip=%.1f%% %s'%(
                 round(self.ladder.cap*100),round(in_use*100),
-                round(self.radio_duty(now)*100),
+                round(self.radio_duty(now)*100),100.0*self.band_heard,
                 'on' if self._pipeline_on(now) else 'off',temp,self._uv_events,
                 str(self.status).replace(' ','_'),
                 'yes' if self._sdr_present() else 'no',
@@ -804,25 +828,14 @@ class SDRBackend:
                 carrier_number(r.freq_hz,self.cfg),float(r.freq_hz)/1e6,float(r.snr_db),
                 float(r.burst_ms_median),int(r.burst_count),float(r.duty),
                 'partner' if (tr is not None and tr.trusted) else 'band',
-                ' weak' if getattr(r,'shape_waived',False) else '',
+                (' weak' if getattr(r,'shape_waived',False) else '')
+                +(' line' if getattr(r,'carrier_line',False) else ''),
                 len(tr.hit_times) if tr is not None else 0))
         if state!=self._alert_logged:
             lines.append('ALERT %s -> %s'%(self._alert_logged,state))
             self._alert_logged=state
-        if not lines:
-            return
-        try:
-            path=self.sites._path().with_name('hits.log')
-            path.parent.mkdir(parents=True,exist_ok=True)
-            if path.exists() and path.stat().st_size>262144:
-                keep=path.read_text().splitlines()[-1500:]
-                path.write_text('\n'.join(keep)+'\n')
-            stamp=time.strftime('%Y-%m-%dT%H:%M:%S',time.localtime(now))
-            with path.open('a') as f:
-                for line in lines:
-                    f.write('%s %s\n'%(stamp,line))
-        except Exception:
-            pass
+        if lines:
+            self._hits_write(now,lines)
 
     def _recover_sdr_usb(self):
         """Force-re-enumerate a wedged RTL-SDR -- and only a wedged one.
@@ -949,7 +962,74 @@ class SDRBackend:
             return 'auto'
         return ('%.1f'%up) if up==down else ('%.1f/%.1f'%(up,down))
 
-    def _watch_overload(self,iq,band,now=None):
+    def _keep_evidence(self,iq,centre,sr,now,key,line,every_s=3600.0):
+        """Write a capture out as raw IQ, and say so in hits.log.
+
+        On 2 October a unit stood beside a police car for a minute and stayed
+        silent. power.log held the one trace of anything: an uplink capture
+        with 13.7% of its samples on the rails -- five TETRA slots' worth,
+        almost to the sample -- of which the detector had looked at 25
+        channels of the 80 it contained and found nothing. The capture itself
+        was gone a second later, so whether that was the car could not be
+        settled. The next one is kept.
+
+        Rate limited per ``key`` and capped in number, oldest first out: a
+        spur that fails the same way all day must not fill the card or push
+        out the capture that mattered.
+        """
+        try:
+            last=self._evidence_at.get(key,0.)
+            if now-last<float(every_s):
+                return None
+            self._evidence_at[key]=float(now)
+            kind=str(key).split(':')[0]
+            keep=int(self.cfg.get('evidence_keep',12))
+            if kind!='overload':
+                keep=min(keep,max(1,keep//3))    # the rails come first
+            stem=''
+            if keep>0 and iq is not None and len(iq):
+                out=self.sites._path().with_name('evidence')
+                out.mkdir(parents=True,exist_ok=True)
+                old=sorted(out.glob('*_'+kind+'.iq8'))
+                for p in old[:max(0,len(old)-keep+1)]:
+                    try:
+                        p.unlink(); Path(str(p)+'.json').unlink()
+                    except Exception:
+                        pass
+                stem=time.strftime('%Y-%m-%d_%H-%M-%S',time.localtime(now))+'_'+kind
+                buf=np.empty(len(iq)*2,dtype=np.uint8)
+                buf[0::2]=np.clip(np.floor(np.real(iq)+127.5+0.5),0,255).astype(np.uint8)
+                buf[1::2]=np.clip(np.floor(np.imag(iq)+127.5+0.5),0,255).astype(np.uint8)
+                (out/(stem+'.iq8')).write_bytes(buf.tobytes())
+                (out/(stem+'.iq8.json')).write_text(json.dumps({
+                    'format':'u8iq','path':stem+'.iq8','bytes':int(buf.nbytes),
+                    'centre_hz':float(centre or 0.),'sample_rate':int(sr or 0),
+                    'samples':int(len(iq)),'role':'UPLINK','why':str(line),
+                    'gain':str(self._gain_for('up')),'captured_at':float(now)},
+                    indent=2,sort_keys=True))
+            self._hits_write(now,[line+((' -> evidence/'+stem+'.iq8') if stem else '')])
+            return stem
+        except Exception:
+            return None
+
+    def _hits_write(self,now,lines):
+        """Append to hits.log; shared by the detector's lines and the evidence's."""
+        try:
+            path=self.sites._path().with_name('hits.log')
+            path.parent.mkdir(parents=True,exist_ok=True)
+            stamp=time.strftime('%Y-%m-%dT%H:%M:%S',time.localtime(now))
+            # The capture thread writes here too (an overload): one at a time.
+            with self._hits_lock:
+                if path.exists() and path.stat().st_size>262144:
+                    keep=path.read_text().splitlines()[-1500:]
+                    path.write_text('\n'.join(keep)+'\n')
+                with path.open('a') as f:
+                    for line in lines:
+                        f.write('%s %s\n'%(stamp,line))
+        except Exception:
+            pass
+
+    def _watch_overload(self,iq,band,now=None,centre=None,sr=None):
         """Keep the 8-bit ADC out of clipping, per band.
 
         The gain was "auto" until 0.10.4, which hands it to the tuner's own
@@ -989,6 +1069,15 @@ class SDRBackend:
             elif now-self._gain_clean_since[band]>=float(self.cfg.get('gain_recover_s',20.0)):
                 self._gain_backoff[band]=max(0.0,self._gain_backoff[band]-step)
                 self._gain_clean_since[band]=now
+        if band=='up' and self.adc_clip>limit:
+            # The uplink band is empty until someone transmits in it, so a
+            # capture of it that hits the rails is a transmitter close by --
+            # and the one capture worth keeping whatever the detector then
+            # makes of it. See _keep_evidence.
+            self._keep_evidence(iq,centre,sr,now,'overload',
+                                'OVERLOAD uplink clip %.1f%% rms %.0f at %.4f MHz'%(
+                                    100.0*self.adc_clip,self.adc_rms,float(centre or 0.)/1e6),
+                                every_s=10.0)
         after=self._gain_for(band)
         if after!=before:
             # Said out loud, with what was seen: the first unit to run this
@@ -1009,7 +1098,7 @@ class SDRBackend:
         try:
             iq=self._samples(centre,sr,count)
             try:
-                self._watch_overload(iq,self._band_of(centre))
+                self._watch_overload(iq,self._band_of(centre),centre=centre,sr=sr)
             except Exception:
                 pass                     # a level check must never cost a capture
             return iq
@@ -1073,7 +1162,7 @@ class SDRBackend:
             n=1<<int(self.cfg.get('phy_dwell_log2',20))
             centre,members=plan_dwell(
                 plan['targets'],sr,
-                max_offset_hz=float(self.cfg.get('phy_max_offset_hz',600000.)),
+                max_offset_hz=float(self.cfg.get('phy_max_offset_hz',850000.)),
                 spacing_hz=float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
             if centre is None or not members:
                 return
@@ -1284,10 +1373,29 @@ class SDRBackend:
         n=1<<int(self.cfg.get('phy_dwell_log2',20))
         centre,members=plan_dwell(
             freqs,sr,
-            max_offset_hz=float(self.cfg.get('phy_max_offset_hz',600000.)),
+            max_offset_hz=float(self.cfg.get('phy_max_offset_hz',850000.)),
             spacing_hz=float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
         if centre is None or not members:
             return []
+        if role=='UPLINK':
+            # Everything the capture holds, not only what the dwell was aimed
+            # at. Until 0.10.8 a dwell placed for the partners of the locked
+            # site measured those partners -- four or five channels of the
+            # forty-eight in its window -- and a sweep dwell measured whatever
+            # was left of its queue. Recorded beside a police car: a capture
+            # with 13.7% of its samples on the rails, 25 channels of it looked
+            # at, nothing found. The screen costs the same for one channel as
+            # for all of them, so the rest were thrown away for nothing.
+            lim=float(self.cfg.get('phy_max_offset_hz',850000.))
+            have={int(round(float(f))) for f,_ in members}
+            for f in self._uplink_band_channels():
+                off=float(f)-float(centre)
+                if (int(round(f)) not in have
+                        and DC_GUARD_HZ-1e-6<=abs(off)<=lim+1e-6):
+                    members.append((float(f),off))
+            members.sort()
+            self._heard_s+=(float(n)/float(sr))*min(
+                1.0,len(members)/float(max(1,len(self._uplink_band_channels()) or len(members))))
         t0=time.perf_counter()
         iq=self._capture_dwell(centre,sr,n)
         self.last_dwell_ms=(time.perf_counter()-t0)*1000.
@@ -1344,6 +1452,20 @@ class SDRBackend:
                 r.reason='ERROR:'+str(e)[:60]
                 out.append(r)
         self.last_verify_ms=(time.perf_counter()-t1)*1000.
+        if role=='UPLINK':
+            # Something strong that the waveform test turned down is either a
+            # spur or a detector that is wrong, and only the samples can say
+            # which. One per channel per hour.
+            strong=float(self.cfg.get('evidence_strong_db',15.0))
+            worst=max((r for r in out if not r.ok and not r.screened
+                       and float(r.snr_db)>=strong),
+                      key=lambda r: float(r.snr_db),default=None)
+            if worst is not None:
+                self._keep_evidence(
+                    iq,centre,sr,time.time(),'reject:%d'%int(round(float(worst.freq_hz))),
+                    'REJECTED CH %d %.4f MHz %.1f dB %s'%(
+                        carrier_number(worst.freq_hz,self.cfg),float(worst.freq_hz)/1e6,
+                        float(worst.snr_db),worst.reason))
         self.dwell_centre_hz=float(centre)
         self.dwell_channels=[f for f,_ in members]
         self.last_dwell_role=role
@@ -1609,17 +1731,23 @@ class SDRBackend:
         if not follow:
             self._watch_turn=turn
         results=self._verify(rotated,'UPLINK')
+        measured={int(round(x)) for x in self.dwell_channels}
         if not follow:
-            covered=max(1,len(self.dwell_channels))
             if lane=='partner' and partners:
+                # Partners, not channels: a dwell measures its whole window
+                # now, and stepping the rotation by all of that skipped most
+                # of the partners it was supposed to be walking through.
+                covered=max(1,sum(1 for p in partners if int(round(p)) in measured))
                 self._partner_idx=(self._partner_idx+covered)%len(partners)
-            elif lane=='band':
-                if not self._uplink_queue:
-                    self._uplink_queue=self._uplink_band_channels() or list(partners)
-                    self._uplink_sweeps+=1
-                done={int(round(x)) for x in self.dwell_channels}
-                self._uplink_queue=[x for x in self._uplink_queue
-                                    if int(round(x)) not in done]
+            elif lane=='band' and not self._uplink_queue:
+                self._uplink_queue=self._uplink_band_channels() or list(partners)
+                self._uplink_sweeps+=1
+        # Measured is measured, whichever lane aimed the dwell: the sweep only
+        # still owes a look to what no dwell has covered since it began.
+        if self._uplink_queue:
+            self._uplink_queue=[x for x in self._uplink_queue
+                                if int(round(x)) not in measured]
+        if not follow:
             # Follow a hit only while it still has something to prove. A
             # channel whose alert is already up re-armed the follow-up on
             # every rotation dwell that reached it, so a handset that simply
