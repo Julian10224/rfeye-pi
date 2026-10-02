@@ -441,17 +441,46 @@ class App:
         if bool(self.cfg.get("ui_quiet_capture", True)) and not touching:
             idle = getattr(self.backend, "capture_idle", None)
             if idle is not None:
-                end = now + max(0.0, float(
-                    self.cfg.get("ui_quiet_capture_wait_s", 0.7)))
-                while (not idle.is_set() and time.monotonic() < end
-                       and not self.ui_wake.is_set() and self.running):
-                    idle.wait(0.02)
+                self._wait_for_gap(idle)
         self._present_rotated()
         pygame.display.flip()
         self._shown_sig = sig
         self._shown_at = time.monotonic()
         self.frames_shown += 1
         return True
+
+    def _wait_for_gap(self, idle):
+        """Hold a changed frame until the radio has room for it.
+
+        0.10.6 waited for the capture in progress to end and nothing more.
+        On the reference unit that cut the clipped captures from one every
+        half minute to one in four -- the one being a frame sent while the
+        radio was idle, 137 ms before the next capture began. Not capturing
+        now says nothing about the next tenth of a second.
+
+        So a frame goes out only where the gap is known: straight after a
+        capture has ended, when the next cannot start before this cycle's
+        analysis is done; inside a pause the radio has announced
+        (``quiet_until``); or when the radio is not scanning at all. Failing
+        those it waits for the next capture to end, at most
+        ``ui_quiet_capture_wait_s``, and a touch ends the wait at once.
+        """
+        need = 0.2            # a full frame is 137 ms on the wire
+        fresh = 0.15          # how long after a capture the gap is certain
+        inactive = 1.5        # no capture for this long: nothing to disturb
+        end = time.monotonic() + max(0.0, float(
+            self.cfg.get("ui_quiet_capture_wait_s", 1.5)))
+        while self.running and not self.ui_wake.is_set():
+            now = time.monotonic()
+            if idle.is_set():
+                ended = float(getattr(self.backend, "capture_ended_at", 0.0) or 0.0)
+                since = now - ended
+                quiet = float(getattr(self.backend, "quiet_until", 0.0) or 0.0) - now
+                if ended <= 0.0 or since <= fresh or since >= inactive or quiet >= need:
+                    return
+            if now >= end:
+                return
+            time.sleep(0.01)
 
     # -- fault reporting ---------------------------------------------------
     def _note_frame_error(self, exc):

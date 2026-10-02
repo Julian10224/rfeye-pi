@@ -1420,7 +1420,16 @@ def check_gain_and_hits_log():
             SDRBackend._samples(b, 381_000_000.0, 2_016_000, 8192)
             check("it says so while it is reading",
                   len(fake.seen) == 2 and not any(fake.seen), str(fake.seen))
-            check("  and when it has finished", b.capture_idle.is_set())
+            check("  and when it has finished", b.capture_idle.is_set()
+                  and time.monotonic() - b.capture_ended_at < 1.0)
+            # And how long it will stay off, when it knows: a pause with no
+            # prefetch running is quiet for its whole length.
+            b.cfg["sdr_duty_idle"] = 0.3; b.cfg["sdr_duty_eco"] = 0.3
+            b._radio_epoch = time.time() - 4.0; b._radio_s = 1.5; b._prefetch = None
+            b.running = True
+            t0 = time.monotonic(); b._low_power_pause()
+            check("  and announces a pause it is about to take",
+                  b.quiet_until > t0 + 0.2, "%.2f s" % (b.quiet_until - t0))
             fake.fail = True
             try:
                 SDRBackend._samples(b, 381_000_000.0, 2_016_000, 8192)

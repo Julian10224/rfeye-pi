@@ -359,7 +359,7 @@ DEFAULTS = {
     # then between two captures, waiting at most this long for the radio.
     # ui_refresh_s repaints regardless, so a lost frame cannot stay lost.
     "ui_quiet_capture": True,
-    "ui_quiet_capture_wait_s": 0.7,
+    "ui_quiet_capture_wait_s": 1.5,
     "ui_refresh_s": 30.0,
     "power_notice_timeout_s": 30.0,
     "low_power_scan_pause_s": 1.5,
@@ -405,7 +405,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.6",
+    "app_version": "0.10.7",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -422,7 +422,8 @@ DEFAULTS = {
 # while the source code said otherwise. They are therefore only written when
 # they actually differ from the shipped default -- a deliberate field
 # override survives, an accidental fossil does not.
-_DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_", "ui_level_", "gain_")
+_DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_", "ui_level_", "gain_",
+                      "ui_quiet_")
 _DETECTOR_KEYS = (
     "sample_rate", "fft_size", "duplex_split_hz", "gain",
     "mobile_band_start_hz", "mobile_band_end_hz",

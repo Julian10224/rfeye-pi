@@ -323,6 +323,12 @@ class SDRBackend:
         # noise in the band, so the UI waits on this before sending a frame;
         # see App._show.
         self.capture_idle=threading.Event(); self.capture_idle.set()
+        # When the last read finished, and until when the radio has promised
+        # to stay off (both on the monotonic clock). Knowing that a capture
+        # is not running is not enough to send a frame: the next one may be
+        # about to start. See App._wait_for_gap.
+        self.capture_ended_at=0.0
+        self.quiet_until=0.0
         self._gain_backoff={'up':0.,'down':0.}; self._gain_clean_since={'up':0.,'down':0.}
         self._alert_logged='CLEAR'
         self.detector_state='SEARCHING'
@@ -501,6 +507,10 @@ class SDRBackend:
         pause = max(floor, min(pause, 3.0))
         if pause <= 0.0:
             return
+        # With nothing prefetching, the radio really is off for this long, and
+        # the panel may have the time. With a prefetch running it is not.
+        if self._prefetch is None:
+            self.quiet_until = time.monotonic() + pause
         end = time.time() + pause
         while self.running and time.time() < end:
             time.sleep(min(0.25, max(0.01, end - time.time())))
@@ -912,6 +922,7 @@ class SDRBackend:
                                       abort=lambda: not self.running)
                 iq=self.sdr.read_complex(int(count),abort=lambda: not self.running)
             finally:
+                self.capture_ended_at=time.monotonic()
                 self.capture_idle.set()
             self._check_capture(iq)
             return iq

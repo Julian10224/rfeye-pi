@@ -761,23 +761,50 @@ def _check_quiet_display(a):
         a._frame()
         assert len(flips) == 3, "and a stale panel is repainted regardless"
 
+        def toggled_frame():
+            a.cfg["muted"] = not a.cfg["muted"]
+            t0 = time.monotonic(); a._frame()
+            return time.monotonic() - t0
+
         # A changed frame waits for the radio to finish its capture...
         idle = _th.Event()
         a.backend.capture_idle = idle
-        _th.Timer(0.20, idle.set).start()
-        a.cfg["muted"] = not a.cfg["muted"]
-        t0 = time.monotonic(); a._frame(); waited = time.monotonic() - t0
+        a.backend.capture_ended_at = time.monotonic() - 0.6
+        a.backend.quiet_until = 0.0
+
+        def finish():
+            a.backend.capture_ended_at = time.monotonic(); idle.set()
+        _th.Timer(0.20, finish).start()
+        waited = toggled_frame()
         assert len(flips) == 4 and 0.15 <= waited < 0.65, waited
-        # ...but never for long, even if the radio never says it is done...
+        # ...and "not capturing right now" is not enough either: 0.10.6 sent
+        # the frame then, 137 ms before the next capture began. Mid-gap, with
+        # the radio scanning, it waits for the next capture to end.
+        a.backend.capture_ended_at = time.monotonic() - 0.5
+
+        def next_capture_done():
+            a.backend.capture_ended_at = time.monotonic()
+        _th.Timer(0.25, next_capture_done).start()
+        waited = toggled_frame()
+        assert len(flips) == 5 and 0.2 <= waited < 0.7, waited
+        # A pause the radio has announced is room enough...
+        a.backend.capture_ended_at = time.monotonic() - 0.5
+        a.backend.quiet_until = time.monotonic() + 0.6
+        waited = toggled_frame()
+        assert len(flips) == 6 and waited < 0.12, waited
+        # ...and so is a radio that is not scanning at all.
+        a.backend.quiet_until = 0.0
+        a.backend.capture_ended_at = time.monotonic() - 10.0
+        waited = toggled_frame()
+        assert len(flips) == 7 and waited < 0.12, waited
+        # It never waits for long, even if the radio never says it is done...
         idle.clear(); a.cfg["ui_quiet_capture_wait_s"] = 0.2
-        a.cfg["muted"] = not a.cfg["muted"]
-        t0 = time.monotonic(); a._frame(); waited = time.monotonic() - t0
-        assert len(flips) == 5 and 0.15 <= waited < 0.65, waited
+        waited = toggled_frame()
+        assert len(flips) == 8 and 0.15 <= waited < 0.65, waited
         # ...and not at all with a finger on the glass.
         a.ui_touch_at = time.monotonic()
-        a.cfg["muted"] = not a.cfg["muted"]
-        t0 = time.monotonic(); a._frame(); waited = time.monotonic() - t0
-        assert len(flips) == 6 and waited < 0.12, waited
+        waited = toggled_frame()
+        assert len(flips) == 9 and waited < 0.12, waited
     finally:
         appmod.pygame.display.flip = real_flip
         a.page, a.cfg["muted"], a.running = keep[0], keep[1], keep[3]
@@ -785,8 +812,10 @@ def _check_quiet_display(a):
             a.cfg.pop("ui_quiet_capture_wait_s", None)
         else:
             a.cfg["ui_quiet_capture_wait_s"] = keep[2]
-        if not had_idle and hasattr(a.backend, "capture_idle"):
-            del a.backend.capture_idle
+        if not had_idle:
+            for name in ("capture_idle", "capture_ended_at", "quiet_until"):
+                if hasattr(a.backend, name):
+                    delattr(a.backend, name)
         a.ui_touch_at = 0.0; a._shown_sig = None
 
 
