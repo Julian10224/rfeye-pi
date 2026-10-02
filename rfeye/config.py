@@ -359,7 +359,19 @@ DEFAULTS = {
     # is 14.2 ms. Idling for a second and a half between cycles then costs
     # detections rather than saving anything worth having.
     "low_power_locked_pause_s": 0.15,
-    "gain": "auto",
+    # Tuner gain in dB. "auto" was the setting until 0.10.4 and hands the
+    # gain to the tuner's AGC, which on both reference dongles filled the
+    # 8-bit ADC with noise alone -- 17% of samples clipped in the empty
+    # uplink band, 12-27% on the downlink. Swept on a unit with 20 dB
+    # carriers: 16.6 dB reads them 2.6 dB low, 33.8-44.5 dB within 0.7 dB of
+    # the best, "auto" 1.5 dB low. 37.2 is the middle of the flat part with
+    # nothing clipped. Overload steps it down per band and back; see
+    # SDRBackend._watch_overload.
+    "gain": 37.2,
+    "gain_clip_limit": 0.05,
+    "gain_backoff_step_db": 4.0,
+    "gain_backoff_max_db": 24.0,
+    "gain_recover_s": 20.0,
     "ppm": 0,
     "muted": False,
     "startup_chime": True,
@@ -385,7 +397,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.3",
+    "app_version": "0.10.4",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -402,9 +414,9 @@ DEFAULTS = {
 # while the source code said otherwise. They are therefore only written when
 # they actually differ from the shipped default -- a deliberate field
 # override survives, an accidental fossil does not.
-_DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_", "ui_level_")
+_DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_", "ui_level_", "gain_")
 _DETECTOR_KEYS = (
-    "sample_rate", "fft_size", "duplex_split_hz",
+    "sample_rate", "fft_size", "duplex_split_hz", "gain",
     "mobile_band_start_hz", "mobile_band_end_hz",
     "mobile_percentile",
     "tetra_channel_spacing_hz", "tetra_raster_offset_hz", "tetra_carrier_base_hz",
@@ -449,6 +461,12 @@ def load_config():
     # the update and go on ignoring exactly the short control bursts this
     # release exists to catch, with nothing on screen to say so.
     cfg["uplink_sensitive"] = True
+    # "auto" gain was the shipped value until 0.10.4 and every unit has it
+    # saved. It is not a user setting -- there is no gain control on the
+    # panel -- so the measured fixed gain replaces it; a unit that was given
+    # a number by hand keeps its number.
+    if cfg.get("gain") == "auto":
+        cfg["gain"] = DEFAULTS["gain"]
     cfg["app_version"] = DEFAULTS["app_version"]
     cfg["update_manifest_url"] = DEFAULTS["update_manifest_url"]
     # Detector profile v8 replaces energy-statistics detection with real
@@ -522,6 +540,8 @@ def load_config():
         "uplink_confirm_window_s",
         "carrier_memory_s", "confirm_window_s", "alert_hold_s",
         "confirm_hits", "clear_hits",
+        # replaced by the power ladder in 0.10.2
+        "sdr_duty_recover", "sdr_duty_backoff_s",
     ):
         cfg.pop(obsolete, None)
     return cfg

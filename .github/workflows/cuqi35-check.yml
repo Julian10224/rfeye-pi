@@ -372,6 +372,17 @@ jobs:
           grep -q "row\['channel'\]=carrier_number" rfeye/sdr_backend.py
           grep -q '"CH %d"%chan' rfeye/compact_ui_draw.py
           grep -q 'def _check_alert_sound' scripts/app-selftest.py
+          # 0.10.4: the gain is a measured number with an overload guard, not
+          # the tuner's AGC -- "auto" clipped 17% of an empty band -- and
+          # what the unit heard is written down.
+          grep -q '"gain": 37.2' rfeye/config.py
+          ! grep -q '"gain": "auto"' rfeye/config.py config/reference-config-cuqi35.json
+          grep -q 'if cfg.get("gain") == "auto":' rfeye/config.py
+          grep -q 'def _watch_overload' rfeye/sdr_backend.py
+          grep -q 'self._gain_for(self._band_of(center))' rfeye/sdr_backend.py
+          grep -q 'def _log_hits' rfeye/sdr_backend.py
+          grep -q "with_name('hits.log')" rfeye/sdr_backend.py
+          grep -q 'def check_gain_and_hits_log' scripts/detector-selftest.py
           grep -q 'need_trusted if f in trust else need_unknown' rfeye/tetra_detector.py
           grep -q 'def confirmed_channels' rfeye/tetra_detector.py
           ! grep -q 'if self.sites.locked(now):$' rfeye/sdr_backend.py
@@ -565,6 +576,9 @@ jobs:
           assert c['ui_level_weak_db']==c['phy_uplink_min_snr_db'], 'the weakest detection has a bar'
           assert c['tetra_carrier_base_hz']==300000000.0
           assert c['show_channel'] is True
+          assert c['gain']==37.2, 'a measured gain, not the tuner AGC'
+          assert 0.03 <= c['gain_clip_limit'] <= 0.10, 'one close burst (2.4%) must not trip it'
+          assert c['gain_backoff_max_db'] < c['gain']
           assert c['scan_pipeline'] is True
           assert c['site_pass_share']==5
           assert c['snapshot_phy_rows']==64

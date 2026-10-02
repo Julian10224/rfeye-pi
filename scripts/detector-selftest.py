@@ -1323,6 +1323,89 @@ def check_power_ladder():
             b2.running = False
 
 
+def check_gain_and_hits_log():
+    """The ADC is kept out of clipping, and what was heard is written down.
+
+    Until 0.10.4 the gain was "auto", which on both reference dongles filled
+    the 8-bit ADC with noise alone -- 17% of samples on the rails in the empty
+    uplink band -- so a transmitter at arm's length and one down the road read
+    the same saturated level. And nothing on the unit recorded what it had
+    heard: after a drive, "it did not go off" could not be told apart from
+    "nothing was transmitting".
+    """
+    print(chr(10) + "31. a fixed gain with an overload guard, and a log of what was heard")
+    from tetra_detector import carrier_number
+    rng = np.random.default_rng(7)
+
+    def noise(rms, n=200_000):
+        x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * (rms / np.sqrt(2.0))
+        return (np.clip(np.round(x.real), -127.5, 127.5)
+                + 1j * np.clip(np.round(x.imag), -127.5, 127.5)).astype(np.complex64)
+
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir()
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            check("the gain is a number, not the tuner's own AGC",
+                  b._gain_for("up") == 37.2 and b._gain_for("down") == 37.2,
+                  str(b._gain_for("up")))
+            t = 1000.0
+            b._watch_overload(noise(14.0), "up", t)
+            check("a quiet band costs no gain", b._gain_for("up") == 37.2
+                  and b.adc_clip < 0.001, "clip %.2f%%" % (100 * b.adc_clip))
+            b._watch_overload(noise(110.0), "down", t)
+            check("a clipping capture steps that band down",
+                  abs(b._gain_for("down") - 33.2) < 1e-9, "%.1f dB, clip %.0f%%" % (
+                      b._gain_for("down"), 100 * b.adc_clip))
+            check("  and leaves the other band alone", b._gain_for("up") == 37.2)
+            for k in range(12):
+                b._watch_overload(noise(110.0), "down", t + 1 + k)
+            check("  down to a floor, not to nothing",
+                  abs(b._gain_for("down") - (37.2 - 24.0)) < 1e-9, "%.1f dB" % b._gain_for("down"))
+            b._watch_overload(noise(14.0), "down", t + 20.0)
+            check("a clean capture does not give it straight back",
+                  abs(b._gain_for("down") - 13.2) < 1e-9)
+            b._watch_overload(noise(14.0), "down", t + 45.0)
+            check("twenty clean seconds give one step back",
+                  abs(b._gain_for("down") - 17.2) < 1e-9, "%.1f dB" % b._gain_for("down"))
+            # One slot of a handset at arm's length: 2.7% of the capture, hard
+            # against the rails. That is a detection, not a reason to go deaf.
+            burst = noise(14.0)
+            n = int(len(burst) * 0.027)
+            burst[1000:1000 + n] = noise(400.0, n)
+            b._gain_backoff["up"] = 0.0
+            b._watch_overload(burst, "up", t + 50.0)
+            check("one close burst is not an overload", b._gain_for("up") == 37.2,
+                  "clip %.2f%%" % (100 * b.adc_clip))
+            b.cfg["gain"] = "auto"
+            check("a unit told to use auto still can", b._gain_for("up") == "auto")
+            b.cfg["gain"] = 37.2
+        finally:
+            b.running = False
+
+    stranger = 382_437_500.0
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(interferers=[(stranger, "control_burst")])
+        b = make_backend(air, os.path.join(d, "sites.json"), uplink_alert_hold_s=0.0)
+        try:
+            for _ in range(24):
+                b._scan_cycle()
+                if b.snapshot()["mobile_confirmed"]:
+                    break
+            air.interferers = []
+            for _ in range(8):
+                b._scan_cycle()
+            path = os.path.join(d, "hits.log")
+            log = open(path).read() if os.path.exists(path) else ""
+            check("every transmission heard is written to hits.log",
+                  "HIT CH %d" % carrier_number(stranger, b.cfg) in log, log[:160])
+            check("  with the alert rising", "ALERT CLEAR -> " in log)
+            check("  and clearing again", "-> CLEAR" in log.split("ALERT CLEAR -> ", 1)[-1],
+                  log[-200:])
+        finally:
+            b.running = False
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -1515,6 +1598,7 @@ def main():
     check_tracks_and_screen()
     check_priority_lanes()
     check_power_ladder()
+    check_gain_and_hits_log()
 
     print()
     if FAILURES:

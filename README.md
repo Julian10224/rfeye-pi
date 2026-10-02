@@ -1,6 +1,6 @@
-# RF Eye 0.10.3 for Raspberry Pi
+# RF Eye 0.10.4 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.10.3 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.10.4 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.10.3 appliance path:
+The installer reproduces the working 0.10.4 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.10.3
+## User interface in 0.10.4
 
 The compact profile contains:
 
@@ -460,6 +460,103 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### Two units, one deaf: what was measured, and what 0.10.4 changes
+
+Two reference units side by side on the same desk, both on a byte-identical
+0.10.3 (same file hashes, kernel, driver and settings). One locked four
+carriers, the other none. Captured on both with the same fixed gain through
+the Blog driver:
+
+| | `rfeye` | `rfeye2` |
+| --- | --- | --- |
+| dongle (as the driver names it) | Blog V4, R828D tuner | Blog V4 Lite, R820T tuner |
+| noise floor at 40 dB gain | 57.8 dB | 56.6 dB |
+| the three local carriers over that floor | +2.5 to +3.4 dB | +20.6 to +22.5 dB |
+
+Same noise, 18 dB less signal: not software and not interference, but that
+unit's dongle or its antenna path. Worth writing down because of how long it
+hid -- the screen said SEARCHING and every software layer was healthy.
+
+Two things in the software did come out of it.
+
+**`rtl_sdr`, `rtl_test` and `rtl_power` on these units are linked against the
+distribution's librtlsdr, not the Blog build in `/usr/local/lib`.** They open a
+V4 without setting its input switch and read the band as noise. RF Eye itself
+loads the right library, so this only bites when measuring by hand:
+
+```bash
+LD_LIBRARY_PATH=/usr/local/lib rtl_test      # must say "RTL-SDR Blog V4 Detected"
+```
+
+**"auto" gain was clipping the ADC.** The gain had been left to the tuner's
+AGC since the first release. Measured through the Blog driver on both dongles:
+
+| gain | ADC rms (of 127) | samples clipped | local carriers |
+| --- | --- | --- | --- |
+| 16.6 dB | 3 | 0% | 18.0 dB |
+| 29.7 dB | 14 | 0% | 19.7 dB |
+| 33.8 dB | 22 | 0% | 20.0 dB |
+| **37.2 dB** | **33** | **0.03%** | **20.3 dB** |
+| 44.5 dB | 93 | 5.7% | 20.7 dB |
+| 49.6 dB | 113 | 15% | 20.0 dB |
+| auto | 128 | **26%** | 18.8 dB |
+
+In the empty uplink band "auto" clipped 17% of the samples on noise alone.
+Driven through the detector in simulation, that does **not** stop a burst
+being recognised -- a hard limiter keeps the phase -- but every strong signal
+then reads the same 21-25 dB, where a managed gain reads up to 40. So the gain
+is a fixed 37.2 dB now (`gain`), in the flat part of the curve with nothing
+clipped, about 1.5 dB better than "auto" and with some 15 dB of room above the
+noise. A guard watches every capture: when more than 5% of it clips, that half
+of the band steps down 4 dB, and after twenty clean seconds it steps back. The
+uplink and downlink are kept apart, because the downlink carries strong
+continuous carriers and must not cost the uplink its sensitivity; and one
+burst from a handset at arm's length (2.4% of a capture) is a detection, not
+an overload. A unit that has "auto" saved gets the measured gain; one that was
+given a number by hand keeps it.
+
+**`hits.log`** next to `search.log`: one line per verified uplink
+transmission -- channel, level, burst length, whether a locked site vouches
+for it -- and one per change of the alert:
+
+```text
+2026-10-02T09:57:34 HIT CH 3697 382.4375 MHz 21.1 dB 14 ms x1 duty 0.03 band seen=1
+2026-10-02T09:57:34 ALERT CLEAR -> PROVISIONAL
+2026-10-02T09:57:38 ALERT PROVISIONAL -> ALARM
+```
+
+Until now nothing on the unit recorded what it had heard, so after a drive
+"it did not go off next to that car" could not be told apart from "that car
+was not transmitting". The minute line in `power.log` also carries the gain in
+use and the share of the last capture that clipped.
+
+**The burst path on real signal.** Everything said so far about recognising a
+single slot came from the simulator. The reference site's carriers are
+continuous, so no real burst was on offer -- but a real carrier can be cut
+into one. On the unit with good reception, slot-long (and half-slot) pieces
+of the real downlink were spliced into real receiver noise captured at the
+same gain on an empty frequency, attenuated to a range of levels, and put
+through the uplink test exactly as a vehicle's burst would be: real
+transmitter, real channel, real dongle, 30 bursts per row.
+
+| true SNR in the channel | one slot | half a slot |
+| --- | --- | --- |
+| 22 dB | 100% | 97% |
+| 16 dB | 100% | 100% |
+| 12 dB | 97% | 93% |
+| 8.5 dB | 43% | 0% |
+| 5.5 dB | 0% | 0% |
+
+None of 198 empty channels beside three strong real bursts was accepted. So
+the simulator's "one slot from 8 dB" is, on real signal, "reliably from about
+12 dB, half the time at 8.5" -- reality costs 1.5 to 2 dB, and the chain does
+recognise real TETRA in a single slot. Twelve minutes of the same unit
+sweeping the live uplink band (368 dwells, 17 664 channel tests) produced no
+false hit; the one thing above the noise was a steady carrier on 383.3375 MHz,
+correctly refused as not four-phase. No terminal transmitted nearby in those
+minutes, which is what `hits.log` is for: the test that is still owed is a
+drive past a real vehicle, and now the unit will say what it heard.
 
 ### What a Blu Eye does, and how close one dongle gets (0.10.3)
 
@@ -1212,7 +1309,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.10.3 uses a **TMB12A03 active buzzer**:
+RF Eye 0.10.4 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1361,7 +1458,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.10.3**.
+`VERSION` and `rfeye/config.py` identify this release as **0.10.4**.
 
 Build the OTA package with:
 
@@ -1858,6 +1955,13 @@ systemctl show lightdm.service -p Wants -p After
 systemctl show systemd-user-sessions.service -p After
 systemctl --user cat rfeye-user.service
 systemd-analyze
+```
+
+After a drive, `hits.log` says what was heard, and `power.log` what the
+supply and the radio were doing:
+
+```bash
+tail -n 40 ~/.local/state/rfeye/hits.log
 ```
 
 After a drive in which the dongle went, `power.log` says what the supply and

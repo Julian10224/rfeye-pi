@@ -316,6 +316,11 @@ class SDRBackend:
         self._uv_alarm={}; self._uv_alarm_last=None; self._uv_alarm_at=0.
         self._uv_events=0; self._uv_counted_at=0.; self._soc_temp=None
         self._power_log_at=0.; self._sdr_lost_at=0.
+        # What the ADC is seeing, per band, and how much gain overload has
+        # taken off; see _watch_overload.
+        self.adc_rms=0.; self.adc_clip=0.
+        self._gain_backoff={'up':0.,'down':0.}; self._gain_clean_since={'up':0.,'down':0.}
+        self._alert_logged='CLEAR'
         self.detector_state='SEARCHING'
         self.survey_shortlist=[]
         self._survey_at=0.; self._survey_idx=0; self._site_maint_idx=0
@@ -584,6 +589,9 @@ class SDRBackend:
             'power_next_step_s':float(self.ladder.next_step_s(time.time())),
             'power_last_event':str(self.ladder.last_why),
             'soc_temp_c':float(self._soc_temp) if self._soc_temp is not None else -1.0,
+            'adc_rms':float(self.adc_rms),'adc_clip':float(self.adc_clip),
+            'gain_db':(-1.0 if self.cfg.get('gain',37.2)=='auto'
+                       else float(self._gain_for('up'))),
             'pipeline_active':bool(self._pump is not None and lim>=float(
                 self.cfg.get('scan_pipeline_min_duty',0.40))),
             'prefetch_hits':int(self._prefetch_hits),
@@ -720,13 +728,15 @@ class SDRBackend:
         if now-self._power_log_at>=max(10.0,float(self.cfg.get('power_log_heartbeat_s',60.0))):
             temp=('%.1fC'%self._soc_temp) if self._soc_temp is not None else '?'
             self._power_log(now,'HB cap=%d%% limit=%d%% duty=%d%% pipe=%s temp=%s '
-                            'uv=%d sdr=%s bus=%s next=%ds %s'%(
+                            'uv=%d sdr=%s bus=%s next=%ds gain=%s clip=%.1f%% %s'%(
                 round(self.ladder.cap*100),round(in_use*100),
                 round(self.radio_duty(now)*100),
                 'on' if self._pipeline_on(now) else 'off',temp,self._uv_events,
                 str(self.status).replace(' ','_'),
                 'yes' if self._sdr_present() else 'no',
-                round(self.ladder.next_step_s(now)),self._power_detail or '-'))
+                round(self.ladder.next_step_s(now)),
+                str(self._gain_for('up')),100.0*self.adc_clip,
+                self._power_detail or '-'))
 
     def _power_log(self,now,text):
         """One line per supply event, per ladder step and per minute.
@@ -752,6 +762,46 @@ class SDRBackend:
             with path.open('a') as f:
                 f.write('%s%s %s\n'%(time.strftime('%Y-%m-%dT%H:%M:%S',
                                                      time.localtime(now)),up,text))
+        except Exception:
+            pass
+
+    def _log_hits(self,now,verified,confirmed):
+        """One line per C2000 transmission heard, and per change of the alert.
+
+        Until 0.10.4 nothing on the unit recorded what it had heard. After a
+        drive there was the screen someone may or may not have been looking
+        at, and a recording if they had thought to start one -- so "it did
+        not go off next to that car" could not be told apart from "that car
+        was not transmitting". hits.log sits next to search.log and answers
+        it: every verified uplink burst with its channel, level and length,
+        and each time the alert rose, strengthened or cleared.
+        """
+        state=('CLEAR' if not confirmed
+               else 'PROVISIONAL' if self.alarm.provisional else 'ALARM')
+        lines=[]
+        for r in verified:
+            tr=self.alarm.tracks.get(r.freq_hz,now,create=False)
+            lines.append('HIT CH %d %.4f MHz %.1f dB %.0f ms x%d duty %.2f %s%s seen=%d'%(
+                carrier_number(r.freq_hz,self.cfg),float(r.freq_hz)/1e6,float(r.snr_db),
+                float(r.burst_ms_median),int(r.burst_count),float(r.duty),
+                'partner' if (tr is not None and tr.trusted) else 'band',
+                ' weak' if getattr(r,'shape_waived',False) else '',
+                len(tr.hit_times) if tr is not None else 0))
+        if state!=self._alert_logged:
+            lines.append('ALERT %s -> %s'%(self._alert_logged,state))
+            self._alert_logged=state
+        if not lines:
+            return
+        try:
+            path=self.sites._path().with_name('hits.log')
+            path.parent.mkdir(parents=True,exist_ok=True)
+            if path.exists() and path.stat().st_size>262144:
+                keep=path.read_text().splitlines()[-1500:]
+                path.write_text('\n'.join(keep)+'\n')
+            stamp=time.strftime('%Y-%m-%dT%H:%M:%S',time.localtime(now))
+            with path.open('a') as f:
+                for line in lines:
+                    f.write('%s %s\n'%(stamp,line))
         except Exception:
             pass
 
@@ -838,7 +888,8 @@ class SDRBackend:
                 self.driver_path=str(getattr(self.sdr,'lib_path',''))
                 self.driver_knows_model=bool(
                     getattr(self.sdr,'lib_knows_model',False))
-            self.sdr.configure(int(sr),int(self.cfg.get('ppm',0)),self.cfg.get('gain','auto'))
+            self.sdr.configure(int(sr),int(self.cfg.get('ppm',0)),
+                               self._gain_for(self._band_of(center)))
             self.sdr.tune(int(center))
             self.sdr.reset()
             # A sample-rate change reprograms the tuner's IF filter as well as
@@ -855,6 +906,58 @@ class SDRBackend:
             self._close_direct_sdr()
             raise RuntimeError('librtlsdr read failed: '+str(e))
 
+    @staticmethod
+    def _band_of(centre):
+        """Uplink or downlink half of the C2000 band, for the gain."""
+        return 'down' if float(centre)>=387.5e6 else 'up'
+
+    def _gain_for(self,band):
+        """The tuner gain for this band: the configured one, less any back-off."""
+        gain=self.cfg.get('gain',37.2)
+        if gain=='auto':
+            return 'auto'
+        return max(0.0,float(gain)-float(self._gain_backoff.get(band,0.)))
+
+    def _watch_overload(self,iq,band,now=None):
+        """Keep the 8-bit ADC out of clipping, per band.
+
+        The gain was "auto" until 0.10.4, which hands it to the tuner's own
+        AGC. Measured on both reference dongles (R820T and R828D), that fills
+        the ADC with noise alone: in the empty uplink band 17% of the samples
+        sat on the rails, and on the downlink 12-27%. A fixed 37.2 dB reads
+        the same carriers 1-1.5 dB better with nothing clipped, and leaves
+        about 15 dB of room above the noise, so a transmitter close by still
+        measures stronger than one further off instead of both reading the
+        same saturated level.
+
+        A fixed gain needs a guard for the place where it is too much -- next
+        to a mast, or a handset keyed up at arm's length. When more than
+        gain_clip_limit of a capture clips, that band's gain steps down; when
+        it has been clean for gain_recover_s it steps back. The two halves of
+        the band are kept apart, because the downlink carries strong
+        continuous carriers and must not cost the uplink its sensitivity.
+        """
+        now=time.time() if now is None else float(now)
+        sub=iq[::16]
+        if not len(sub):
+            return
+        self.adc_rms=float(np.sqrt(np.mean(np.abs(sub)**2)))
+        self.adc_clip=float(np.mean((np.abs(sub.real)>=126.5)|(np.abs(sub.imag)>=126.5)))
+        if self.cfg.get('gain',37.2)=='auto':
+            return
+        limit=float(self.cfg.get('gain_clip_limit',0.05))
+        step=max(0.5,float(self.cfg.get('gain_backoff_step_db',4.0)))
+        most=max(0.0,float(self.cfg.get('gain_backoff_max_db',24.0)))
+        if self.adc_clip>limit:
+            self._gain_backoff[band]=min(most,self._gain_backoff[band]+step)
+            self._gain_clean_since[band]=now
+        elif self._gain_backoff[band]>0.0:
+            if self.adc_clip>limit*0.25:
+                self._gain_clean_since[band]=now
+            elif now-self._gain_clean_since[band]>=float(self.cfg.get('gain_recover_s',20.0)):
+                self._gain_backoff[band]=max(0.0,self._gain_backoff[band]-step)
+                self._gain_clean_since[band]=now
+
     def _timed_samples(self,centre,sr,count):
         """``_samples`` with the time the dongle spent streaming accounted for.
 
@@ -864,7 +967,12 @@ class SDRBackend:
         """
         t0=time.perf_counter()
         try:
-            return self._samples(centre,sr,count)
+            iq=self._samples(centre,sr,count)
+            try:
+                self._watch_overload(iq,self._band_of(centre))
+            except Exception:
+                pass                     # a level check must never cost a capture
+            return iq
         finally:
             self._radio_s+=time.perf_counter()-t0
 
@@ -1206,6 +1314,7 @@ class SDRBackend:
             self.last_iq=iq
             self.last_iq_meta={'centre_hz':float(centre),'sample_rate':int(sr),
                                'samples':int(len(iq)),'role':role,
+                               'gain':str(self._gain_for(self._band_of(centre))),
                                'captured_at':time.time()}
         return out
 
@@ -1576,6 +1685,7 @@ class SDRBackend:
             watched=[r.freq_hz for r in watch_results]
             confirmed,level,peaks=self.alarm.update(
                 verified,watched,now,trusted=self.sites.uplink_partners(now))
+            self._log_hits(now,verified,confirmed)
             locked=self.sites.locked(now)
 
             # The 380-385 MHz sweep that used to run here fed the spectrum
