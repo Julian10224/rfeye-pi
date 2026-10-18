@@ -441,6 +441,15 @@ class App:
             self.frames_skipped += 1
             return False
         touching = now - float(getattr(self, "ui_touch_at", 0.0)) < 1.5
+        streaming = getattr(self.backend, "is_streaming", None)
+        if (streaming is not None and not touching and streaming()
+                and now - self._shown_at < float(self.cfg.get("ui_quiet_stream_frame_s", 1.0))):
+            # A streaming radio has no gap to put a frame in: each one costs
+            # its time on the SPI bus in listening. At most one a second,
+            # then -- the bars still move, the buzzer is not held back at
+            # all, and a finger on the panel gets every frame.
+            self.frames_skipped += 1
+            return False
         if bool(self.cfg.get("ui_quiet_capture", True)):
             claim = getattr(self.backend, "claim_panel", None)
             if claim is not None:

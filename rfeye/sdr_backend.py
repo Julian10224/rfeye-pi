@@ -36,6 +36,11 @@ Every alert therefore rests on demodulated evidence -- pi/4-DQPSK at exactly
 18000 symbols/s, a 25 kHz RRC channel shape, and 14.1667 ms TDMA slot timing
 -- rather than on a level crossing a threshold.
 
+In drive mode stage 2 no longer dwells: the uplink is streamed, an energy
+trigger watches every channel of the window continuously, and only the ~65 ms
+around a burst goes to the waveform test (see _stream_work and stream_watch).
+Separate dwells heard each uplink channel about 9% of the time.
+
 The artefact baseline, coherent-comb rejector, temporal novelty gate and
 duplex-pair scoring of v6/v7 are gone.  They were all attempts to subtract
 false positives after the fact, and with a real waveform test they are not
@@ -49,8 +54,9 @@ import numpy as np
 
 import tetra_phy
 from tetra_phy import Channelizer, PhyResult, clamp
-from tetra_detector import (DC_GUARD_HZ, SiteRegistry, UplinkAlarm, carrier_number, plan_dwell,
-                            raster_snap)
+from tetra_detector import (DC_GUARD_HZ, SITE_LOCK_STALE_S, SiteRegistry, UplinkAlarm,
+                            carrier_number, plan_dwell, raster_snap)
+from stream_watch import StreamRing, StreamTrigger, plan_windows
 from power import PowerLadder, read_soc_temp, read_uv_alarm
 
 try:
@@ -185,6 +191,11 @@ class _CapturePump:
         self._q.put(None)
 
 
+# void (*rtlsdr_read_async_cb_t)(unsigned char *buf, uint32_t len, void *ctx)
+_ASYNC_CB = ctypes.CFUNCTYPE(None, ctypes.POINTER(ctypes.c_ubyte), ctypes.c_uint32,
+                             ctypes.c_void_p)
+
+
 class _PersistentRTL:
     """Persistent librtlsdr wrapper using only stable C API calls.
 
@@ -205,10 +216,16 @@ class _PersistentRTL:
         self.lib.rtlsdr_get_tuner_gains.argtypes=[ctypes.c_void_p,ctypes.POINTER(ctypes.c_int)]
         self.lib.rtlsdr_reset_buffer.argtypes=[ctypes.c_void_p]
         self.lib.rtlsdr_read_sync.argtypes=[ctypes.c_void_p,ctypes.c_void_p,ctypes.c_int,ctypes.POINTER(ctypes.c_int)]
+        self.lib.rtlsdr_read_async.argtypes=[ctypes.c_void_p,_ASYNC_CB,ctypes.c_void_p,
+                                             ctypes.c_uint32,ctypes.c_uint32]
+        self.lib.rtlsdr_read_async.restype=ctypes.c_int
+        self.lib.rtlsdr_cancel_async.argtypes=[ctypes.c_void_p]
+        self.lib.rtlsdr_cancel_async.restype=ctypes.c_int
         rc=self.lib.rtlsdr_open(ctypes.byref(self.dev),int(index))
         if rc != 0: raise RuntimeError(f'rtlsdr_open failed {rc}')
         self.sample_rate=None; self.gain=None; self.ppm=None
         self.rate_changed=False
+        self._stream_thread=None; self._stream_cb=None; self.stream_rc=None
 
     def _check(self, rc, what):
         if rc != 0: raise RuntimeError(f'{what} failed {rc}')
@@ -270,7 +287,57 @@ class _PersistentRTL:
             remaining-=take
         return parts[0] if len(parts)==1 else np.concatenate(parts)
 
+    def start_stream(self, on_bytes, buf_len=131072, buf_num=12):
+        """Read continuously, handing every USB buffer to ``on_bytes(view)``.
+
+        ``rtlsdr_read_async`` blocks until cancelled, so it runs on a thread
+        of its own; the callback runs on that thread too and must only copy.
+        No sync read may happen until ``stop_stream`` has returned True.
+        """
+        if self._stream_thread is not None:
+            raise RuntimeError('stream already running')
+        def cb(buf, n, ctx):
+            try:
+                on_bytes(np.ctypeslib.as_array(buf,shape=(int(n),)))
+            except Exception:
+                pass                     # never raise into librtlsdr
+        self._stream_cb=_ASYNC_CB(cb)    # held: ctypes must not free it
+        self.reset()
+        self.stream_rc=None
+        def run():
+            self.stream_rc=int(self.lib.rtlsdr_read_async(
+                self.dev,self._stream_cb,None,int(buf_num),int(buf_len)))
+        self._stream_thread=threading.Thread(target=run,name='rfeye-stream',daemon=True)
+        self._stream_thread.start()
+
+    def streaming(self):
+        t=self._stream_thread
+        return t is not None and t.is_alive()
+
+    def stop_stream(self, timeout=3.0):
+        """Cancel the async read and wait for it. True once it has ended.
+
+        Cancelling is retried: a cancel that lands before librtlsdr has
+        marked the transfer running is ignored by it, and the read would
+        then go on for ever.
+        """
+        t=self._stream_thread
+        if t is None:
+            return True
+        end=time.monotonic()+max(0.1,float(timeout))
+        while t.is_alive() and time.monotonic()<end:
+            try: self.lib.rtlsdr_cancel_async(self.dev)
+            except Exception: pass
+            t.join(0.1)
+        if t.is_alive():
+            return False
+        self._stream_thread=None
+        return True
+
     def close(self):
+        if self._stream_thread is not None and not self.stop_stream():
+            # Closing under a running async read frees what it is using.
+            raise RuntimeError('stream did not stop; not closing under it')
         if self.dev:
             try: self.lib.rtlsdr_close(self.dev)
             finally: self.dev=None
@@ -347,7 +414,7 @@ class SDRBackend:
         self.detector_state='SEARCHING'
         self.survey_shortlist=[]
         self._survey_at=0.; self._survey_idx=0; self._site_maint_idx=0
-        self._site_queue=[]; self._sweep_cursor=0.; self._alt_cycle=False
+        self._site_queue=[]; self._sweep_cursor=0.
         self._survey_scores=[]
         self._pass_best=None; self._pass_started=0.; self._pass_index=0
         self._pass_channels=0; self._pass_ok=0; self._pass_fails={}
@@ -370,6 +437,15 @@ class SDRBackend:
         self.dwell_centre_hz=0.; self.dwell_channels=[]
         self.last_dwell_role=''
         self.last_iq=None; self.last_iq_meta={}
+        # Continuous capture; see _stream_work. While it runs the panel does
+        # not wait for a gap -- there is none -- and the samples it may have
+        # disturbed are blanked instead (claim_panel).
+        self._streaming=False; self._stream_ring=None
+        self._stream_turn=0; self._stream_strikes=0; self._stream_off_until=0.0
+        self._stream_followed=False
+        self._stream_why=''
+        self.stream_triggers=0; self.stream_drops=0; self.stream_centre_hz=0.0
+        self.stream_channels=0
 
     # -- lifecycle ---------------------------------------------------------
     def set_demo(self,v):
@@ -493,6 +569,12 @@ class SDRBackend:
         limit = min(limit, self.ladder.cap)
         return min(1.0, max(0.05, limit))
 
+    def _hearing(self, now):
+        """Is something on the uplink being heard or followed up right now?"""
+        if self._follow_left > 0 and float(now) < self._follow_until:
+            return True
+        return bool(self.alarm.tracks.heard(now))
+
     def _low_power_pause(self):
         """Hold the radio to its share of the time, and let the CPU breathe.
 
@@ -511,6 +593,13 @@ class SDRBackend:
             self._radio_epoch = now - window * 0.5
             self._radio_s *= 0.5
             elapsed = max(1e-3, now - self._radio_epoch)
+        if self._hearing(now) and not self._power_flag:
+            # Never while something is being heard. This pause could sleep
+            # up to 3 s during a follow-up or with a live track -- the radio
+            # lying idle exactly while a vehicle drove alongside. The time
+            # is still counted, so the budget is paid back once it has gone
+            # quiet; only a rail that is low right now still gets its pause.
+            return
         pause = 0.0
         if limit < 1.0 and self._radio_s > 0.0:
             pause = (self._radio_s / limit) - max(1e-3, elapsed)
@@ -625,6 +714,12 @@ class SDRBackend:
                 self.cfg.get('scan_pipeline_min_duty',0.40))),
             'prefetch_hits':int(self._prefetch_hits),
             'prefetch_misses':int(self._prefetch_misses),
+            'stream_active':bool(self._streaming),
+            'stream_centre_hz':float(self.stream_centre_hz),
+            'stream_channels':int(self.stream_channels),
+            'stream_triggers':int(self.stream_triggers),
+            'stream_drops':int(self.stream_drops),
+            'stream_off_s':float(max(0.0,self._stream_off_until-time.time())),
                 'sdr_path':str(self.sdr_path),
                 'power_warning':str(self._power_flag),
                 'power_history':str(self._power_history),
@@ -776,11 +871,17 @@ class SDRBackend:
             temp=('%.1fC'%self._soc_temp) if self._soc_temp is not None else '?'
             self.band_heard=max(0.0,min(1.0,self._heard_s/max(1.0,now-self._heard_epoch)))
             self._heard_s=0.0; self._heard_epoch=now
-            self._power_log(now,'HB cap=%d%% limit=%d%% duty=%d%% hear=%.1f%% pipe=%s temp=%s '
+            if now<self._stream_off_until:
+                stream='off'
+            else:
+                stream='on' if self._stream_ready(now) else 'no'
+            self._power_log(now,'HB cap=%d%% limit=%d%% duty=%d%% hear=%.1f%% pipe=%s stream=%s '
+                            'trig=%d drop=%d temp=%s '
                             'uv=%d sdr=%s bus=%s next=%ds gain=%s clip=%.1f%% %s'%(
                 round(self.ladder.cap*100),round(in_use*100),
                 round(self.radio_duty(now)*100),100.0*self.band_heard,
-                'on' if self._pipeline_on(now) else 'off',temp,self._uv_events,
+                'on' if self._pipeline_on(now) else 'off',stream,
+                self.stream_triggers,self.stream_drops,temp,self._uv_events,
                 str(self.status).replace(' ','_'),
                 'yes' if self._sdr_present() else 'no',
                 round(self.ladder.next_step_s(now)),
@@ -915,17 +1016,22 @@ class SDRBackend:
             raise RuntimeError('capture stuck: identical to the previous dwell')
         self._last_capture_sig=sig
 
+    def _ensure_sdr(self):
+        """Open the dongle if it is not open yet."""
+        if self.sdr is None:
+            self.sdr=_PersistentRTL(int(self.cfg.get('sdr_device_index',0)))
+            self.sdr_path='CTYPES PERSISTENT'
+            # Which librtlsdr actually got loaded is not a detail: a build
+            # that does not know the dongle reports a silent, empty band.
+            self.driver_path=str(getattr(self.sdr,'lib_path',''))
+            self.driver_knows_model=bool(
+                getattr(self.sdr,'lib_knows_model',False))
+        return self.sdr
+
     def _samples(self,center,sr,count):
         """Tune and read, settling for the PLL and any sample-rate change."""
         try:
-            if self.sdr is None:
-                self.sdr=_PersistentRTL(int(self.cfg.get('sdr_device_index',0)))
-                self.sdr_path='CTYPES PERSISTENT'
-                # Which librtlsdr actually got loaded is not a detail: a build
-                # that does not know the dongle reports a silent, empty band.
-                self.driver_path=str(getattr(self.sdr,'lib_path',''))
-                self.driver_knows_model=bool(
-                    getattr(self.sdr,'lib_knows_model',False))
+            self._ensure_sdr()
             self.sdr.configure(int(sr),int(self.cfg.get('ppm',0)),
                                self._gain_for(self._band_of(center)))
             self.sdr.tune(int(center))
@@ -978,11 +1084,27 @@ class SDRBackend:
 
         Returns False if no gap came within ``timeout_s`` -- the frame then
         goes out regardless, so a wedged radio can never freeze the screen.
+
+        While the radio streams there is no gap to wait for. The frame goes
+        out at once, and the samples that are on the air while it is on the
+        wire are marked so the trigger ignores them: ui_quiet_stream_blank_s
+        (0.20 s) per frame, placed to the sample. Blanking whole USB buffers
+        around a 0.35 s hold cost 0.48 s a frame, and with the bars moving
+        during a detection that was half the listening time -- measured in
+        the Pi emulation, half the bursts lost. The app also sends at most one
+        changed frame per ui_quiet_stream_frame_s while streaming.
         """
         end=time.monotonic()+max(0.0,float(timeout_s))
         self.panel_wants=True
         try:
             while True:
+                if self._streaming:
+                    ring=self._stream_ring
+                    if ring is not None:
+                        ring.blank_at(time.monotonic(),0.02,
+                                      float(self.cfg.get('ui_quiet_stream_blank_s',0.20)),
+                                      int(self.cfg.get('phy_sample_rate',2016000)))
+                    return True
                 with self.air:
                     if self.capture_idle.is_set():
                         self.panel_until=time.monotonic()+max(0.0,float(hold_s))
@@ -1467,7 +1589,18 @@ class SDRBackend:
         self.last_dwell_ms=(time.perf_counter()-t0)*1000.
         self.last_capture_ms=self.last_dwell_ms
         self.last_scan_windows+=1
+        out=self._analyse_capture(iq,centre,sr,members,role)
+        self.dwell_centre_hz=float(centre)
+        self.dwell_channels=[f for f,_ in members]
+        self.last_dwell_role=role
+        return out
 
+    def _analyse_capture(self,iq,centre,sr,members,role):
+        """The waveform test on ``members`` of one capture, cheap screen first.
+
+        Shared by the dwell and by the stream, which hands it the ~65 ms
+        around a burst instead of a whole dwell.
+        """
         t1=time.perf_counter()
         ch=Channelizer(iq,sr)
         out=[]
@@ -1532,9 +1665,6 @@ class SDRBackend:
                     'REJECTED CH %d %.4f MHz %.1f dB %s'%(
                         carrier_number(worst.freq_hz,self.cfg),float(worst.freq_hz)/1e6,
                         float(worst.snr_db),worst.reason))
-        self.dwell_centre_hz=float(centre)
-        self.dwell_channels=[f for f,_ in members]
-        self.last_dwell_role=role
         if bool(self.cfg.get('keep_last_iq',True)):
             # Held so a confirmed alert can be written out as raw IQ and
             # re-checked offline. This is the evidence trail that recordings
@@ -1568,7 +1698,7 @@ class SDRBackend:
         base=max(0.,float(self.cfg.get('site_reverify_s',60.0)))
         if not locked:
             return base
-        stale=max(60.,float(self.cfg.get('site_lock_stale_s',600.0)))
+        stale=max(60.,float(self.cfg.get('site_lock_stale_s',SITE_LOCK_STALE_S)))
         return min(base,max(5.,stale/(2.0*max(1,len(locked)-1))))
 
     def _site_work(self,now):
@@ -1671,12 +1801,17 @@ class SDRBackend:
         for r in results:
             # A carrier that failed only because there was nothing to hear is
             # idle, not disproved -- traffic carriers are idle most of the time.
-            # An idle traffic carrier is "no information"; a channel the
-            # cheap screen dropped is not, because nothing looked closely
-            # enough to say the carrier was idle rather than gone. Without
-            # this a deaf receiver kept its locks: every channel came back as
-            # snr-only, which the exemption reads as "quiet, not absent".
-            silent=(not r.ok and r.failed()==['snr'] and not r.screened)
+            #
+            # A screened channel counts as idle too. Until 0.11.0 it did not,
+            # and an idle carrier is almost always screened -- noise sits far
+            # below the screen's floor -- so every quiet traffic carrier took
+            # a miss per band pass and lost its lock after four of them, about
+            # eight minutes: exactly what the exemption in observe() is there
+            # to prevent. Its partner then left the trusted set and a hit on it
+            # was only provisional. The deaf receiver this was guarding
+            # against is already caught: the exemption only holds while some
+            # carrier still verifies (SiteRegistry.heard_recently).
+            silent=(not r.ok and r.failed()==['snr'])
             self.sites.observe(r.freq_hz,r.ok,r.quality,now,silent=silent)
 
         covered={int(round(x)) for x in self.dwell_channels}
@@ -1866,67 +2001,432 @@ class SDRBackend:
             self._band_cache_key=key; self._band_cache=out
         return list(self._band_cache)
 
+    # -- continuous capture ------------------------------------------------
+    def _stream_ready(self,now):
+        """Stream this cycle rather than dwell?
+
+        Only when the radio may read nearly all the time: streaming is 100%
+        duty by definition, so in ECO, or with the power ladder holding the
+        radio back after a dip, the dwells and their pause stay in charge.
+        """
+        if not bool(self.cfg.get('stream_mode',True)):
+            return False
+        if now<self._stream_off_until:
+            return False
+        if self._duty_limit(now)<float(self.cfg.get('stream_min_duty',0.85)):
+            return False
+        return bool(self._uplink_band_channels() or self.sites.uplink_partners(now))
+
+    def _stream_place(self,freqs):
+        sr=int(self.cfg.get('phy_sample_rate',2016000))
+        return plan_dwell(freqs,sr,
+                          max_offset_hz=float(self.cfg.get('phy_max_offset_hz',850000.)),
+                          spacing_hz=float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
+
+    def _stream_windows(self,now):
+        """The tuner placements stream holds take turns on.
+
+        The locked site's partners come first, ``stream_partner_weight``
+        turns for every turn of the rest of the band, which is still covered
+        in full: a vehicle on another carrier or a neighbouring site is what
+        0.9.35 learned to hear, and the stream must not unlearn it.
+        """
+        partners=sorted(self.sites.uplink_partners(now))
+        band=self._uplink_band_channels()
+        wins=plan_windows([partners,band],self._stream_place)
+        pw=[c for c,g in wins if g==0]
+        bw=[c for c,g in wins if g==1]
+        if not pw or not bw:
+            return pw or bw
+        weight=max(1,int(self.cfg.get('stream_partner_weight',2)))
+        seq=[]
+        for b in bw:
+            seq.extend(pw*weight); seq.append(b)
+        return seq
+
+    def _stream_members(self,centre,now):
+        """Every channel the window at ``centre`` can measure."""
+        lim=float(self.cfg.get('phy_max_offset_hz',850000.))
+        pool=self._uplink_band_channels() or sorted(self.sites.uplink_partners(now))
+        out=[]
+        for f in pool:
+            off=float(f)-float(centre)
+            if DC_GUARD_HZ-1e-6<=abs(off)<=lim+1e-6:
+                out.append((float(f),off))
+        return out
+
+    def is_streaming(self):
+        """Is the radio streaming right now? The panel paces itself on it."""
+        return bool(self._streaming)
+
+    def _stream_failed(self,why):
+        """A stream that broke. Twice with the dongle still there: dwell for a while."""
+        present=self._sdr_present()
+        self._close_direct_sdr()
+        now=time.time()
+        if not (present and self.running):
+            return                       # the dongle went; the dwell path reports that
+        self._stream_strikes+=1
+        self._stream_why=str(why)[:60]
+        if self._stream_strikes>=2:
+            retry=max(30.,float(self.cfg.get('stream_retry_s',600.0)))
+            self._stream_off_until=now+retry
+            self._stream_strikes=0
+            self._power_log(now,'STREAM off for %d s, dwelling instead: %s'%(
+                round(retry),self._stream_why))
+        else:
+            self._power_log(now,'STREAM failed: %s'%self._stream_why)
+
+    def _stream_work(self,now):
+        """Listen to one window without a break for a hold. None if it could not.
+
+        The dongle reads continuously into a ring; every block goes through
+        the energy trigger (stream_watch.StreamTrigger), and the ~65 ms
+        around each burst it reports goes through the same waveform test a
+        dwell uses. The alarm and the panel are updated as it goes --
+        immediately on a verified hit, otherwise every stream_publish_s -- so
+        the hold is not a delay on anything.
+
+        A window with something heard in it is held on past stream_hold_s,
+        up to stream_hold_max_s; nothing else is learnt by moving away from a
+        vehicle that is still transmitting.
+        """
+        heard=[tr.freq_hz for tr in self.alarm.tracks.heard(now)]
+        centre=None
+        # Something heard gets the next hold, but not every hold: a vehicle
+        # that never stops transmitting would otherwise keep the receiver on
+        # its window for good, as uplink_track_run stops it doing to dwells.
+        if heard and not self._stream_followed:
+            partners=sorted(self.sites.uplink_partners(now))
+            centre,_=self._stream_place([heard[0]]+(partners or self._uplink_band_channels()))
+        self._stream_followed=centre is not None
+        if centre is None:
+            seq=self._stream_windows(now)
+            if not seq:
+                return None
+            centre=seq[self._stream_turn%len(seq)]
+            self._stream_turn+=1
+        members=self._stream_members(centre,now)
+        if not members:
+            return None
+        keys={int(round(f)) for f,_ in members}
+        watched=[f for f,_ in members]
+        band_n=max(1,len(self._uplink_band_channels()) or len(members))
+        share=min(1.0,len(members)/float(band_n))
+        cfg=self.cfg
+        sr=int(cfg.get('phy_sample_rate',2016000))
+        buf_len=max(16384,int(cfg.get('stream_buf_len',131072)))&~16383
+        ring=StreamRing(sr*max(0.5,float(cfg.get('stream_ring_s',2.0))))
+        trig=StreamTrigger(
+            sr,[o for _,o in members],nfft=int(cfg.get('stream_fft_size',1024)),
+            trigger_db=float(cfg.get('stream_trigger_db',3.5)),
+            min_s=float(cfg.get('stream_trigger_min_s',0.005)),
+            max_s=float(cfg.get('stream_trigger_max_s',0.060)),
+            smooth_rows=int(cfg.get('stream_smooth_rows',4)),
+            gap_rows=int(cfg.get('stream_gap_rows',3)),
+            holdoff_s=float(cfg.get('stream_holdoff_s',0.30)),
+            row_stride=int(cfg.get('stream_row_stride',2)))
+        hold_hit=int(sr*max(0.0,float(cfg.get('stream_holdoff_hit_s',2.0))))
+        hold_fail=int(sr*max(0.0,float(cfg.get('stream_holdoff_fail_s',1.0))))
+        index={int(round(f)):i for i,(f,_) in enumerate(members)}
+        snip=1<<int(cfg.get('stream_snippet_log2',17))
+        maxch=max(1,int(cfg.get('stream_max_channels',8)))
+        hold=max(1.0,float(cfg.get('stream_hold_s',8.0)))
+        hold_max=max(hold,float(cfg.get('stream_hold_max_s',30.0)))
+        publish_s=max(0.2,float(cfg.get('stream_publish_s',1.0)))
+        stall_s=max(0.5,float(cfg.get('stream_stall_s',2.5)))
+        min_duty=float(cfg.get('stream_min_duty',0.85))
+
+        # Nothing else may be reading: a prefetch left by a dwell cycle is
+        # waited out and dropped, as a mismatched one always was.
+        job,self._prefetch=self._prefetch,None
+        if job is not None:
+            try: self._pump.wait(job,8.0)
+            except Exception: pass
+        # The follow-up is how dwells came back to a hit. A stream never left.
+        self._follow=[]; self._follow_left=0; self._follow_until=0.0
+
+        def on_bytes(view):
+            ring.write(view)
+
+        everything=[]
+        mono0=time.monotonic()
+        try:
+            dev=self._ensure_sdr()
+            dev.configure(sr,int(cfg.get('ppm',0)),self._gain_for('up'))
+            dev.tune(int(centre))
+            self._begin_capture()        # a frame already on the wire goes first
+            self._stream_ring=ring
+            self._streaming=True
+            self.stream_centre_hz=float(centre); self.stream_channels=len(members)
+            self.dwell_centre_hz=float(centre); self.dwell_channels=list(watched)
+            self.last_dwell_role='STREAM'
+            mono0=acc_at=time.monotonic()
+            dev.start_stream(on_bytes,buf_len=buf_len,
+                             buf_num=int(cfg.get('stream_buf_num',12)))
+            # The PLL and the IF filter settle, as a dwell lets them.
+            cursor=int(sr*(0.030 if dev.rate_changed else 0.006))
+            pending=[]; results=[]
+            last_pub=last_data=time.monotonic()
+            last_written=0; level_at=0.0
+            try:
+                while self.running:
+                    mono=time.monotonic()
+                    with self.lock:
+                        if self._demo_forced or self._sdr_reopen:
+                            break
+                    if mono-mono0>=hold:
+                        live=mono-mono0<hold_max and any(
+                            int(round(tr.freq_hz)) in keys
+                            for tr in self.alarm.tracks.heard(time.time()))
+                        if not live:
+                            break
+                    if not dev.streaming():
+                        raise RuntimeError('stream ended (rc %s)'%dev.stream_rc)
+                    w=ring.written
+                    if w!=last_written:
+                        last_written=w; last_data=mono
+                    elif mono-last_data>stall_s:
+                        raise RuntimeError('stream stalled')
+                    if cursor<ring.oldest():
+                        # Analysis fell more than a ring behind: say so, and
+                        # carry on from what is still there.
+                        self.stream_drops+=ring.oldest()-cursor
+                        cursor=ring.oldest()
+                    end=min(w,cursor+buf_len//2)
+                    if end-cursor>=trig.hop:
+                        iq=ring.read(cursor,end)
+                        if iq is not None:
+                            blanks=ring.blanked(cursor,end)
+                            for c,s,e in trig.feed(iq,cursor,blanks):
+                                pending.append((s,e,c))
+                            if not blanks and mono-level_at>=1.0:
+                                level_at=mono
+                                before=self._gain_for('up')
+                                try:
+                                    self._watch_overload(iq,'up',centre=centre,sr=sr)
+                                except Exception:
+                                    pass
+                                if self._gain_for('up')!=before:
+                                    dev.configure(sr,int(cfg.get('ppm',0)),self._gain_for('up'))
+                                    trig.reset_floor()
+                        cursor=end
+                    else:
+                        time.sleep(0.01)
+                    # Analyse each burst once the ring holds the samples on
+                    # both sides of it; bursts on other channels that fall in
+                    # the same stretch share its one FFT.
+                    while pending:
+                        pending.sort()
+                        s,e,_=pending[0]
+                        a=max(ring.oldest(),(s+e)//2-snip//2)
+                        b=a+snip
+                        if b>ring.written:
+                            break
+                        take=[p for p in pending if p[0]>=a and p[1]<=b] or [pending[0]]
+                        pending=[p for p in pending if p not in take]
+                        chans=sorted({c for _,_,c in take})[:maxch]
+                        chunk=ring.read(a,b)
+                        if chunk is None:
+                            self.stream_drops+=b-a
+                            continue
+                        self.stream_triggers+=len(chans)
+                        got=self._analyse_capture(
+                            chunk,centre,sr,[members[c] for c in chans],'UPLINK')
+                        results.extend(got)
+                        # Each analysis is a quarter of a second of a Pi 3 B+.
+                        # A held call bursts every 57 ms, and proving it again
+                        # three times a second buys nothing; a channel that
+                        # just failed is most likely about to fail again.
+                        for r in got:
+                            c=index.get(int(round(float(r.freq_hz))))
+                            if c is not None:
+                                trig.quiet_until[c]=max(int(trig.quiet_until[c]),
+                                                        b+(hold_hit if r.ok else hold_fail))
+                    hit=any(r.ok for r in results)
+                    if hit or mono-last_pub>=publish_s:
+                        t=time.monotonic()
+                        self._radio_s+=t-acc_at; self._heard_s+=(t-acc_at)*share
+                        acc_at=t
+                        everything.extend(results)
+                        self._publish(time.time(),results,[],watched=watched,
+                                      cycle_s=t-last_pub)
+                        results=[]; last_pub=t
+                        try:
+                            self._power_tick()
+                        except Exception:
+                            pass
+                        if self._duty_limit(time.time())<min_duty:
+                            break        # the supply has asked for less
+            finally:
+                self._streaming=False
+                self._stream_ring=None
+                stopped=dev.stop_stream()
+                t=time.monotonic()
+                self._radio_s+=t-acc_at
+                self._heard_s+=(t-acc_at)*share
+                self.capture_ended_at=t
+                self.capture_idle.set()
+                if not stopped:
+                    raise RuntimeError('stream did not stop')
+            if results:
+                everything.extend(results)
+                self._publish(time.time(),results,[],watched=watched)
+            self._stream_strikes=0
+            return everything
+        except Exception as e:
+            self._streaming=False
+            self.capture_idle.set()
+            self._stream_failed(e)
+            return None
+
+    def _publish(self,now,watch_results,site_results,watched=None,t0=None,cycle_s=None):
+        """Hand what was just measured to the alarm and to the panel."""
+        verified=[r for r in watch_results if r.ok]
+        if watched is None:
+            watched=[r.freq_hz for r in watch_results]
+        confirmed,level,peaks=self.alarm.update(
+            verified,watched,now,trusted=self.sites.uplink_partners(now))
+        self._log_hits(now,verified,confirmed)
+        locked=self.sites.locked(now)
+
+        state='ALERT' if confirmed else ('LOCKED' if locked else 'SEARCHING')
+        # The bars come from the tracks, not from whatever this one scan
+        # round returned, so they mean "these are the signals near me"
+        # and stop jumping channel every dwell. Their height is the RF
+        # level: how TETRA-like the waveform looked barely moves once a
+        # signal is decodable at all, and is not what someone glancing at
+        # the screen is asking.
+        weak=float(self.cfg.get('ui_level_weak_db',8.0))
+        strong=float(self.cfg.get('ui_level_strong_db',26.0))
+        nshow=int(self.cfg.get('max_signals',3))
+        shown=[tr.as_dict(now,weak,strong) for tr in
+               self.alarm.tracks.top(now,nshow)]
+        for row in shown:
+            row['channel']=carrier_number(row['freq_hz'],self.cfg)
+        if confirmed and not shown:
+            # The alert is being held through a gap between transmissions,
+            # and the track that raised it has gone quiet -- which is what
+            # a gap is. Falling to an empty list here stopped the buzzer
+            # the moment the vehicle drew breath, instead of letting the
+            # alert age out over uplink_alert_hold_s.
+            shown=[self._peak_row(r) for r in peaks[:nshow]]
+        # Every channel the dwell measured, not the first twelve. A
+        # dwell covers up to 48, so a recording of a drive past a
+        # vehicle kept a quarter of the evidence -- and the quarter
+        # it kept was the head of the queue, not the interesting
+        # part. The recordings are the only real evidence there is.
+        keep=max(12,int(self.cfg.get('snapshot_phy_rows',64)))
+        phy_rows=[r.as_dict() for r in (watch_results+site_results)[:keep]]
+
+        with self.lock:
+            self.detector_state=state
+            self.peaks=shown if confirmed else []
+            self.mobile_peaks=[self._peak_row(r) for r in verified]
+            self.site_peaks=[dict(s) for s in locked]
+            self.mobile_level=float(level) if confirmed else 0.
+            self.site_level=float(max([s['quality'] for s in locked],default=0.))
+            self.activity_confidence=float(level)
+            self.mobile_confirmed=bool(confirmed)
+            self.alert_provisional=bool(confirmed and self.alarm.provisional)
+            self.provisional_hit_at=float(self.alarm.provisional_hit_at)
+            self.last_phy=phy_rows
+            self.last_update=now; self.status='LIVE'; self.error=''
+            self.demo_active=False; self.last_good_scan=now; self.scan_failures=0
+            self._usb_resets=0; self._usb_backoff=0.
+            if cycle_s is not None:
+                self.last_cycle_ms=float(cycle_s)*1000.
+            elif t0 is not None:
+                self.last_cycle_ms=(time.perf_counter()-t0)*1000.
+        if self._sdr_lost_at:
+            self._power_log(now,'SDR back after %.0f s'%(time.time()-self._sdr_lost_at))
+            self._sdr_lost_at=0.
+        return confirmed
+
     def _scan_cycle(self):
         t0=time.perf_counter(); self.last_scan_windows=0
         try:
             now=time.time()
             site_results=[]; watch_results=[]
             self.dwell_channels=[]
-            # The uplink is watched whether or not a downlink is locked. Until
-            # 0.9.35 stage 2 ran only behind a lock, so a unit that had not yet
-            # proved a base station -- which, driving, is most of the time in
-            # every new cell -- was not listening to 380-385 MHz at all. The
-            # lock is still what the panel reports and still what decides which
-            # channels confirm on one hit, but it is no longer the gate on
-            # hearing anything.
-            watch_results=self._watch_work(now)
+            # Stream when the radio may read all the time: the window is
+            # listened to without a break for a hold, and the alarm and panel
+            # are updated as it goes. None means it could not (or should
+            # not), and the cycle dwells as before.
+            streamed=self._stream_work(now) if self._stream_ready(now) else None
+            if streamed is not None:
+                now=time.time()
+            else:
+                # The uplink is watched whether or not a downlink is locked.
+                # Until 0.9.35 stage 2 ran only behind a lock, so a unit that
+                # had not yet proved a base station -- which, driving, is most
+                # of the time in every new cell -- was not listening to
+                # 380-385 MHz at all. The lock is still what the panel reports
+                # and still what decides which channels confirm on one hit,
+                # but it is no longer the gate on hearing anything.
+                watch_results=self._watch_work(now)
             # A TETRA site runs several carriers and a handset can be on any
             # of them, so an unfinished band pass is finished even after the
             # first lock -- stopping early would leave real uplink channels
-            # unwatched. It runs on alternate cycles so the uplink watch keeps
-            # priority.
-            self._alt_cycle=not self._alt_cycle
-            # Alternate cycles carry the band pass; a due re-proof gets a turn
-            # whenever it comes round. _site_work owns the timer, so a pass
-            # dwell can no longer postpone the next re-proof.
-            due=(now-self._site_verify_at
-                 >= self._reverify_interval(self.sites.locked(now)))
-            # How the two stages share the cycles. The uplink sweep is the
-            # detector now, so it runs every cycle; the downlink pass rides
-            # along on alternate ones. With nothing locked it gets all of
-            # those, because a lock is what lets a partner channel confirm on a
-            # single hit -- worth having, just no longer worth waiting for.
-            # While a hit is being followed up the uplink gets the whole cycle:
-            # the handset may unkey at any moment, and nothing a downlink dwell
-            # could learn is urgent by comparison.
+            # unwatched. A due re-proof gets a turn whenever it comes round;
+            # _site_work owns the timer, so a pass dwell can no longer
+            # postpone the next re-proof.
+            # Only a lock has a re-proof to be due: with nothing locked the
+            # timer never runs, and "due" was true on every cycle -- which
+            # gave the downlink every cycle until something locked.
+            locked_now=self.sites.locked(now)
+            due=bool(locked_now) and (now-self._site_verify_at
+                                      >= self._reverify_interval(locked_now))
+            # How the two stages share the cycles. The uplink is the detector
+            # now, so it runs every cycle and the downlink rides along on a
+            # share of them. While a hit is being followed up the uplink gets
+            # the whole cycle: the handset may unkey at any moment, and
+            # nothing a downlink dwell could learn is urgent by comparison.
             if not self._follow_left:
-                if self.sites.locked(now):
+                self._site_share+=1
+                if streamed is not None:
+                    # Between two stream holds, at most one downlink dwell,
+                    # and only when there is something to do: a re-proof that
+                    # is due, a band pass still running, or no lock yet.
+                    run_site=due or bool(self._site_queue) or not locked_now
+                elif locked_now:
                     # One cycle in site_pass_share, not one in two. Measured on
                     # the field unit, the band pass was taking 9 of 22 cycles
                     # while the site was already locked with six carriers --
                     # half the receiver's time spent re-proving 390-395 MHz,
                     # which no longer decides whether anything alerts.
                     share=max(2,int(self.cfg.get('site_pass_share',5)))
-                    self._site_share+=1
                     run_site=(self._site_queue and self._site_share%share==0) or due
                 else:
-                    run_site=self._alt_cycle or due
+                    # And the same without a lock, since 0.11.0. One cycle
+                    # in two went to the downlink here, so a unit entering a
+                    # new cell -- most of a drive -- was half deaf on the
+                    # uplink while it looked for a base station that has not
+                    # been a condition for an alert since 0.9.35.
+                    #
+                    # A carrier that verified lately and is one or two hits
+                    # short of a lock still gets one cycle in two: it is the
+                    # cheapest route to a lock, and a lock is what lets a
+                    # partner confirm on a single hit. Lately, because a
+                    # candidate has no age limit of its own and one that never
+                    # comes back must not hold the downlink for ever.
+                    fresh=max(10.,float(self.cfg.get('site_candidate_fresh_s',120.0)))
+                    warm=any(now-c['last_ok']<=fresh for c in self.sites.candidates(now))
+                    share=2 if warm else max(2,int(self.cfg.get('site_search_share',5)))
+                    run_site=(self._site_share%share==0)
                 if run_site:
                     site_results=self._site_work(now)
 
             now=time.time()
-            verified=[r for r in watch_results if r.ok]
-            watched=[r.freq_hz for r in watch_results]
-            confirmed,level,peaks=self.alarm.update(
-                verified,watched,now,trusted=self.sites.uplink_partners(now))
-            self._log_hits(now,verified,confirmed)
-            locked=self.sites.locked(now)
-
             # The 380-385 MHz sweep that used to run here fed the spectrum
             # page and nothing else. It cost a full wide capture every fourth
             # cycle -- measured, the difference between a 1.1 s and a 1.7 s
             # round -- to draw a picture the detector never read. The uplink
             # channels that matter are dwelt on individually by _watch_work.
+            self._publish(now,watch_results,site_results,
+                          watched=[] if streamed is not None else None,t0=t0)
+            if streamed is not None:
+                return True
 
             # With no lock and an exhausted shortlist there is nothing to
             # verify until the next survey is due. Without this the scan
@@ -1940,55 +2440,6 @@ class SDRBackend:
             # The radio can be filling the next buffer while the rest of
             # this cycle runs.
             self._prefetch_uplink(now)
-
-            state='ALERT' if confirmed else ('LOCKED' if locked else 'SEARCHING')
-            # The bars come from the tracks, not from whatever this one scan
-            # round returned, so they mean "these are the signals near me"
-            # and stop jumping channel every dwell. Their height is the RF
-            # level: how TETRA-like the waveform looked barely moves once a
-            # signal is decodable at all, and is not what someone glancing at
-            # the screen is asking.
-            weak=float(self.cfg.get('ui_level_weak_db',8.0))
-            strong=float(self.cfg.get('ui_level_strong_db',26.0))
-            nshow=int(self.cfg.get('max_signals',3))
-            shown=[tr.as_dict(now,weak,strong) for tr in
-                   self.alarm.tracks.top(now,nshow)]
-            for row in shown:
-                row['channel']=carrier_number(row['freq_hz'],self.cfg)
-            if confirmed and not shown:
-                # The alert is being held through a gap between transmissions,
-                # and the track that raised it has gone quiet -- which is what
-                # a gap is. Falling to an empty list here stopped the buzzer
-                # the moment the vehicle drew breath, instead of letting the
-                # alert age out over uplink_alert_hold_s.
-                shown=[self._peak_row(r) for r in peaks[:nshow]]
-            # Every channel the dwell measured, not the first twelve. A
-            # dwell covers up to 48, so a recording of a drive past a
-            # vehicle kept a quarter of the evidence -- and the quarter
-            # it kept was the head of the queue, not the interesting
-            # part. The recordings are the only real evidence there is.
-            keep=max(12,int(self.cfg.get('snapshot_phy_rows',64)))
-            phy_rows=[r.as_dict() for r in (watch_results+site_results)[:keep]]
-
-            with self.lock:
-                self.detector_state=state
-                self.peaks=shown if confirmed else []
-                self.mobile_peaks=[self._peak_row(r) for r in verified]
-                self.site_peaks=[dict(s) for s in locked]
-                self.mobile_level=float(level) if confirmed else 0.
-                self.site_level=float(max([s['quality'] for s in locked],default=0.))
-                self.activity_confidence=float(level)
-                self.mobile_confirmed=bool(confirmed)
-                self.alert_provisional=bool(confirmed and self.alarm.provisional)
-                self.provisional_hit_at=float(self.alarm.provisional_hit_at)
-                self.last_phy=phy_rows
-                self.last_update=now; self.status='LIVE'; self.error=''
-                self.demo_active=False; self.last_good_scan=now; self.scan_failures=0
-                self._usb_resets=0; self._usb_backoff=0.
-                self.last_cycle_ms=(time.perf_counter()-t0)*1000.
-            if self._sdr_lost_at:
-                self._power_log(now,'SDR back after %.0f s'%(time.time()-self._sdr_lost_at))
-                self._sdr_lost_at=0.
             return True
         except Exception as e:
             err=str(e)

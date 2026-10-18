@@ -57,8 +57,19 @@ try:
 except Exception:
     pass
 
+# The detector profile load_config() migrates every unit to. DEFAULTS carries
+# the same number, so code and tests that read DEFAULTS directly see what a
+# running unit sees; they said 11 while every unit ran 13.
+DETECTOR_PROFILE_VERSION = 13
+
+# The radio profile, migrated separately from the detector's because it is a
+# user setting rather than a calibration. 1 (0.11.0) is drive mode by
+# default: see low_power_mode.
+POWER_PROFILE_VERSION = 1
+
 DEFAULTS = {
-    "detector_profile_version": 11,
+    "detector_profile_version": DETECTOR_PROFILE_VERSION,
+    "power_profile_version": POWER_PROFILE_VERSION,
     "ui_width": 480,
     "ui_height": 800,
     "physical_width": 800,
@@ -223,6 +234,51 @@ DEFAULTS = {
     # current -- exactly what a rail that has just sagged cannot use.
     "scan_pipeline_min_duty": 0.40,
     "low_power_min_pause_s": 0.0,
+    # Continuous capture (0.11.0). Separate dwells listened to each uplink
+    # channel about 9% of the time (power.log, hear=9.4%), so a vehicle that
+    # sent a handful of short bursts while passing was mostly missed: one
+    # burst in range was a 9% chance, five 39%. Streaming keeps the dongle
+    # reading into a ring buffer, a cheap per-channel energy trigger runs on
+    # every block, and only the ~65 ms around a burst of stream_trigger_min_s
+    # or longer goes to the full waveform test. The window covers the locked
+    # site's partners (stream_partner_weight turns in the rotation) and the
+    # rest of the band in turn; the downlink gets one dwell between holds,
+    # and only when it is due.
+    #
+    # It runs only when the radio may stream at least stream_min_duty of the
+    # time -- drive mode, with the power ladder at the top -- and falls back
+    # to dwells on its own, for stream_retry_s, if the stream fails while the
+    # dongle is still on the bus.
+    "stream_mode": True,
+    "stream_min_duty": 0.85,
+    "stream_hold_s": 8.0,
+    "stream_hold_max_s": 30.0,
+    "stream_partner_weight": 2,
+    "stream_fft_size": 1024,
+    "stream_trigger_db": 3.5,
+    "stream_trigger_min_s": 0.005,
+    "stream_trigger_max_s": 0.060,
+    "stream_smooth_rows": 4,
+    "stream_gap_rows": 3,
+    "stream_holdoff_s": 0.30,
+    # Measured in an emulation of a Pi 3 B+ at its 900 MHz ceiling: the FFT
+    # on every row and an analysis every 0.3 s per active channel came to
+    # more than one core. Every other row, and a channel left alone for 2 s
+    # after it verified (1 s after it failed), is what keeps up.
+    "stream_row_stride": 2,
+    "stream_holdoff_hit_s": 2.0,
+    "stream_holdoff_fail_s": 1.0,
+    # 2^17 samples, 65 ms around the burst. 130 ms cost half a second of a
+    # Pi 3 B+ per analysis; 65 ms recognises the same bursts (a subslot
+    # slightly better: it is a larger share of the window) at 57% of the cost.
+    "stream_snippet_log2": 17,
+    "stream_max_channels": 8,
+    "stream_publish_s": 1.0,
+    "stream_ring_s": 2.0,
+    "stream_buf_len": 131072,
+    "stream_buf_num": 12,
+    "stream_stall_s": 2.5,
+    "stream_retry_s": 600.0,
     # How many per-channel results a snapshot carries. One dwell measures
     # up to 48 channels; at 12 a recording kept a quarter of what the
     # receiver saw, which is how a drive past a vehicle could be analysed
@@ -233,6 +289,14 @@ DEFAULTS = {
     # unit that already held six carriers -- half the receiver's time
     # re-proving a lock that no longer gates the alarm.
     "site_pass_share": 5,
+    # The same, with nothing locked. It was one cycle in two: a unit
+    # entering a new cell was half deaf on the uplink while it looked for a
+    # base station, although a lock stopped being a condition for an alert
+    # in 0.9.35.
+    "site_search_share": 5,
+    # ...except while a carrier that verified this recently is still short of
+    # a lock: one cycle in two, the cheapest route to a lock.
+    "site_candidate_fresh_s": 120.0,
     # How many verified hits a channel *outside* the locked partners needs
     # before it shows. One, since 0.10.3, as a Blu Eye does: it warns on the
     # pulse. Two had it hearing a vehicle on any other carrier in 4% of
@@ -375,8 +439,15 @@ DEFAULTS = {
     # Low power mode. The detector keeps a Pi 3 B+ at its full 1.4 GHz around
     # the clock, which on a marginal supply is the difference between the
     # RTL-SDR enumerating and not. This trades time-to-lock for headroom, and
-    # it is the user's call, so it lives in the settings menu.
-    "low_power_mode": True,
+    # it is the user's call, so it lives in the settings menu ("Max power").
+    #
+    # Off since 0.11.0: drive mode. ECO held the radio to 45-55% of the time
+    # and the duty pause on top of that could sleep up to 3 s, so with the
+    # rest of a cycle's overheads each uplink channel was heard 9% of the
+    # time. On a proper 5 V / 3 A car supply that is pure loss. What protects
+    # a weak supply now is the power ladder, which drops on the first dip,
+    # and the app, which switches ECO back on while the rail is low.
+    "low_power_mode": False,
     "low_power_ui_fps": 8,
     "low_power_idle_ui_fps": 3,
     # The panel's SPI bus is wideband noise in the band while a frame goes
@@ -396,6 +467,12 @@ DEFAULTS = {
     "ui_quiet_panel_hold_s": 0.35,
     "ui_quiet_touch_wait_s": 0.7,
     "ui_quiet_radio_wait_s": 1.0,
+    # While the radio streams (0.11.0) there is no gap between captures. A
+    # changed frame goes out at once and the trigger ignores the
+    # ui_quiet_stream_blank_s it is on the wire for; and at most one changed
+    # frame per ui_quiet_stream_frame_s is sent unless the panel is touched.
+    "ui_quiet_stream_blank_s": 0.20,
+    "ui_quiet_stream_frame_s": 1.0,
     "ui_refresh_s": 30.0,
     "power_notice_timeout_s": 30.0,
     "low_power_scan_pause_s": 1.5,
@@ -441,7 +518,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.10.9",
+    "app_version": "0.11.0",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -459,7 +536,7 @@ DEFAULTS = {
 # they actually differ from the shipped default -- a deliberate field
 # override survives, an accidental fossil does not.
 _DETECTOR_PREFIXES = ("phy_", "site_", "survey_", "uplink_", "ui_level_", "gain_",
-                      "ui_quiet_")
+                      "ui_quiet_", "stream_")
 _DETECTOR_KEYS = (
     "sample_rate", "fft_size", "duplex_split_hz", "gain",
     "mobile_band_start_hz", "mobile_band_end_hz",
@@ -551,11 +628,19 @@ def load_config():
     # reference config writes phy_max_offset_hz out, so every installed unit
     # holds the old width explicitly and would keep crossing the band in
     # five dwells instead of three.
-    if int(saved.get("detector_profile_version", 0) or 0) < 13:
+    if int(saved.get("detector_profile_version", 0) or 0) < DETECTOR_PROFILE_VERSION:
         for key in list(DEFAULTS):
             if is_detector_key(key):
                 cfg[key] = DEFAULTS[key]
-    cfg["detector_profile_version"] = 13
+    cfg["detector_profile_version"] = DETECTOR_PROFILE_VERSION
+    # Power profile 1 (0.11.0) is drive mode by default. Every unit holds
+    # low_power_mode explicitly -- the reference config writes it, and so does
+    # every save -- so the new default alone would reach no installed unit.
+    # Once: after this a unit that is switched back to ECO, by hand or by the
+    # app on a sagging rail, keeps ECO.
+    if int(saved.get("power_profile_version", 0) or 0) < POWER_PROFILE_VERSION:
+        cfg["low_power_mode"] = DEFAULTS["low_power_mode"]
+    cfg["power_profile_version"] = POWER_PROFILE_VERSION
     for obsolete in (
         # pre-v7 leftovers
         "threshold_db", "threshold_min_db", "threshold_max_db",

@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.10.9",
+  "app_version": "0.11.0",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -109,7 +109,8 @@
   "uplink_confirm_visits": 4,
   "uplink_state_max_age_s": 90.0,
   "usb_reset_max_attempts": 3,
-  "low_power_mode": true,
+  "low_power_mode": false,
+  "power_profile_version": 1,
   "low_power_ui_fps": 8,
   "ui_quiet_capture": true,
   "ui_quiet_capture_wait_s": 1.5,

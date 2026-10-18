@@ -51,6 +51,12 @@ from tracker import TrackRegistry
 
 STATE_SCHEMA = 'rfeye-c2000-sites-v1'
 
+# How long a locked carrier stays locked without a fresh verification. One
+# default for everyone who reads site_lock_stale_s: SiteRegistry.locked had
+# 3600 and the backend's re-verify timer 600, which only agreed because the
+# config happened to set the key.
+SITE_LOCK_STALE_S = 600.0
+
 
 def raster_snap(freq_hz, band_start_hz, raster_offset_hz=12500.0,
                 spacing_hz=CHANNEL_SPACING_HZ):
@@ -221,7 +227,7 @@ class SiteRegistry:
         """Downlink carriers currently accepted as real C2000 base stations."""
         now = time.time() if now is None else float(now)
         need = max(2, int(self.cfg.get('site_lock_hits', 3)))
-        stale = max(60.0, float(self.cfg.get('site_lock_stale_s', 3600.0)))
+        stale = max(60.0, float(self.cfg.get('site_lock_stale_s', SITE_LOCK_STALE_S)))
         out = []
         for f, e in self.entries.items():
             if int(e['hits']) >= need and now - float(e['last_ok']) <= stale:
@@ -441,7 +447,6 @@ class UplinkAlarm:
         else:
             need_trusted = max(1, int(self.cfg.get('uplink_confirm_dwells', 2)))
             need_unknown = need_trusted
-        need = max(need_trusted, need_unknown)
         # How many visits the two hits may be apart. A channel that reports in
         # every few seconds is silent on most looks, so its two hits are
         # naturally several visits apart -- with a window of four they kept
@@ -451,7 +456,6 @@ class UplinkAlarm:
         span_trusted = max(need_trusted, int(self.cfg.get('uplink_confirm_visits', 4)))
         span_unknown = max(need_unknown,
                            int(self.cfg.get('uplink_confirm_visits_unknown', 10)))
-        span = max(span_trusted, span_unknown)
         hold = max(0.0, float(self.cfg.get('uplink_alert_hold_s', 12.0)))
         max_age = max(10.0, float(self.cfg.get('uplink_state_max_age_s', 90.0)))
 

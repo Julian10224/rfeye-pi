@@ -139,6 +139,23 @@ def _check_config_migration():
                 cfgmod.save_config(cfg)
                 with open(path) as fh:
                     assert json.load(fh)["phy_min_dqpsk_m"] == 0.31, name
+        # Power profile 1 (0.11.0): drive mode reaches every installed unit
+        # once -- each of them has low_power_mode saved -- and a unit that is
+        # put back on ECO after that keeps ECO.
+        for saved, want in (({"low_power_mode": True}, False),
+                            ({"low_power_mode": True, "power_profile_version": 1}, True),
+                            ({"low_power_mode": False, "power_profile_version": 1}, False)):
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "config.json")
+                with open(path, "w") as fh:
+                    json.dump(dict(saved, detector_profile_version=13), fh)
+                os.environ["RFEYE_CONFIG"] = path
+                importlib.reload(cfgmod)
+                got = cfgmod.load_config()
+                assert got["low_power_mode"] is want, (saved, got["low_power_mode"])
+                assert got["power_profile_version"] == cfgmod.POWER_PROFILE_VERSION
+        # DEFAULTS says what a running unit runs, so tests that read it agree.
+        assert cfgmod.DEFAULTS["detector_profile_version"] == cfgmod.DETECTOR_PROFILE_VERSION
         # A gain someone set by hand is theirs to keep.
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "config.json")
@@ -819,6 +836,7 @@ def _check_quiet_display(a):
         import types as _types
         be = a.backend
         be.air = _th.Lock(); be.panel_until = 0.0; be.panel_wants = False
+        be._streaming = False
         be.running = True
         if not hasattr(be, "cfg"):
             be.cfg = a.cfg
@@ -869,7 +887,8 @@ def _check_quiet_display(a):
         t0 = time.monotonic(); be._begin_capture(); took = time.monotonic() - t0
         assert 0.15 <= took < 0.6, took
     finally:
-        for name in ("claim_panel", "_begin_capture", "air", "panel_until", "panel_wants"):
+        for name in ("claim_panel", "_begin_capture", "air", "panel_until", "panel_wants",
+                     "_streaming"):
             if name in getattr(a.backend, "__dict__", {}):
                 delattr(a.backend, name)
         a.cfg.pop("ui_quiet_touch_wait_s", None)
@@ -984,19 +1003,21 @@ def main():
     # and the same tap goes looking for the SDR again -- the reason to reach
     # for this setting is a dongle that has dropped off a marginal supply, so
     # needing a reboot to find out whether it helped would make it useless.
-    assert a.cfg.get("low_power_mode") is True, "eco is the shipped default"
-    assert a._fps() == int(a.cfg["low_power_ui_fps"])
+    # Since 0.11.0 max power -- drive mode -- is the shipped default; ECO
+    # is one tap away and is what a sagging rail falls back to.
+    assert a.cfg.get("low_power_mode") is False, "drive mode is the shipped default"
+    assert a._fps() == int(a.cfg["ui_fps"])
     time.sleep(0.15)
     a._tap(40, _row_y("low_power"))
-    assert a.cfg["low_power_mode"] is False
-    assert a._fps() == int(a.cfg["ui_fps"])
+    assert a.cfg["low_power_mode"] is True
+    assert a._fps() in (int(a.cfg["low_power_ui_fps"]), int(a.cfg["low_power_idle_ui_fps"]))
     # The switch reports back on the panel; by now the USB check may already
     # have replaced the acknowledgement with its own result, and either is fine.
     assert str(a.low_power_message or "").strip(), "the switch has to say something"
     assert float(a.low_power_message_until) > time.monotonic()
     time.sleep(0.15)
     a._tap(40, _row_y("low_power"))
-    assert a.cfg["low_power_mode"] is True
+    assert a.cfg["low_power_mode"] is False
     for _ in range(50):
         if getattr(a.backend, "reinit_calls", 0) >= 2:
             break

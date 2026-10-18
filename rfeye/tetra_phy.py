@@ -738,9 +738,8 @@ class PhyResult:
     # burst counts), rather than the strict sustained-call rules.
     sensitive: bool = False
     # True when the cheap level screen rejected this channel and the waveform
-    # test never ran. It is not the same statement as "this carrier was idle
-    # this time": nothing looked closely enough to say that, so a screened
-    # result must not buy a carrier the silence exemption in SiteRegistry.
+    # test never ran. Diagnostic: for a downlink carrier it counts as idle,
+    # like any other snr-only failure -- see SDRBackend._site_work.
     screened: bool = False
     # True when the signal was too weak for the spectral shape to be
     # measured, so bandwidth, edge rejection and flatness were not required

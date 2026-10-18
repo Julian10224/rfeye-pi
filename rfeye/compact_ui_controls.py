@@ -270,6 +270,7 @@ def _record_rf_worker(app, duration):
                 "uplink_confirm_dwells","uplink_confirm_visits",
                 "uplink_state_max_age_s","uplink_sensitive",
                 "uplink_sweep_band","uplink_unknown_confirm_dwells",
+                "low_power_mode","stream_mode","stream_trigger_db",
                 "phy_uplink_sensitive_percentile",
                 "uplink_alert_hold_s","mobile_band_start_hz","mobile_band_end_hz",
                 "site_band_start_hz","site_band_end_hz",

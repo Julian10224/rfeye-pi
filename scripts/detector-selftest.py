@@ -23,6 +23,7 @@ import argparse
 import os
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rfeye"))
@@ -162,6 +163,10 @@ class FakeAir:
 
 def make_backend(air, statefile, **overrides):
     cfg = dict(DEFAULTS)
+    # The scenarios drive the dwell path through a patched _samples. The
+    # stream is tested on its own, against a streaming fake: see
+    # check_streaming.
+    cfg["stream_mode"] = False
     cfg.update(overrides)
     os.environ["RFEYE_SITE_STATE"] = statefile
     b = SDRBackend(cfg)
@@ -445,6 +450,18 @@ def check_candidate_does_not_starve_the_pass():
             reach = float(DEFAULTS["phy_max_offset_hz"]) + 50_000.0
             near = lambda f: min(abs(f - 391_187_500.0), abs(f - 391_762_500.0)) <= reach
             far_before = [f for f in b._site_queue if not near(f)]
+            # What each round actually measured. An idle candidate leaves no
+            # mark on its entry since 0.11.0 -- a screened carrier is idle,
+            # not a miss -- so the dwells are what says it was looked at.
+            measured = set()
+            real_verify = b._verify
+
+            def spy(freqs, role):
+                out = real_verify(freqs, role)
+                measured.update(int(round(f)) for f in b.dwell_channels)
+                return out
+
+            b._verify = spy
             for i in range(40):
                 b._site_work(now + 1.0 + i)
             far_after = [f for f in b._site_queue if not near(f)]
@@ -456,9 +473,7 @@ def check_candidate_does_not_starve_the_pass():
 
             # ...and they are not parked while that happens.
             served = sum(1 for f in (391_187_500.0, 391_762_500.0)
-                         if int(round(f)) in b.sites.entries
-                         and (b.sites.entries[int(round(f))]["last_ok"] > now - 60.0
-                              or b.sites.entries[int(round(f))]["misses"] > 0))
+                         if int(round(f)) in measured)
             check("and the candidates are still being re-tested",
                   served == 2, "%d of 2 candidates revisited" % served)
         finally:
@@ -902,7 +917,7 @@ def check_radio_duty_limit():
     print(chr(10) + "24. the radio is held to its share of the time")
     with tempfile.TemporaryDirectory() as d:
         air = FakeAir(downlinks=[391_187_500.0])
-        b = make_backend(air, os.path.join(d, "sites.json"))
+        b = make_backend(air, os.path.join(d, "sites.json"), low_power_mode=True)
         try:
             now = time.time()
             eco = b._duty_limit(now)
@@ -1495,6 +1510,7 @@ def check_gain_and_hits_log():
                   and time.monotonic() - b.capture_ended_at < 1.0)
             # And how long it will stay off, when it knows: a pause with no
             # prefetch running is quiet for its whole length.
+            b.cfg["low_power_mode"] = True
             b.cfg["sdr_duty_idle"] = 0.3; b.cfg["sdr_duty_eco"] = 0.3
             b._radio_epoch = time.time() - 4.0; b._radio_s = 1.5; b._prefetch = None
             b.running = True
@@ -1665,6 +1681,377 @@ def check_whole_window():
             b.running = False
 
 
+class StreamingFake:
+    """A dongle that streams: pre-generated u8 IQ, handed out in real time.
+
+    What the async reader does, without the USB: buffers of ``buf_len`` bytes
+    on a thread of their own, until the stream is cancelled.
+    """
+
+    def __init__(self, iq, sr):
+        self.u8 = np.empty(2 * len(iq), np.uint8)
+        self.u8[0::2] = np.clip(np.round(iq.real) + 127.5, 0, 255)
+        self.u8[1::2] = np.clip(np.round(iq.imag) + 127.5, 0, 255)
+        self.sr = sr
+        self.rate_changed = True
+        self.stream_rc = None
+        self.tuned = None
+        self.starts = 0
+        self.fail_start = False
+        self._t = None
+        self._stop = threading.Event()
+
+    def configure(self, sr, ppm, gain):
+        pass
+
+    def tune(self, centre):
+        self.tuned = float(centre)
+
+    def start_stream(self, on_bytes, buf_len=131072, buf_num=12):
+        if self.fail_start:
+            raise RuntimeError("read_async failed -1")
+        self.starts += 1
+        self._stop.clear()
+
+        def run():
+            pos, sent, t0 = 0, 0, time.monotonic()
+            while not self._stop.is_set():
+                chunk = self.u8[pos:pos + buf_len]
+                if len(chunk) < buf_len:
+                    pos = 0
+                    continue
+                on_bytes(chunk)
+                pos += buf_len
+                sent += buf_len // 2
+                ahead = sent / self.sr - (time.monotonic() - t0)
+                if ahead > 0:
+                    time.sleep(ahead)
+            self.stream_rc = 0
+
+        self._t = threading.Thread(target=run, daemon=True)
+        self._t.start()
+
+    def streaming(self):
+        return self._t is not None and self._t.is_alive()
+
+    def stop_stream(self, timeout=3.0):
+        self._stop.set()
+        if self._t is not None:
+            self._t.join(timeout)
+        self._t = None
+        return True
+
+    def close(self):
+        self.stop_stream()
+
+
+def check_stream_trigger():
+    """The stream's energy trigger: what it hands on, and what it does not.
+
+    Separate captures heard each uplink channel about 9% of the time
+    (power.log, hear=9.4%), so one burst in range was a 9% chance. The stream
+    listens all the time; this is the cheap first look that decides which
+    ~65 ms of it the waveform test sees.
+    """
+    from stream_watch import StreamTrigger
+    import tetra_phy
+    print(chr(10) + "31. the stream trigger: bursts in, noise and carriers out")
+    sr = 2_016_000
+    offs = [float(o) for o in np.arange(-850_000, 850_001, 25_000) if abs(o) >= 20_000]
+    lim = dict(DEFAULTS)
+    # As shipped: every other FFT row.
+    stride = int(DEFAULTS["stream_row_stride"])
+
+    def feed(iq, blk=131072, blanks=()):
+        tr = StreamTrigger(sr, offs, row_stride=stride)
+        out = []
+        for a in range(0, len(iq), blk):
+            out += tr.feed(iq[a:a + blk], a, blanks)
+        return out
+
+    for slots, snr in ((1, 12.0), (0.5, 9.0)):
+        iq = sim.make_capture([(sim.control_burst(1.0, sr, seed=3, n_slots=slots,
+                                                  start_frac=0.55,
+                                                  freq_offset_hz=300_000.0), 1.0)],
+                              1.0, sr, snr_db=snr, seed=11)
+        got = feed(iq)
+        on = [g for g in got if offs[g[0]] == 300_000.0]
+        check("a %s-slot burst at %.0f dB is found, on its own channel" % (slots, snr),
+              len(on) == 1 and len(got) == 1 and abs(on[0][1] / sr - 0.55) < 0.01,
+              str([(offs[c], round(s / sr, 3)) for c, s, _ in got]))
+        if on:
+            _, s, e = on[0]
+            L = 1 << int(DEFAULTS["stream_snippet_log2"])
+            a = max(0, (s + e) // 2 - L // 2)
+            r = tetra_phy.analyse(tetra_phy.Channelizer(iq[a:a + L], sr),
+                                  300_000.0, role="UPLINK", limits=lim, decim=56)
+            check("  and the ~65 ms around it passes the full waveform test",
+                  r.ok, r.reason)
+        # A burst that straddles two blocks is still one burst: there is no
+        # capture edge to cut it in half any more.
+        got = feed(iq, blk=int(0.555 * sr))
+        check("  also across a block boundary in the middle of it",
+              len([g for g in got if offs[g[0]] == 300_000.0]) == 1, str(len(got)))
+
+    tr = StreamTrigger(sr, offs, row_stride=stride)
+    got = []
+    for k in range(8):
+        blk = sim.make_capture([(np.zeros(sr, np.complex64), 1.0)], 1.0, sr,
+                               snr_db=0.0, seed=40 + k)
+        for a in range(0, len(blk), 131072):
+            got += tr.feed(blk[a:a + 131072], k * sr + a)
+    check("eight seconds of empty band trigger nothing", not got, str(got[:3]))
+
+    tr = StreamTrigger(sr, offs, row_stride=stride)
+    got = []
+    for k in range(6):
+        # Quiet for the first second, then a carrier that stays.
+        on = [(sim.cw_tone(1.0, sr, 400_000.0), 1.0)] if k else [
+            (np.zeros(sr, np.complex64), 1.0)]
+        cw = sim.make_capture(on, 1.0, sr, snr_db=20.0, seed=60 + k)
+        for a in range(0, len(cw), 131072):
+            got += tr.feed(cw[a:a + 131072], k * sr + a)
+    check("a carrier that never goes away triggers once, not for ever",
+          len(got) == 1, str([(offs[c], round(s / sr, 2)) for c, s, _ in got]))
+
+    iq = sim.make_capture([(sim.control_burst(1.0, sr, seed=3, n_slots=1, start_frac=0.55,
+                                              freq_offset_hz=300_000.0), 1.0)],
+                          1.0, sr, snr_db=20.0, seed=13)
+    got = feed(iq, blanks=[(int(0.50 * sr), int(0.62 * sr))])
+    check("what the panel may have written over is not a burst", not got, str(got))
+
+
+def check_streaming():
+    """Streaming, end to end: heard without a break, and dwells when it cannot."""
+    print(chr(10) + "32. streaming: the band without a break, and back to dwells if not")
+    sr = 2_016_000
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir()
+        b = make_backend(air, os.path.join(d, "sites.json"), stream_mode=True,
+                         low_power_mode=False, stream_hold_s=2.0,
+                         stream_hold_max_s=3.0)
+        try:
+            now = time.time()
+            check("drive mode streams", b._stream_ready(now))
+            b.cfg["low_power_mode"] = True
+            check("ECO does not: streaming is the whole of the radio's time",
+                  not b._stream_ready(now))
+            b.cfg["low_power_mode"] = False
+            b.ladder.event(now, "test", in_use=1.0)
+            check("nor does a supply the ladder is holding back",
+                  not b._stream_ready(now), "cap %.2f" % b.ladder.cap)
+            b.ladder.index = len(b.ladder.rungs) - 1
+            check("  until it has climbed back", b._stream_ready(now))
+
+            wins = b._stream_windows(now)
+            covered = set()
+            for c in wins:
+                covered |= {int(round(f)) for f, _ in b._stream_members(c, now)}
+            band = {int(round(f)) for f in b._uplink_band_channels()}
+            check("the windows still cover the whole uplink band", band <= covered,
+                  "%d windows, %d of %d channels" % (len(wins), len(band & covered),
+                                                     len(band)))
+            f = 391_187_500.0
+            b.sites.entries[int(round(f))] = {
+                "hits": 9, "misses": 0, "quality": 0.7, "last_ok": now,
+                "first_seen": now, "ok_total": 9}
+            seq = b._stream_windows(now)
+            part = [c for c in seq if any(abs(x - 381_187_500.0) < 1.0
+                                          for x, _ in b._stream_members(c, now))]
+            check("a locked site's partners get the most turns",
+                  len(part) * 2 > len(seq), "%d of %d" % (len(part), len(seq)))
+
+            # A burst on a channel of the first window, 1.25 s into the hold.
+            centre = seq[0]
+            handset = min((x for x, _ in b._stream_members(centre, now)),
+                          key=lambda x: abs(x - 381_662_500.0))
+            iq = sim.make_capture([(sim.control_burst(
+                2.5, sr, seed=8, n_slots=1, start_frac=0.5,
+                freq_offset_hz=handset - centre), 1.0)], 2.5, sr, snr_db=16.0, seed=21)
+            fake = StreamingFake(iq, sr)
+            b._ensure_sdr = lambda: fake
+            b.sdr = fake
+            b._site_work = lambda now: []
+            b._stream_turn = 0
+            heard0 = b._heard_s
+            t0 = time.monotonic()
+            ok = b._scan_cycle()
+            took = time.monotonic() - t0
+            s = b.snapshot()
+            check("a single burst raises the alert", ok and s["mobile_confirmed"],
+                  "ok=%s state=%s err=%s" % (ok, s["detector_state"], s["error"]))
+            check("  on its own channel", bool(s["peaks"]) and
+                  abs(s["peaks"][0]["freq_hz"] - handset) < 1.0,
+                  str([p["freq_hz"] for p in s["peaks"]]))
+            check("  tuned where the plan said", fake.tuned == centre)
+            check("  and a hold with something heard in it is held on",
+                  took >= 2.4, "%.1f s" % took)
+            check("the listening is counted", b._heard_s - heard0 > 0.3,
+                  "%.2f s" % (b._heard_s - heard0))
+            check("  and the radio's time with it", b._radio_s >= 2.0, "%.2f" % b._radio_s)
+            check("the panel never waits on a stream",
+                  b.capture_idle.is_set() and not b.snapshot()["stream_active"])
+            from stream_watch import StreamRing
+            ring = StreamRing(sr)
+            ring.write(np.full(2 * 65536, 128, np.uint8))
+            b._stream_ring = ring
+            b._streaming = True
+            t0 = time.monotonic()
+            check("  a frame goes out at once while it runs",
+                  b.claim_panel(hold_s=0.35, timeout_s=1.5)
+                  and time.monotonic() - t0 < 0.1)
+            blank = ring.blanks[-1] if ring.blanks else (0, 0)
+            check("  and only its time on the wire is blanked, to the sample",
+                  0.19 <= (blank[1] - blank[0]) / sr <= 0.25
+                  and abs(blank[0] - (65536 - int(0.02 * sr))) < int(0.02 * sr),
+                  "%s" % (blank,))
+            check("  and the app sends a streaming radio one changed frame a second",
+                  DEFAULTS["ui_quiet_stream_frame_s"] >= 0.5)
+            b._streaming = False
+            b._stream_ring = None
+
+            # Something heard gets the next hold -- but not every one, or a
+            # vehicle that never stops would keep the rest of the band unheard.
+            fake.fail_start = True
+            b._sdr_present = lambda: False
+            b._stream_followed = False
+            b._stream_work(time.time())
+            first = (fake.tuned, b._stream_followed)
+            b._stream_work(time.time())
+            second = b._stream_followed
+            heard_win = {int(round(x)) for x, _ in b._stream_members(first[0], time.time())}
+            check("something heard gets the next hold",
+                  first[1] and int(round(handset)) in heard_win)
+            check("  and the rotation the one after", not second)
+
+            # A stream that breaks while the dongle is still there: dwells
+            # this cycle, and after the second time for stream_retry_s.
+            fake.fail_start = True
+            b._sdr_present = lambda: True
+            ok1 = b._scan_cycle()
+            b._ensure_sdr = lambda: fake
+            ok2 = b._scan_cycle()
+            check("a broken stream falls back to dwells, not to NO SDR",
+                  ok1 and ok2 and b.snapshot()["status"] == "LIVE",
+                  b.snapshot()["error"])
+            check("  and stops trying for a while after the second time",
+                  b._stream_off_until > time.time() + 60
+                  and not b._stream_ready(time.time()))
+            log = open(os.path.join(d, "power.log")).read()
+            check("  which power.log says", "STREAM off for" in log)
+            b._stream_off_until = 0.0
+            b._stream_strikes = 0
+            b._sdr_present = lambda: False
+            b._ensure_sdr = lambda: fake
+            b._stream_work(time.time())
+            check("a dongle that went is not held against the stream",
+                  b._stream_strikes == 0 and b._stream_off_until == 0.0)
+        finally:
+            b.running = False
+
+
+def check_drive_mode_and_shares():
+    """Listening time is not given away: drive mode, the pause, the downlink."""
+    import config as cfgmod
+    print(chr(10) + "33. drive mode: listening time is not given away")
+    check("drive mode is the shipped default", DEFAULTS["low_power_mode"] is False)
+    check("DEFAULTS carries the profile a unit runs",
+          DEFAULTS["detector_profile_version"] == cfgmod.DETECTOR_PROFILE_VERSION == 13)
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir()
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        try:
+            now = time.time()
+            check("and it lets the radio read all the time", b._duty_limit(now) == 1.0)
+            # ECO, well over budget: the pause would be long...
+            b.cfg["low_power_mode"] = True
+            b._radio_epoch = time.time() - 10.0
+            b._radio_s = 9.0
+            # ...but something is being heard.
+            tr = b.alarm.tracks.get(381_187_500.0, now)
+            tr.last_hit = now
+            t0 = time.perf_counter()
+            b._low_power_pause()
+            check("no duty pause while something is being heard",
+                  time.perf_counter() - t0 < 0.1, "%.2f s" % (time.perf_counter() - t0))
+            b._power_flag = "UNDER-VOLTAGE"
+            b._power_checked = time.time()
+            t0 = time.perf_counter()
+            b._low_power_pause()
+            check("  unless the rail is low right now", time.perf_counter() - t0 > 0.3)
+            b._power_flag = ""
+            b.alarm.reset()
+            b._follow_left = 3
+            b._follow_until = time.time() + 5.0
+            t0 = time.perf_counter()
+            b._low_power_pause()
+            check("  nor during a follow-up", time.perf_counter() - t0 < 0.1)
+            b._follow_left = 0
+        finally:
+            b.running = False
+
+    # Without a lock the downlink had every cycle -- "due" was always true --
+    # and before that every other one. Now one in site_search_share.
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir()
+        b = make_backend(air, os.path.join(d, "sites.json"))
+        calls = []
+        real = b._site_work
+        b._site_work = lambda now: calls.append(now) or real(now)
+        try:
+            run(b, 20)
+            share = int(DEFAULTS["site_search_share"])
+            check("with nothing locked the downlink gets one cycle in %d" % share,
+                  len(calls) == 20 // share, "%d of 20" % len(calls))
+            # A carrier that just verified once gets one in two.
+            f = 391_187_500.0
+            b.sites.entries[int(round(f))] = {
+                "hits": 1, "misses": 0, "quality": 0.6, "last_ok": time.time(),
+                "first_seen": time.time(), "ok_total": 1}
+            del calls[:]
+            run(b, 10)
+            check("  but one in two while a fresh candidate is close to a lock",
+                  4 <= len(calls) <= 6, "%d of 10" % len(calls))
+        finally:
+            b.running = False
+
+
+def check_screened_idle_carrier_keeps_its_lock():
+    """An idle traffic carrier is screened, and that is not a miss.
+
+    Until 0.11.0 a screened channel never counted as silent, and an idle
+    carrier is nearly always screened, so every quiet traffic carrier lost its
+    lock after four band passes -- and its uplink partner left the trusted set.
+    """
+    print(chr(10) + "34. an idle traffic carrier keeps its lock")
+    main_c, idle_c = 391_187_500.0, 391_462_500.0
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=[main_c])
+        b = make_backend(air, os.path.join(d, "sites.json"), site_reverify_s=0.0)
+        try:
+            now = time.time()
+            for f in (main_c, idle_c):
+                b.sites.entries[int(round(f))] = {
+                    "hits": 4, "misses": 0, "quality": 0.7, "last_ok": now,
+                    "first_seen": now, "ok_total": 9}
+            rs = []
+            for _ in range(8):
+                b._site_queue = [idle_c, main_c]
+                b._survey_at = time.time()
+                rs = b._site_work(time.time())
+            idle = [r for r in rs if abs(r.freq_hz - idle_c) < 1.0]
+            check("the idle carrier was screened, not tested",
+                  bool(idle) and idle[0].screened, str([r.reason for r in idle]))
+            locked = {int(round(s["freq_hz"])) for s in b.sites.locked(time.time())}
+            check("and after eight passes it is still locked",
+                  int(round(idle_c)) in locked, str(sorted(locked)))
+            check("  so its uplink partner is still trusted",
+                  int(round(idle_c - 10e6)) in {int(round(p)) for p in
+                                                b.sites.uplink_partners(time.time())})
+        finally:
+            b.running = False
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -1765,10 +2152,14 @@ def main():
                    FakeAir(interferers=[(391_012_500.0, "spur")]), cycles=30)
     check("never alerts while sweeping an empty band",
           not any(s["mobile_confirmed"] for s in log))
-    check("band pass makes progress every cycle",
-          log[-1]["site_queue_remaining"] < log[2]["site_queue_remaining"],
-          "queue %d -> %d" % (log[2]["site_queue_remaining"],
-                              log[-1]["site_queue_remaining"]))
+    # The downlink gets one cycle in site_search_share while searching, not
+    # every cycle, so progress is counted over the cycles it had.
+    queue = [s["site_queue_remaining"] for s in log]
+    filled = next((i for i, q in enumerate(queue) if q > 0), None)
+    check("band pass makes progress on the cycles it gets",
+          filled is not None and min(queue[filled:]) < queue[filled]
+          and filled <= int(DEFAULTS["site_search_share"]),
+          "queue %s" % queue)
 
     # 8 -- ETSI only requires the *main* carrier to be continuous. A site's
     #      secondary traffic carriers are discontinuous, and once a call moves
@@ -1799,13 +2190,28 @@ def main():
     #      Reporting a locked network in that state tells the user the device
     #      is watching when it is deaf, which is worse than saying nothing.
     air = FakeAir(downlinks=DOWNLINKS)
-    log = scenario("9. antenna removed after the network is locked",
-                   air, cycles=34, at={12: air.silence},
-                   # The lock is now lost by ageing rather than by one
-                   # carrier's verdict, so the windows have to be short enough
-                   # to expire inside a test that runs in wall-clock seconds.
-                   site_reverify_s=0.0, site_silence_window_s=30.0,
-                   site_lock_stale_s=60.0)
+    print(chr(10) + "9. antenna removed after the network is locked")
+    with tempfile.TemporaryDirectory() as d:
+        # The lock is now lost by ageing rather than by one carrier's
+        # verdict, so the windows have to be short enough to expire inside a
+        # test that runs in wall-clock seconds.
+        b9 = make_backend(air, os.path.join(d, "sites.json"),
+                          site_reverify_s=0.0, site_silence_window_s=30.0,
+                          site_lock_stale_s=60.0)
+
+        def deaf():
+            air.silence()
+            # Silence only counts against a carrier once nothing has verified
+            # for site_silence_window_s (at least 30 s) -- an idle carrier is
+            # not a missing one. The clock is moved past that rather than
+            # waited out.
+            for e in b9.sites.entries.values():
+                e["last_ok"] = float(e["last_ok"]) - 31.0
+
+        try:
+            log = run(b9, 34, at={12: deaf})
+        finally:
+            b9.running = False
     before = [s for s in log[:12] if s["site_locked_count"]]
     after = log[12:]
     check("was locked before the antenna came off", bool(before),
@@ -1859,6 +2265,10 @@ def main():
     check_power_ladder()
     check_gain_and_hits_log()
     check_whole_window()
+    check_stream_trigger()
+    check_streaming()
+    check_drive_mode_and_shares()
+    check_screened_idle_carrier_keeps_its_lock()
 
     print()
     if FAILURES:

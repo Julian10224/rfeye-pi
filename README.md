@@ -1,6 +1,6 @@
-# RF Eye 0.10.9 for Raspberry Pi
+# RF Eye 0.11.0 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.10.9 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.11.0 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.10.9 appliance path:
+The installer reproduces the working 0.11.0 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.10.9
+## User interface in 0.11.0
 
 The compact profile contains:
 
@@ -460,6 +460,88 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### Listening all the time: drive mode and the stream (0.11.0)
+
+The waveform tests were never why a passing vehicle was missed. Listening time
+was. power.log measured it on a field unit -- `hear=9.4%`: each uplink channel
+was being listened to about 9% of the time. A vehicle that sends a handful of
+short bursts while it drives past is then mostly missed:
+
+| bursts in range | chance at 9.4% listening | chance listening all the time |
+|---|---|---|
+| 1 | 9% | ~100% |
+| 5 | 39% | ~100% |
+| 10 | 63% | ~100% |
+| 20 | 86% | ~100% |
+
+Where the time went, and what changed:
+
+- **ECO was the default.** It held the radio to 45-55% of the time, the power
+  ladder could take it to 22%, and the duty pause could sleep up to 3 s --
+  also during a follow-up or with a live track. **Max power is now the
+  default (drive mode)**, migrated once on every unit (`power_profile_version`),
+  and the duty pause never runs while something is being heard or followed
+  unless the 5 V rail is low right now. The power ladder and the app's
+  under-voltage fallback to ECO still protect a weak supply.
+- **Without a lock the downlink had every cycle.** The re-proof timer only runs
+  for a locked site, so "due" was always true while searching. The downlink now
+  gets one cycle in `site_search_share` (5) while searching, one in two while a
+  carrier that verified in the last `site_candidate_fresh_s` is close to a lock.
+- **Idle traffic carriers unlocked themselves.** A carrier the cheap screen
+  dropped counted as a miss, and an idle carrier is nearly always screened, so
+  every quiet traffic carrier lost its lock after four band passes and its
+  partner left the trusted set (hits became provisional). A screened carrier
+  now counts as idle; a deaf receiver is still caught by `heard_recently`.
+- **Separate captures.** In drive mode the uplink is now **streamed**
+  (`stream_mode`): `rtlsdr_read_async` fills a ring buffer, a per-channel
+  short-time FFT energy trigger (`rfeye/stream_watch.py`) runs on every block,
+  and only the ~65 ms around something that stayed up for 5 ms or longer goes
+  to `tetra_phy.analyse`. A window (+-850 kHz, 68 channels) is held for
+  `stream_hold_s`, longer while something in it is heard; the locked site's
+  partners get `stream_partner_weight` turns for every turn of the rest of the
+  band, which is still covered in full. Between holds the downlink gets one
+  dwell, and only when a re-proof is due, a band pass is running or nothing is
+  locked. A burst can no longer be cut in half by the edge of a capture.
+
+Streaming only runs when the radio may read at least `stream_min_duty` (85%) of
+the time, so ECO and a ladder that has stepped down fall back to dwells. A
+stream that fails twice while the dongle is still on the bus is switched off
+for `stream_retry_s` and power.log says so (`STREAM off for ...`); the minute
+line carries `stream=on|no|off trig=<triggers> drop=<samples>`. While it runs,
+a panel frame goes out at once and the samples it may disturb are blanked
+instead of the radio waiting for a gap.
+
+**At Pi 3 B+ speed.** Not yet run on a unit, but run at its speed: the whole app
+(UI, backend, stream) on a PC slowed to a Pi 3 B+ at the 900 MHz ceiling --
+calibrated so the three workloads this README times on the reference unit
+(0.47 s quiet dwell, 1.7 s dwell with a transmission, 0.93 s band dwell) come
+out at 0.64 / 1.47 / 0.80 s -- with a fake dongle delivering 2.016 MS/s in real
+time and dropping what its 12 USB buffers cannot hold. 90 s of a deliberately
+busy band: a single burst every 0.8 s (1 slot or a 7 ms subslot, 6-25 dB) and
+two held calls.
+
+| | stream, Pi speed | stream, 1.3x slower than a Pi | dwells (0.10.9), 1.3x slower |
+|---|---|---|---|
+| time listening | 93% | 92% | 20% |
+| bursts verified, of ~112 | **78** | 72 | 13 |
+| held calls | 12/12 | 12/12 | -- |
+| burst to alert, median / max | 0.29 / 0.55 s | 1.1 / 2.5 s | 2.4 / 2.9 s |
+| samples lost (USB / behind) | 0.1 s / 0 | 6.9 s / 0.7 s | -- |
+
+Most misses are the 6 dB bursts, below what the waveform test can recognise,
+and bursts under a panel frame. That emulation is also what set the stream's
+costs: blanking whole USB buffers around a 0.35 s hold cost half the listening
+time once the bars moved, so a frame now costs 0.20 s placed to the sample and
+the app sends a streaming radio at most one changed frame a second; an FFT on
+every row plus an analysis every 0.3 s per active channel was more than a core,
+so the trigger measures every other row, a channel is left alone for 2 s after
+it verifies (1 s after it fails), and the waveform test gets 65 ms around a
+burst instead of 130 (same detections, 57% of the cost).
+
+On the unit, check `drop=` in power.log after the first drive: anything above 0
+means the Pi did not keep up. Lower `stream_max_channels`, or set `stream_mode`
+to false to go back to dwells.
 
 ### Beside a police car, and silent (0.10.8, corrected in 0.10.9)
 
@@ -1509,7 +1591,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.10.9 uses a **TMB12A03 active buzzer**:
+RF Eye 0.11.0 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1658,7 +1740,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.10.9**.
+`VERSION` and `rfeye/config.py` identify this release as **0.11.0**.
 
 Build the OTA package with:
 
@@ -1670,10 +1752,11 @@ The build normalizes archive metadata so unchanged source produces the same ZIP 
 
 ## Power mode
 
-Settings carries a **Max power** row. It ships **OFF**, which is the
-economical setting.
+Settings carries a **Max power** row. It ships **ON** -- drive mode -- since
+0.11.0; until then it shipped OFF, the economical setting.
+See "Listening all the time" above for why, and for the stream it enables.
 
-|  | Max power OFF (default) | Max power ON |
+|  | Max power OFF | Max power ON (default) |
 |---|---|---|
 | UI frame rate, in use | 8 fps | 20 fps |
 | UI frame rate, idle | 3 fps | 20 fps |
@@ -2214,6 +2297,7 @@ config/reference-config-cuqi35.json
 config/plymouth/rfeye/         boot splash theme
 rfeye/tetra_phy.py             ETSI TETRA waveform verification (no hardware)
 rfeye/tetra_detector.py        network lock, duplex maths, alarm hysteresis
+rfeye/stream_watch.py          continuous uplink: ring buffer and energy trigger
 rfeye/tetra_sim.py             synthetic TETRA and interferers for testing
 scripts/tetra-phy-selftest.py  waveform test suite, known-truth signals
 scripts/detector-selftest.py   end-to-end test against a simulated air interface

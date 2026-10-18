@@ -286,12 +286,23 @@ jobs:
           grep -q 'self.alarm.tracks.revisit_due' rfeye/sdr_backend.py
           grep -q 'self.alarm.tracks.top' rfeye/sdr_backend.py
           ! grep -q 'self._hot' rfeye/sdr_backend.py
-          # the cheap level screen runs before the waveform test, and a
-          # screened channel must not buy the silence exemption -- nothing
-          # looked closely enough to call a carrier idle rather than gone.
+          # the cheap level screen runs before the waveform test. Since
+          # 0.11.0 a screened downlink counts as idle: an idle traffic
+          # carrier is nearly always screened, and holding that against it
+          # unlocked it after four passes. A deaf receiver is caught by
+          # heard_recently instead.
           grep -q 'def screen_levels' rfeye/tetra_phy.py
           grep -q 'r.screened=True' rfeye/sdr_backend.py
-          grep -q 'and not r.screened' rfeye/sdr_backend.py
+          grep -q "silent=(not r.ok and r.failed()==\['snr'\])" rfeye/sdr_backend.py
+          grep -q 'def check_screened_idle_carrier_keeps_its_lock' scripts/detector-selftest.py
+          # 0.11.0: continuous capture instead of dwells in drive mode, and
+          # the downlink kept to a share of the cycles without a lock too.
+          grep -q 'class StreamTrigger' rfeye/stream_watch.py
+          grep -q 'def _stream_work' rfeye/sdr_backend.py
+          grep -q 'rtlsdr_read_async' rfeye/sdr_backend.py
+          grep -q 'def check_streaming' scripts/detector-selftest.py
+          grep -q 'site_search_share' rfeye/config.py rfeye/sdr_backend.py
+          ! grep -q '_alt_cycle' rfeye/sdr_backend.py
           grep -q 'def check_tracks_and_screen' scripts/detector-selftest.py
           # 0.10.1: three lanes really are three. Merged into the partner
           # list a due track shared their rotation, so an active unknown
@@ -660,7 +671,8 @@ jobs:
           assert c['sdr_stop_join_s']==8.0
           assert c['sdr_device_index']==0
           assert c['startup_chime'] is True
-          assert c['low_power_mode'] is True, 'a fresh install ships economical'
+          assert c['low_power_mode'] is False, 'drive mode is the shipped default since 0.11.0'
+          assert c['power_profile_version']==1
           assert c['low_power_ui_fps']==8
           assert c['low_power_scan_pause_s']==1.5
           assert c['low_power_locked_pause_s']==0.15
