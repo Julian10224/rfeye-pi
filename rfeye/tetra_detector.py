@@ -142,6 +142,7 @@ class SiteRegistry:
                     # carrier came out of a restart with a lifetime score of
                     # zero, so anything ranking on it ranked on nothing.
                     'ok_total': int(v.get('ok_total', 0)),
+                    'cont': float(v.get('cont', 0.0)),
                 }
             if not out:
                 return False
@@ -171,7 +172,8 @@ class SiteRegistry:
             pass
 
     # -- updates -----------------------------------------------------------
-    def observe(self, freq_hz, ok, quality=0.0, now=None, silent=False):
+    def observe(self, freq_hz, ok, quality=0.0, now=None, silent=False,
+                continuous=None):
         """Record one verification attempt on a downlink carrier.
 
         ``silent`` marks a channel that simply had nothing on it this time.
@@ -183,6 +185,11 @@ class SiteRegistry:
         hearing the site. Once nothing verifies anywhere, silence stops being
         evidence of an idle carrier and becomes evidence of a deaf receiver,
         so the exemption is withdrawn -- see ``heard_recently``.
+
+        ``continuous`` is whether a verified carrier was on the air all the
+        time. Only a site's main carrier must be (EN 300 392-2), and the main
+        carrier is where the cell's control channel is -- see
+        ``control_partners``.
         """
         now = time.time() if now is None else float(now)
         f = int(round(float(freq_hz)))
@@ -191,7 +198,7 @@ class SiteRegistry:
             if not ok:
                 return None
             e = {'hits': 0, 'misses': 0, 'quality': 0.0,
-                 'last_ok': 0.0, 'first_seen': now, 'ok_total': 0}
+                 'last_ok': 0.0, 'first_seen': now, 'ok_total': 0, 'cont': 0.0}
             self.entries[f] = e
         need = max(2, int(self.cfg.get('site_lock_hits', 3)))
         if ok:
@@ -207,6 +214,8 @@ class SiteRegistry:
             # than how it is doing this minute.
             e['ok_total'] = int(e.get('ok_total', 0)) + 1
             e['quality'] = float(e['quality'] * 0.6 + float(quality) * 0.4)
+            if continuous is not None:
+                e['cont'] = float(e.get('cont', 0.0)) * 0.6 + (0.4 if continuous else 0.0)
         elif silent and int(e['hits']) > 0 and self.heard_recently(now):
             # Known carrier, nothing on air, and the site is still audible
             # elsewhere: no information either way.
@@ -244,6 +253,26 @@ class SiteRegistry:
                 'last_ok': float(e['last_ok'])}
                for f, e in self.entries.items() if int(e['hits']) < need]
         out.sort(key=lambda x: (x['hits'], x['last_ok']), reverse=True)
+        return out
+
+    def control_partners(self, now=None):
+        """Uplink control channels of the locked sites, strongest site first.
+
+        Every terminal starts every exchange -- registration, a status
+        message, the request for a call -- with a random-access burst on the
+        main control channel of the cell it is in, and the MCCH is on the
+        site's main carrier: the one carrier that transmits continuously. So
+        the uplink partner of each continuous locked carrier is where the
+        *first* message of any terminal in that cell, or the neighbouring cells
+        the receiver can hear, is sent. A traffic carrier's uplink only
+        carries a call that was asked for there first.
+        """
+        split = float(self.cfg.get('duplex_split_hz', 10_000_000.0))
+        out = []
+        for s in self.locked(now):           # strongest first
+            e = self.entries.get(int(round(s['freq_hz'])))
+            if e is not None and float(e.get('cont', 0.0)) >= 0.5:
+                out.append(round(s['freq_hz'] - split))
         return out
 
     def uplink_partners(self, now=None):

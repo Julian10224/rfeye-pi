@@ -254,6 +254,9 @@ DEFAULTS = {
     "stream_hold_s": 8.0,
     "stream_hold_max_s": 30.0,
     "stream_partner_weight": 2,
+    # With a main carrier locked (0.11.1): stream_hold_s on its control
+    # channel, then one visit of this long to one other window, in turn.
+    "stream_hold_other_s": 2.0,
     "stream_fft_size": 1024,
     "stream_trigger_db": 3.5,
     "stream_trigger_min_s": 0.005,
@@ -518,7 +521,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.11.0",
+    "app_version": "0.11.1",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

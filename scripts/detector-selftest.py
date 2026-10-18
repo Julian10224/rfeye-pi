@@ -1845,7 +1845,7 @@ def check_streaming():
 
             wins = b._stream_windows(now)
             covered = set()
-            for c in wins:
+            for c, _hold in wins:
                 covered |= {int(round(f)) for f, _ in b._stream_members(c, now)}
             band = {int(round(f)) for f in b._uplink_band_channels()}
             check("the windows still cover the whole uplink band", band <= covered,
@@ -1856,13 +1856,13 @@ def check_streaming():
                 "hits": 9, "misses": 0, "quality": 0.7, "last_ok": now,
                 "first_seen": now, "ok_total": 9}
             seq = b._stream_windows(now)
-            part = [c for c in seq if any(abs(x - 381_187_500.0) < 1.0
-                                          for x, _ in b._stream_members(c, now))]
+            part = [c for c, _h in seq if any(abs(x - 381_187_500.0) < 1.0
+                                              for x, _ in b._stream_members(c, now))]
             check("a locked site's partners get the most turns",
                   len(part) * 2 > len(seq), "%d of %d" % (len(part), len(seq)))
 
             # A burst on a channel of the first window, 1.25 s into the hold.
-            centre = seq[0]
+            centre = seq[0][0]
             handset = min((x for x, _ in b._stream_members(centre, now)),
                           key=lambda x: abs(x - 381_662_500.0))
             iq = sim.make_capture([(sim.control_burst(
@@ -1946,6 +1946,63 @@ def check_streaming():
             b._stream_work(time.time())
             check("a dongle that went is not held against the stream",
                   b._stream_strikes == 0 and b._stream_off_until == 0.0)
+        finally:
+            b.running = False
+
+
+def check_control_channel_first():
+    """0.11.1: a vehicle shows on its first burst, so listen where that goes.
+
+    Every exchange a terminal starts begins with a random-access burst on its
+    cell's main control channel, the uplink partner of the site's continuous
+    main carrier. In 0.11.0 the stream gave the partners two turns in three and
+    a police car driving past in the PC simulator sent nine bursts before one
+    was heard.
+    """
+    print(chr(10) + "35. the control channels first")
+    main_c, traffic_c, far_main = 391_187_500.0, 391_462_500.0, 393_637_500.0
+    with tempfile.TemporaryDirectory() as d:
+        air = FakeAir(downlinks=[main_c], interferers=[(traffic_c, "traffic_downlink")])
+        b = make_backend(air, os.path.join(d, "sites.json"), site_reverify_s=0.0,
+                         stream_mode=True)
+        try:
+            for _ in range(5):
+                b._site_queue = [main_c, traffic_c]
+                b._survey_at = time.time()
+                b._site_work(time.time())
+            now = time.time()
+            locked = {int(round(s["freq_hz"])) for s in b.sites.locked(now)}
+            check("a site's main and traffic carriers both lock",
+                  {int(main_c), int(traffic_c)} <= locked, str(sorted(locked)))
+            check("only the continuous one is taken for the control channel",
+                  b.sites.control_partners(now) == [round(main_c - 10e6)],
+                  str(b.sites.control_partners(now)))
+
+            def share(seq, f):
+                total = sum(h for _, h in seq)
+                on = sum(h for c, h in seq if any(abs(x - f) < 1.0
+                                                  for x, _ in b._stream_members(c, now)))
+                return on / max(1e-9, total)
+
+            seq = b._stream_windows(now)
+            covered = set()
+            for c, _h in seq:
+                covered |= {int(round(x)) for x, _ in b._stream_members(c, now)}
+            got = share(seq, main_c - 10e6)
+            check("one site: its control channel is listened to 3/4 of the time or more",
+                  got >= 0.75, "%.0f%%" % (100 * got))
+            check("  and the whole band is still visited",
+                  {int(round(x)) for x in b._uplink_band_channels()} <= covered)
+            # A weaker neighbouring site, too far away to share the window.
+            b.sites.entries[int(far_main)] = {
+                "hits": 9, "misses": 0, "quality": 0.3, "last_ok": now,
+                "first_seen": now, "ok_total": 9, "cont": 0.9}
+            seq = b._stream_windows(now)
+            own, nb = share(seq, main_c - 10e6), share(seq, far_main - 10e6)
+            check("two sites: the strongest one's control channel keeps most of it",
+                  own >= 0.6 and nb > 0.1, "own %.0f%%, neighbour %.0f%%" % (100 * own, 100 * nb))
+            check("a short visit elsewhere is not held on for what it hears",
+                  min(h for _, h in seq) <= DEFAULTS["stream_hold_other_s"])
         finally:
             b.running = False
 
@@ -2269,6 +2326,7 @@ def main():
     check_streaming()
     check_drive_mode_and_shares()
     check_screened_idle_carrier_keeps_its_lock()
+    check_control_channel_first()
 
     print()
     if FAILURES:

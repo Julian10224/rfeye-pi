@@ -1812,7 +1812,8 @@ class SDRBackend:
             # against is already caught: the exemption only holds while some
             # carrier still verifies (SiteRegistry.heard_recently).
             silent=(not r.ok and r.failed()==['snr'])
-            self.sites.observe(r.freq_hz,r.ok,r.quality,now,silent=silent)
+            self.sites.observe(r.freq_hz,r.ok,r.quality,now,silent=silent,
+                               continuous=bool(r.continuous) if r.ok else None)
 
         covered={int(round(x)) for x in self.dwell_channels}
         if covered:
@@ -2024,24 +2025,58 @@ class SDRBackend:
                           spacing_hz=float(self.cfg.get('tetra_channel_spacing_hz',25000.)))
 
     def _stream_windows(self,now):
-        """The tuner placements stream holds take turns on.
+        """The tuner placements stream holds take turns on, as (centre, hold_s).
 
-        The locked site's partners come first, ``stream_partner_weight``
-        turns for every turn of the rest of the band, which is still covered
-        in full: a vehicle on another carrier or a neighbouring site is what
-        0.9.35 learned to hear, and the stream must not unlearn it.
+        The control channels come first (0.11.1). A terminal's first message
+        -- a registration, a status, the request for a call -- is a random
+        access burst on the main control channel of its cell, which sits on
+        the uplink partner of the site's continuous main carrier. Listening
+        there almost all the time is what makes a vehicle show on its *first*
+        burst: in 0.11.0 the partners had two turns in three and a vehicle on
+        the far side of the rotation sent nine bursts before one was heard
+        (PC simulator, a police car driving past).
+
+        The strongest site's control channel -- the cell the receiver is in,
+        and so the cell a vehicle beside it is in -- gets stream_hold_s at a
+        time. A neighbouring site's control channel usually lies too far away
+        to share the window, and splitting the time evenly between two of
+        them halved what either heard (the simulator's ambulance went
+        unnoticed for two bursts), so they take turns on one
+        stream_hold_other_s visit in between. Every other window -- the
+        traffic carriers' partners, then the rest of the band, which is still
+        covered in full -- gets one such visit in turn as well. About
+        67% / 17% / 17% with two sites; 80% / - / 20% with one. Without a
+        known main carrier it is the 0.11.0 rotation: partners
+        ``stream_partner_weight`` turns for every turn of the rest.
         """
+        main=float(self.cfg.get('stream_hold_s',8.0))
+        short=max(0.5,float(self.cfg.get('stream_hold_other_s',2.0)))
+        # Strongest site first: locked() ranks by quality, and the windows
+        # are planned in that order, so cw[0] holds the strongest one's.
+        control=self.sites.control_partners(now)
         partners=sorted(self.sites.uplink_partners(now))
         band=self._uplink_band_channels()
-        wins=plan_windows([partners,band],self._stream_place)
-        pw=[c for c,g in wins if g==0]
-        bw=[c for c,g in wins if g==1]
+        wins=plan_windows([control,partners,band],self._stream_place)
+        cw=[c for c,g in wins if g==0]
+        pw=[c for c,g in wins if g==1]
+        bw=[c for c,g in wins if g==2]
+        if cw:
+            first,rest=cw[0],cw[1:]
+            others=pw+bw
+            seq=[]
+            for k in range(max(len(others),len(rest),1)):
+                seq.append((first,main))
+                if rest:
+                    seq.append((rest[k%len(rest)],short))
+                if others:
+                    seq.append((others[k%len(others)],short))
+            return seq
         if not pw or not bw:
-            return pw or bw
+            return [(c,main) for c in (pw or bw)]
         weight=max(1,int(self.cfg.get('stream_partner_weight',2)))
         seq=[]
         for b in bw:
-            seq.extend(pw*weight); seq.append(b)
+            seq.extend((c,main) for c in pw*weight); seq.append((b,main))
         return seq
 
     def _stream_members(self,centre,now):
@@ -2087,24 +2122,27 @@ class SDRBackend:
         immediately on a verified hit, otherwise every stream_publish_s -- so
         the hold is not a delay on anything.
 
-        A window with something heard in it is held on past stream_hold_s,
-        up to stream_hold_max_s; nothing else is learnt by moving away from a
-        vehicle that is still transmitting.
+        Once a site is locked, a window with something heard in it is held
+        on past stream_hold_s, up to stream_hold_max_s; nothing else is learnt
+        by moving away from a vehicle that is still transmitting.
         """
         heard=[tr.freq_hz for tr in self.alarm.tracks.heard(now)]
         centre=None
         # Something heard gets the next hold, but not every hold: a vehicle
         # that never stops transmitting would otherwise keep the receiver on
         # its window for good, as uplink_track_run stops it doing to dwells.
+        hold=max(1.0,float(self.cfg.get('stream_hold_s',8.0)))
         if heard and not self._stream_followed:
-            partners=sorted(self.sites.uplink_partners(now))
-            centre,_=self._stream_place([heard[0]]+(partners or self._uplink_band_channels()))
+            # Placed to take in the control channels too, where it can.
+            near=(sorted(self.sites.control_partners(now))
+                  +sorted(self.sites.uplink_partners(now)))
+            centre,_=self._stream_place([heard[0]]+(near or self._uplink_band_channels()))
         self._stream_followed=centre is not None
         if centre is None:
             seq=self._stream_windows(now)
             if not seq:
                 return None
-            centre=seq[self._stream_turn%len(seq)]
+            centre,hold=seq[self._stream_turn%len(seq)]
             self._stream_turn+=1
         members=self._stream_members(centre,now)
         if not members:
@@ -2131,8 +2169,13 @@ class SDRBackend:
         index={int(round(f)):i for i,(f,_) in enumerate(members)}
         snip=1<<int(cfg.get('stream_snippet_log2',17))
         maxch=max(1,int(cfg.get('stream_max_channels',8)))
-        hold=max(1.0,float(cfg.get('stream_hold_s',8.0)))
+        hold=max(0.5,float(hold))
         hold_max=max(hold,float(cfg.get('stream_hold_max_s',30.0)))
+        # Away from the control channels a visit stays short whatever it
+        # hears: the next vehicle's first burst goes to the control channel.
+        control=self.sites.control_partners(now)
+        if control and not any(int(round(f)) in keys for f in control):
+            hold_max=hold
         publish_s=max(0.2,float(cfg.get('stream_publish_s',1.0)))
         stall_s=max(0.5,float(cfg.get('stream_stall_s',2.5)))
         min_duty=float(cfg.get('stream_min_duty',0.85))
@@ -2150,6 +2193,7 @@ class SDRBackend:
             ring.write(view)
 
         everything=[]
+        locked0=self.sites.locked(now)
         mono0=time.monotonic()
         try:
             dev=self._ensure_sdr()
@@ -2176,7 +2220,12 @@ class SDRBackend:
                         if self._demo_forced or self._sdr_reopen:
                             break
                     if mono-mono0>=hold:
-                        live=mono-mono0<hold_max and any(
+                        # Held on for something heard -- but only once a site
+                        # is locked. Without one the downlink only gets the
+                        # gap between holds, and with a vehicle in range every
+                        # hold ran to stream_hold_max_s: in the PC simulator a
+                        # site with traffic on it took minutes to lock.
+                        live=mono-mono0<hold_max and bool(locked0) and any(
                             int(round(tr.freq_hz)) in keys
                             for tr in self.alarm.tracks.heard(time.time()))
                         if not live:
@@ -2387,8 +2436,15 @@ class SDRBackend:
                 if streamed is not None:
                     # Between two stream holds, at most one downlink dwell,
                     # and only when there is something to do: a re-proof that
-                    # is due, a band pass still running, or no lock yet.
-                    run_site=due or bool(self._site_queue) or not locked_now
+                    # is due, a band pass still running, no lock yet -- or a
+                    # carrier that verified lately and is short of a lock.
+                    # That last one is a neighbouring site, and its control
+                    # channel is where vehicles in that cell send their first
+                    # message: in the PC simulator a 12 dB neighbour took
+                    # three minutes to lock without it.
+                    fresh=max(10.,float(self.cfg.get('site_candidate_fresh_s',120.0)))
+                    warm=any(now-c['last_ok']<=fresh for c in self.sites.candidates(now))
+                    run_site=due or bool(self._site_queue) or not locked_now or warm
                 elif locked_now:
                     # One cycle in site_pass_share, not one in two. Measured on
                     # the field unit, the band pass was taking 9 of 22 cycles

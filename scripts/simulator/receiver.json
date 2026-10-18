@@ -1,0 +1,9 @@
+{
+  "phase_rms_deg": 6.0,
+  "phase_hi_hz": 30000.0,
+  "iq_gain_db": 0.3,
+  "pa_a3": 0.08,
+  "site_taps": [[0.0, 0.0], [10.0, -10.0]],
+  "harsh_taps": [[0.0, 0.0], [15.0, -8.0]],
+  "note": "calibrate_channel.py: with these, simulated downlinks score m 0.6-0.7, four-phase 0.92, selectivity 2.3-2.7 -- still kinder than the six real carriers (m 0.43, 0.81, 2.09). The 'harsh' echo takes m to 0.30 and four-phase to 0.86, past the field values: the pessimistic bound."
+}

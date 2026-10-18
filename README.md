@@ -1,6 +1,6 @@
-# RF Eye 0.11.0 for Raspberry Pi
+# RF Eye 0.11.1 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.11.0 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.11.1 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.11.0 appliance path:
+The installer reproduces the working 0.11.1 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.11.0
+## User interface in 0.11.1
 
 The compact profile contains:
 
@@ -461,6 +461,48 @@ scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
 
+### The first message: control channels first (0.11.1)
+
+Driving a police car past the unit in the PC simulator (see *Does a Pi 3 B+
+detect emergency services?* below), 0.11.0 put it on the panel at its ninth burst. The stream was
+listening, but to the wrong place: one RTL-SDR hears about 1.7 MHz of the
+5 MHz uplink band at a time, and 0.11.0 gave the locked site's partners two
+turns in three and the rest of the band the third -- so a vehicle could send
+burst after burst into windows the receiver was not on.
+
+TETRA says where to listen. Every exchange a terminal starts -- registering, a
+status message, asking for a call -- begins with a random-access burst on the
+main control channel (MCCH) of its cell, and the MCCH is on the site's main
+carrier: the one carrier that transmits continuously. A traffic carrier's
+uplink only carries a call that was asked for on the control channel first.
+
+- **The registry knows which carriers are main carriers.** A verified downlink
+  that was on the air all the time is a main carrier (`cont` in the site state);
+  `SiteRegistry.control_partners` gives their uplink partners, strongest site
+  first.
+- **The stream sits on the control channel.** The strongest site's control
+  channel gets `stream_hold_s` at a time; a neighbouring site's control channel
+  and every other window -- traffic partners, then the rest of the band, still
+  covered in full -- get one `stream_hold_other_s` (2 s) visit each in turn.
+  With one site that is about 80-90% of the time on its control channel, with
+  two about 67-77% on the strongest. A short visit elsewhere is never held on
+  for what it hears.
+- **A neighbouring site locks quickly.** A carrier that verified lately and is
+  short of a lock now gets a downlink dwell between holds; a 12 dB neighbour
+  took three minutes to lock in the simulator, now about forty seconds.
+- **A new alert reaches the panel at once.** The one-frame-a-second pace while
+  streaming no longer applies to a frame that shows a new alert or a new
+  channel.
+
+Measured in the field test below -- the whole unit at Pi 3 B+ speed, through
+multipath fading -- counting each vehicle's own bursts from the first one
+strong enough to recognise: in the unit's own cell 10 of 15 vehicles showed on
+that first burst and 14 of 15 within two; in the neighbouring cell 2 of 4 and 3
+of 4. The rest is fading, not listening: a burst that falls into a fade is not
+decodable by anyone. A vehicle in a cell whose base station the unit cannot
+hear transmits on a channel the receiver visits only briefly -- the limit of one
+dongle, which a second RTL-SDR parked on the control channel would remove.
+
 ### Listening all the time: drive mode and the stream (0.11.0)
 
 The waveform tests were never why a passing vehicle was missed. Listening time
@@ -498,7 +540,7 @@ Where the time went, and what changed:
   short-time FFT energy trigger (`rfeye/stream_watch.py`) runs on every block,
   and only the ~65 ms around something that stayed up for 5 ms or longer goes
   to `tetra_phy.analyse`. A window (+-850 kHz, 68 channels) is held for
-  `stream_hold_s`, longer while something in it is heard; the locked site's
+  `stream_hold_s`, longer while something in it is heard once a site is locked; the locked site's
   partners get `stream_partner_weight` turns for every turn of the rest of the
   band, which is still covered in full. Between holds the downlink gets one
   dwell, and only when a re-proof is due, a band pass is running or nothing is
@@ -1504,6 +1546,86 @@ On the reference Pi 3 B+ at the 900 MHz ceiling a quiet wide dwell costs about
 about 1.7 s of analysis. Tests run cheapest first and stop at the first hard
 failure, so a dwell full of empty channels costs little more than one.
 
+### Does a Pi 3 B+ detect emergency services? The simulator and the field test
+
+Everything below runs on a PC without an SDR. Only librtlsdr is replaced: the
+simulated dongle answers the same calls -- sync dwells and the async stream --
+so the detector, the stream trigger, the lock, the alarm and the panel run
+exactly as on a unit. Nothing here is shipped in the OTA package.
+
+**The air** (`scripts/simulator/sim_air.py`) follows how C2000 is used, because
+that decides what a receiver can hear. Two sites, each with a continuous main
+carrier (the cell's control channel) and discontinuous traffic carriers.
+Vehicles belong to a cell: every registration, status message or request for a
+call is a random-access burst on that cell's control channel, and a call then
+runs on a traffic carrier. A vehicle can also be put in a cell whose base
+station the unit cannot hear (a random channel).
+
+**The channel** (`channel.py`) is what makes it more than the clean signal the
+unit tests are built on. Every vehicle reaches the receiver through multipath
+and Doppler fading of its own -- the TETRA TU50 urban model at its speed, line
+of sight when it passes close, a parked car's slow fade -- with its own
+frequency error and a slightly non-linear power amplifier. The dongle adds its
+tuner error, phase noise to 30 kHz, I/Q imbalance and DC offset.
+`calibrate_channel.py` measures simulated carriers through it against the six
+real ones in docs/FIELD-CALIBRATION.md: the model as shipped (`receiver.json`)
+is still kinder than the field (modulation score 0.6-0.7 against 0.43), and
+the `harsh` profile, with a 15 us echo, is harder than it (0.30) -- the two
+bound reality. **No real uplink burst has been measured yet**: until one is,
+everything below is a simulation, however careful.
+
+**Per burst** (`acceptance.py`): the stream path exactly as shipped -- trigger
+on every other FFT row, 65 ms to the waveform test -- 24 trials a cell. Share
+of bursts recognised on their own channel, by mean level over the channel's
+noise:
+
+| burst / channel | 8 dB | 10 dB | 12 dB | 15 dB | 20 dB | 25 dB |
+|---|---|---|---|---|---|---|
+| subslot (random access), clean | 70% | 100% | 100% | 100% | 95% | 100% |
+| subslot, passing close (line of sight) | 33% | 62% | 83% | 87% | 91% | 100% |
+| subslot, urban TU50, 50 km/h | 33% | 50% | 54% | 83% | 95% | 100% |
+| subslot, harsh (15 us echo) | 41% | 66% | 45% | 70% | 79% | 95% |
+| slot, urban TU50, 50 km/h | 45% | 50% | 70% | 91% | 95% | 100% |
+
+Not one false alarm in 6528 channel-captures of empty band, RTL-SDR spurs and
+the panel's SPI line. The misses at 10-15 dB are bursts that fell into a fade:
+measured, they are at 3-7 dB with a modulation score of 0.1-0.3, which no
+receiver decodes. The software does not lose them; the antenna does. A better
+antenna is worth more there than any change to the code.
+
+**The whole unit at Pi speed** (`field_test.py`): the real app with its UI on a
+dummy display, slowed to a Pi 3 B+ at 900 MHz (`pi_mode.py`, Windows; `--pi
+15` reproduces the three workloads this README times on the reference unit,
+20 is pessimistic), against that air in a process of its own. A vehicle every
+20 s -- police and ambulance passing in the unit's own cell, police in the
+neighbouring cell, a fire engine parked by the road, a short PTT call, a
+vehicle in a cell the unit cannot hear. 0.11.1, 8 minutes, 22 vehicles, unit
+locked as a running unit is:
+
+| | seen on its first recognisable burst | within two | at all |
+|---|---|---|---|
+| own cell | 10/15 | 14/15 | 15/15 |
+| neighbouring cell | 2/4 | 3/4 | 3/4 |
+| unknown cell | 0/3 | 1/3 | 3/3 |
+
+No false alarm; 77% of one Pi core; 0.1% of the samples lost to USB, none to
+falling behind.
+
+```bash
+python scripts/simulator/acceptance.py
+python scripts/simulator/field_test.py --pi 15 --minutes 10
+python scripts/simulator/run-simulator.py
+```
+
+`run-simulator.py` is the same air with the panel visible: the real
+application in a portrait window (click where you would tap; the buzzer plays
+on the PC speaker) and a control panel for the sites and vehicles -- add them in
+a cell, move them closer, let them send bursts or key up, drive them past, and
+read at which of its own bursts RF Eye first saw each one. `--clean` turns the
+channel off, `--dwell` runs the 0.10.x dwells, `--selftest 185` plays the
+scenarios without windows. Settings, site state and logs go to a temporary
+directory.
+
 ### Verifying the detector yourself
 
 Both suites run without an SDR, an antenna or a real transmission:
@@ -1591,7 +1713,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.11.0 uses a **TMB12A03 active buzzer**:
+RF Eye 0.11.1 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1740,7 +1862,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.11.0**.
+`VERSION` and `rfeye/config.py` identify this release as **0.11.1**.
 
 Build the OTA package with:
 
@@ -2302,6 +2424,7 @@ rfeye/tetra_sim.py             synthetic TETRA and interferers for testing
 scripts/tetra-phy-selftest.py  waveform test suite, known-truth signals
 scripts/detector-selftest.py   end-to-end test against a simulated air interface
 scripts/analyse-capture.py     re-verify a saved .iq8 capture offline
+scripts/simulator/             the whole app on a PC: simulated C2000 air, field test at Pi speed
 docs/FIELD-CALIBRATION.md      what real C2000 carriers actually measure
 update/manifest.json           OTA metadata for main
 update/rfeye-update.zip        deterministic OTA package

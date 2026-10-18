@@ -352,9 +352,15 @@ class App:
                      int(snap.get("site_locked_count", 0) or 0),
                      bool(snap.get("mobile_confirmed")),
                      bool(snap.get("power_warning")))
-        if signature != self.ui_signature:
+        # A channel that was not on screen yet is news too: a second vehicle
+        # appearing does not change the state, only the bars.
+        chans = frozenset(int(p.get("channel", 0) or 0) for p in snap.get("peaks", []) or [])
+        if signature != self.ui_signature or not chans <= getattr(self, "ui_channels", frozenset()):
             self.ui_signature = signature
             self.ui_wake_at = time.monotonic()
+            # ...and it goes to the panel at once, not at the streaming pace.
+            self.ui_urgent = True
+        self.ui_channels = chans
         sound_snap = snap
         if self.page == "recording_replay":
             replay_snap = getattr(self, "recording_replay_snapshot", None)
@@ -443,6 +449,7 @@ class App:
         touching = now - float(getattr(self, "ui_touch_at", 0.0)) < 1.5
         streaming = getattr(self.backend, "is_streaming", None)
         if (streaming is not None and not touching and streaming()
+                and not getattr(self, "ui_urgent", False)
                 and now - self._shown_at < float(self.cfg.get("ui_quiet_stream_frame_s", 1.0))):
             # A streaming radio has no gap to put a frame in: each one costs
             # its time on the SPI bus in listening. At most one a second,
@@ -473,6 +480,7 @@ class App:
         pygame.display.flip()
         self._shown_sig = sig
         self._shown_at = time.monotonic()
+        self.ui_urgent = False
         self.frames_shown += 1
         return True
 
