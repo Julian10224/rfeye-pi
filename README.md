@@ -1,6 +1,6 @@
-# RF Eye 0.11.1 for Raspberry Pi
+# RF Eye 0.11.2 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.11.1 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.11.2 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.11.1 appliance path:
+The installer reproduces the working 0.11.2 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.11.1
+## User interface in 0.11.2
 
 The compact profile contains:
 
@@ -460,6 +460,92 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### Beside the car it sounds, across town it is only shown (0.11.2)
+
+Field report on 0.11.1: *it often goes off when there is nothing, it does not
+go off when I stand next to the police, the supply notice comes up too often,
+and now and then it finds nothing at all for a while.* Checked against the
+code without the unit; three of those are faults, reproduced first and then
+fixed.
+
+**Next to the police: the vehicle's own channel was never tested.** A
+transmitter beside the antenna puts the 8-bit ADC on its rails, and that lifts
+every channel of the window at once -- dozens trigger together. The stream
+analysed the eight with the lowest frequencies and dropped the rest. Driven
+through `_stream_work` with a one-slot burst at a channel high in the window:
+
+| burst | 0.11.1 | 0.11.2 |
+| --- | --- | --- |
+| 32 dB, not clipping | alert | alert |
+| strong, starting to clip | alert | alert |
+| beside the car, on the rails | **nothing** -- its channel not among the eight | alert, own channel |
+| right against it | **nothing** | alert, own channel |
+
+`StreamTrigger` now keeps how far above its floor each burst rose
+(`peak_of`), and the loudest channels are analysed first. The vehicle's own
+channel is the one that stands highest; the rest is splatter.
+
+**When there is nothing: every terminal of the cell sounded.** Since 0.11.1
+the stream holds the strongest site's control channel most of the time --
+right for hearing a vehicle's first burst, but that is also where every
+terminal in the cell sends its registrations, positions and call requests,
+and any verified hit there sounded the running alarm at any level. A Blu Eye
+has a *City mode* threshold below which a signal is only shown. So has this
+now, `alert_range` on the settings page:
+
+| Alert range | sounds | shown |
+| --- | --- | --- |
+| CITY (default) | at least `uplink_near_city_db` (28 dB) at the antenna | everything verified |
+| CLOSE | at least `uplink_near_close_db` (38 dB) | everything verified |
+| ALL | everything verified, as up to 0.11.1 | everything verified |
+
+"At the antenna" is the SNR with any gain the overload guard took off put
+back. Below the threshold the bars are there and silent, and the status line
+says `C2000 ACTIVITY FAR` in yellow instead of `NEARBY` in red. The 28 dB is
+a judgement, not a calibration: on the reference unit the network's masts,
+kilometres away on 30 m towers, measure 15-33 dB; a terminal at street level
+that far away is weaker than they are; and a vehicle beside the antenna
+measures 35-44 dB as the ADC nears its rails. `hits.log` writes `near` or
+`far` after every hit, and the samples behind what was heard are kept now
+too (`evidence/*_hit.iq8`, one a minute at most, eight kept) -- the next drive
+is what calibrates it.
+
+Nothing else that is not TETRA got through either: 2,000 channel tests of
+stream-sized captures (65 ms) of noise, ignition impulses, keyed noise, FSK,
+4FSK, FM, pi/4-DQPSK at 16 and 24 kbaud and a carrier, none accepted, against
+39 of 40 one-slot bursts at about 12 dB. One more possible source is written
+down but not acted on: the tuner's image. The R820T/R828D mixes with its LO
+3.57 MHz high, so a signal 7.14 MHz above the tuner centre folds into the
+window mirrored, and from the upper uplink windows that is the bottom of the
+downlink band. A traffic carrier with a call on it is one slot in four --
+exactly what a terminal sends -- and next to a mast it would be loud. How well
+these dongles reject it has never been measured, so `hits.log` only says
+`image-of CH n` when the mirror of a hit lands on a downlink carrier the unit
+knows.
+
+**The supply notice, and drive mode switching itself off.** Up to 0.11.1 a
+live under-voltage switched Max power off, saved that, and brought the notice
+back every time. On a unit whose rail dips every few seconds that was the
+notice over the screen again and again, and drive mode -- the only mode in
+which the radio streams -- gone within a minute of every start: back to
+hearing each channel 9% of the time. The power ladder was already backing
+off on what the supply really shows. The notice is now shown once per start,
+never over an alert, and changes nothing; the status line and the Supply row
+keep saying it while it is true.
+
+**Finding nothing for a while, after a dip.** A dip took the radio to 30% and
+it climbed back one step every five minutes -- and since 0.11.0 it only
+streams above 85%, so after every dip it spent half an hour in dwells that
+hear each channel a few per cent of the time. After a dip (not a lost dongle)
+it now goes straight back to where it was once the rail has held for
+`power_ladder_dip_return_s` (2 min). A lost dongle still climbs a step at a
+time. What no release can fix is the rail itself: on the reference unit with
+the good antenna it sags below 4.63 V several times a minute, and every time
+the dongle drops off the USB bus it is gone for seconds.
+
+`scripts/detector-selftest.py` scenario 36 and the app selftest assert all of
+the above.
 
 ### The first message: control channels first (0.11.1)
 
@@ -1713,7 +1799,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.11.1 uses a **TMB12A03 active buzzer**:
+RF Eye 0.11.2 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1862,7 +1948,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.11.1**.
+`VERSION` and `rfeye/config.py` identify this release as **0.11.2**.
 
 Build the OTA package with:
 

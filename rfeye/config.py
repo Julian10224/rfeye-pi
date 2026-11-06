@@ -223,6 +223,10 @@ DEFAULTS = {
     "power_ladder_retry_s": 1800.0,
     "power_ladder_debounce_s": 30.0,
     "power_ladder_floor_dips": 3,
+    # After a dip (not a lost dongle) the radio goes straight back to where
+    # it was once the rail has held this long (0.11.2), instead of climbing a
+    # step every power_ladder_step_s: the stream only runs above 85%.
+    "power_ladder_dip_return_s": 120.0,
     "power_ladder_floor_window_s": 1800.0,
     "power_ladder_persist": True,
     # The kernel's under-voltage alarm is a file read, so it is watched every
@@ -312,6 +316,15 @@ DEFAULTS = {
     # yellow part of the bar), or until a second hit or a site lock backs it
     # up. Only then does the running alarm sound.
     "uplink_single_hit_full_db": 14.0,
+    # Which verified signals make a sound (0.11.2), as a Blu Eye's City mode:
+    # "city" only those at least uplink_near_city_db at the antenna, "close"
+    # uplink_near_close_db, "all" every one. Below the threshold a signal is
+    # shown and silent. On the reference unit the network's own masts,
+    # kilometres away, measure 15-33 dB; a vehicle beside it puts the ADC
+    # near its rails, 35 dB and up. A setting on the panel.
+    "alert_range": "city",
+    "uplink_near_city_db": 28.0,
+    "uplink_near_close_db": 38.0,
     # 100 is a peak hold over the dwell's ~146 spectrum rows. 98 kept the top
     # three of them, and a single 14 ms TETRA slot is four -- so the level of
     # the shortest real transmission was averaged away before any test saw it.
@@ -426,6 +439,9 @@ DEFAULTS = {
     # uplink capture that hits the rails, and one holding something at least
     # evidence_strong_db strong that the waveform test turned down. 2 MB each.
     "evidence_keep": 12,
+    # The samples behind what was heard are kept too (0.11.2), one capture a
+    # minute at most, eight in all: what sounded can be checked afterwards.
+    "evidence_hit_every_s": 60.0,
     "evidence_strong_db": 15.0,
     "mobile_band_start_hz": 380_000_000,
     "mobile_band_end_hz": 385_000_000,
@@ -521,7 +537,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.11.1",
+    "app_version": "0.11.2",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

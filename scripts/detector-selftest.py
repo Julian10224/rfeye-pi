@@ -2109,6 +2109,133 @@ def check_screened_idle_carrier_keeps_its_lock():
             b.running = False
 
 
+def check_near_and_far():
+    """0.11.2: beside the car it sounds, across town it is only shown.
+
+    Field report on 0.11.1: "it often goes off when there is nothing, and not
+    when I stand next to the police". Two faults, both reproduced here first.
+
+    A transmitter beside the antenna puts the ADC on its rails and lifts every
+    channel of the window at once. The stream analysed the eight triggered
+    channels with the lowest frequencies and dropped the rest, so the
+    vehicle's own channel was almost never tested: driven through the stream
+    with a burst strong enough to clip, no alert at all.
+
+    And every verified terminal sounded, however far: the stream sits on the
+    cell's control channel, where every terminal in the cell talks.
+    """
+    import math
+    print(chr(10) + "36. beside the car it sounds, across town it is only shown")
+    sr = 2_016_000
+    dur = 3.0
+
+    def burst_capture(off, amp, seed=5, nslots=1):
+        n = int(dur * sr)
+        rng = np.random.default_rng(seed)
+        iq = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * (9.0 / math.sqrt(2))
+        b = sim.control_burst(dur, sr, seed=seed + 1, n_slots=nslots,
+                              start_frac=1.4 / dur, freq_offset_hz=off)
+        return (iq + amp * b[:n]).astype(np.complex64)
+
+    def drive(amp, label, **cfg):
+        with tempfile.TemporaryDirectory() as d:
+            b = make_backend(FakeAir(), os.path.join(d, "sites.json"), stream_mode=True,
+                             low_power_mode=False, stream_hold_s=2.6,
+                             stream_hold_max_s=2.6, **cfg)
+            try:
+                now = time.time()
+                centre = b._stream_windows(now)[0][0]
+                mem = b._stream_members(centre, now)
+                target = mem[len(mem) * 3 // 4][0]       # high in the window
+                fake = StreamingFake(burst_capture(target - centre, amp), sr)
+                b._ensure_sdr = lambda: fake
+                b.sdr = fake
+                b._site_work = lambda now: []
+                b._stream_turn = 0
+                b._scan_cycle()
+                s = b.snapshot()
+                on = [p["freq_hz"] for p in s["peaks"]]
+                note("%s: alert=%s near=%s on=%s snr=%s" % (
+                    label, s["mobile_confirmed"], s["alert_near"], on,
+                    [round(p["snr_db"], 1) for p in s["peaks"]]))
+                return s, target
+            finally:
+                b.running = False
+
+    for amp, label in ((600, "a handset beside the antenna, on the rails"),
+                       (3000, "  and right against it")):
+        s, target = drive(amp, label)
+        check(label + ": alert on its own channel",
+              s["mobile_confirmed"] and bool(s["peaks"])
+              and abs(s["peaks"][0]["freq_hz"] - target) < 1.0,
+              str([p["freq_hz"] for p in s["peaks"]]))
+        check("  and it is near, so it sounds", s["alert_near"])
+    s, target = drive(3, "a terminal across town")
+    check("a terminal across town is shown", s["mobile_confirmed"])
+    check("  and does not sound (alert_range city)", not s["alert_near"],
+          str([round(p["snr_db"], 1) for p in s["peaks"]]))
+    s, _ = drive(3, "the same with alert_range all", alert_range="all")
+    check("  unless the range is set to all", s["alert_near"])
+
+    # The level is what reached the antenna: a gain the overload guard has
+    # taken off is put back before near or far is decided.
+    from tetra_detector import UplinkAlarm
+    from tetra_phy import PhyResult
+    cfg = dict(DEFAULTS)
+    al = UplinkAlarm(cfg)
+    r = PhyResult(freq_hz=381_187_500.0, role="UPLINK", ok=True, snr_db=25.0, quality=0.6)
+    al.update([r], [r.freq_hz], 1000.0)
+    check("25 dB is far in the city", al.confirmed and not al.near)
+    al = UplinkAlarm(cfg)
+    al.update([r], [r.freq_hz], 1000.0, level_offset_db=4.0)
+    check("  but 25 dB with 4 dB of gain backed off is near", al.near)
+    cfg["alert_range"] = "close"
+    al = UplinkAlarm(cfg)
+    al.update([r], [r.freq_hz], 1000.0, level_offset_db=4.0)
+    check("  and far again when only close counts", not al.near)
+    cfg["alert_range"] = "city"
+    al = UplinkAlarm(cfg)
+    loud = PhyResult(freq_hz=381_187_500.0, role="UPLINK", ok=True, snr_db=40.0, quality=0.6)
+    al.update([loud], [loud.freq_hz], 1000.0)
+    al.update([], [loud.freq_hz], 1005.0)
+    check("a near alert is held through the gap", al.near)
+    al.update([], [loud.freq_hz], 1000.0 + float(cfg["uplink_alert_hold_s"]) + 1.0)
+    check("  and goes with it", not al.near and not al.confirmed)
+
+    # The trigger says how loud each burst was.
+    from stream_watch import StreamTrigger
+    offs = [float(o) for o in np.arange(-850_000, 850_001, 25_000) if abs(o) >= 20_000]
+    tr = StreamTrigger(sr, offs, row_stride=int(DEFAULTS["stream_row_stride"]))
+    iq = sim.make_capture([(sim.control_burst(1.0, sr, seed=3, n_slots=1, start_frac=0.55,
+                                              freq_offset_hz=300_000.0), 1.0),
+                           (sim.control_burst(1.0, sr, seed=4, n_slots=1, start_frac=0.55,
+                                              freq_offset_hz=-300_000.0), 0.25)],
+                          1.0, sr, snr_db=25.0, seed=12)
+    got = []
+    for a in range(0, len(iq), 131072):
+        got += tr.feed(iq[a:a + 131072], a)
+    peaks = {offs[c]: tr.peak_of(c, s_) for c, s_, _ in got}
+    check("the trigger keeps how far above its floor each burst rose",
+          peaks.get(300_000.0, 0.0) > peaks.get(-300_000.0, 0.0) + 6.0,
+          str({k: round(v, 1) for k, v in peaks.items()}))
+
+    # A dip gives the radio back after a short calm, not a step every five
+    # minutes: the stream only runs above 85%.
+    from power import PowerLadder
+    lad = PowerLadder(dict(DEFAULTS), None, boot_id="near-far")
+    t = 5_000_000.0
+    lad.dip(t, "rail low", in_use=1.0)
+    for k in range(1, 130):
+        lad.tick(t + k, True)
+    check("after a dip the radio is back at full share in two minutes",
+          lad.cap == 1.0, "%.2f" % lad.cap)
+    lad.event(t + 200.0, "SDR lost", in_use=1.0)
+    for k in range(1, 130):
+        lad.tick(t + 200.0 + k, True)
+    check("  but after a lost dongle it climbs a step at a time",
+          abs(lad.cap - 0.30) < 1e-9, "%.2f" % lad.cap)
+
+
 def main():
     global VERBOSE
     ap = argparse.ArgumentParser()
@@ -2327,6 +2454,7 @@ def main():
     check_drive_mode_and_shares()
     check_screened_idle_carrier_keeps_its_lock()
     check_control_channel_first()
+    check_near_and_far()
 
     print()
     if FAILURES:

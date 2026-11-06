@@ -613,6 +613,22 @@ def _check_power_notice_countdown(a):
     keep_at = a.power_notice_at
     keep_lines = list(a.power_notice_lines)
     try:
+        # 0.11.2: the notice changes nothing -- Max power stays as it was --
+        # and comes once per start, never over an alert.
+        keep_mode = a.cfg.get("low_power_mode", True)
+        a.cfg["low_power_mode"] = False
+        a.power_notice_done = False
+        a.power_notice_open = False
+        a._power_notice_update({"power_warning": "UNDER-VOLTAGE", "mobile_confirmed": True})
+        assert a.power_notice_open is False, "not over the bars of an alert"
+        a._power_notice_update({"power_warning": "UNDER-VOLTAGE"})
+        assert a.power_notice_open is True
+        assert a.cfg["low_power_mode"] is False, "a dip must not switch drive mode off"
+        a.power_notice_open = False
+        a.power_notice_done = True
+        a._power_notice_update({"power_warning": "UNDER-VOLTAGE"})
+        assert a.power_notice_open is False, "once per start"
+        a.cfg["low_power_mode"] = keep_mode
         a.power_notice_done = False
         a.power_notice_open = False
         a._power_notice_update({"power_warning": "UNDER-VOLTAGE",
@@ -744,6 +760,17 @@ def _check_alert_sound(a):
         a.last_beep=0.0
         a._sound_logic(dict(prov,alert_provisional=False))
         assert beeps, "a weak full alert must still sound"
+        # ...unless it is far away (0.11.2, alert_range): shown, not sounded.
+        del beeps[:]
+        a.last_beep=0.0; a.last_provisional_beep=0.0
+        far=dict(prov,alert_provisional=False,alert_near=False)
+        a._sound_logic(far)
+        a._sound_logic(dict(far,alert_provisional=True,provisional_hit_at=200.0))
+        assert not beeps, ("a terminal across town must not beep", beeps)
+        a._sound_logic(dict(far,alert_near=True))
+        assert beeps, "the same alert near the receiver sounds"
+        a._draw_main(dict(a.backend.snapshot(),peaks=[weak],mobile_confirmed=True,
+                          mobile_level=0.05,alert_near=False,detector_state="ALERT"))
         a._draw_main(dict(a.backend.snapshot(),peaks=[weak],mobile_confirmed=True,
                           mobile_level=0.05,alert_provisional=True))
     finally:
@@ -978,7 +1005,7 @@ def main():
     # Derived from the layout constants, not written out: the settings rows
     # have moved before and a hard-coded y silently taps the wrong feature.
     from compact_ui_draw import SETTINGS_TOP, SETTINGS_STEP, SETTINGS_HEIGHT
-    _ROWS = ["demo_mode", "brightness", "low_power", "record_rf",
+    _ROWS = ["demo_mode", "brightness", "low_power", "alert_range", "record_rf",
              "recordings", "wifi", "update", "debug"]
     def _row_y(name):
         return SETTINGS_TOP + _ROWS.index(name) * SETTINGS_STEP + SETTINGS_HEIGHT // 2
@@ -1023,23 +1050,30 @@ def main():
             break
         time.sleep(0.05)
     assert getattr(a.backend, "reinit_calls", 0) >= 2, "each switch re-checks USB"
-    # A live under-voltage takes max power back off, even after the notice has
-    # already been seen and dismissed once: it is a change the user asked for
-    # and did not make, so it has to be said out loud.
+    # Until 0.11.2 a live under-voltage took max power back off, saved it,
+    # and brought the notice back each time -- on a rail that dips every few
+    # seconds, drive mode was gone a minute after every start. The power
+    # ladder backs the radio off on what the supply shows; the notice only
+    # says it, once.
     a.cfg["low_power_mode"] = False
     a.power_notice_done = True
     a.power_notice_open = False
     a._power_notice_update({"power_warning": "UNDER-VOLTAGE",
                             "power_detail": "core 1.2563V, throttled 0xd0005"})
-    assert a.cfg["low_power_mode"] is True, "a sagging rail drops max power"
-    assert a.power_notice_open is True, "and says so, dismissed or not"
-    assert any("Max power" in line for line in a.power_notice_lines), a.power_notice_lines
-    a.power_notice_open = False
-    a.power_notice_done = True
-    # With the load already backed off there is nothing left to revert, so a
-    # dismissed notice stays dismissed.
-    a._power_notice_update({"power_warning": "UNDER-VOLTAGE"})
-    assert a.power_notice_open is False
+    assert a.cfg["low_power_mode"] is False, "a sagging rail must not switch drive mode off"
+    assert a.power_notice_open is False, "a dismissed notice stays dismissed"
+    assert not any("Max power" in line for line in a.power_notice_lines), a.power_notice_lines
+
+    # Alert range: CITY -> CLOSE -> ALL -> CITY, saved, and shown on its row.
+    keep_range = a.cfg.get("alert_range", "city")
+    a.cfg["alert_range"] = "city"
+    seen = []
+    for _ in range(3):
+        time.sleep(0.15)
+        a._tap(40, _row_y("alert_range"))
+        seen.append(a.cfg["alert_range"])
+    assert seen == ["close", "all", "city"], seen
+    a.cfg["alert_range"] = keep_range
     # Leave the notice as the later check expects to find it.
     a.power_notice_done = False
     a.power_notice_lines = []

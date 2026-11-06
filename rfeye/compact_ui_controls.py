@@ -270,7 +270,8 @@ def _record_rf_worker(app, duration):
                 "uplink_confirm_dwells","uplink_confirm_visits",
                 "uplink_state_max_age_s","uplink_sensitive",
                 "uplink_sweep_band","uplink_unknown_confirm_dwells",
-                "low_power_mode","stream_mode","stream_trigger_db",
+                "low_power_mode","stream_mode","stream_trigger_db","alert_range",
+                "uplink_near_city_db","uplink_near_close_db",
                 "phy_uplink_sensitive_percentile",
                 "uplink_alert_hold_s","mobile_band_start_hz","mobile_band_end_hz",
                 "site_band_start_hz","site_band_end_hz",
@@ -424,7 +425,7 @@ def tap(app, x, y):
             app.page = "main"
             return
         idx = int((y - SETTINGS_TOP) / SETTINGS_STEP)
-        keys = ["demo_mode", "brightness", "low_power", "record_rf",
+        keys = ["demo_mode", "brightness", "low_power", "alert_range", "record_rf",
                 "recordings", "wifi", "update", "debug"]
         if not 0 <= idx < min(SETTINGS_COUNT, len(keys)): return
         key = keys[idx]
@@ -443,6 +444,14 @@ def tap(app, x, y):
                 v=round((lo+n*(hi-lo))/step)*step; app.cfg["brightness"]=max(lo,min(hi,v)); _save(app)
         elif key == "low_power":
             _toggle_low_power(app)
+        elif key == "alert_range":
+            # CITY -> CLOSE -> ALL -> CITY: what makes a sound. Everything
+            # verified is shown whichever it is.
+            order = ["city", "close", "all"]
+            cur = str(app.cfg.get("alert_range", "city")).lower()
+            app.cfg["alert_range"] = order[(order.index(cur) + 1) % len(order)
+                                           if cur in order else 0]
+            _save(app)
         elif key == "record_rf":
             if not bool(getattr(app,"rf_recording",False)):
                 app.record_confirm_opened=time.monotonic(); app.page="record_confirm"

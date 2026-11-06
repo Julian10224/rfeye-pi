@@ -407,6 +407,8 @@ class UplinkAlarm:
         # latest such hit was, so the display can beep once per hit.
         self.provisional = False
         self.provisional_hit_at = 0.0
+        # Something shown was loud enough to be close: see near_threshold_db.
+        self.near = False
 
     def reset(self):
         self.tracks = TrackRegistry(self.cfg)
@@ -417,6 +419,28 @@ class UplinkAlarm:
         self.streak = 0
         self.provisional = False
         self.provisional_hit_at = 0.0
+        self.near = False
+
+    def near_threshold_db(self):
+        """How loud a hit has to be to sound, by ``alert_range`` (0.11.2).
+
+        The Blu Eye's City mode: below a threshold a signal is only shown.
+        Without one every terminal of the cell sounded the alarm -- and since
+        0.11.1 the stream sits on the cell's control channel, where every
+        terminal in it sends its registrations, positions and call requests.
+        A vehicle beside the receiver puts its ADC near the rails, 35 dB and
+        more; the base stations of the network, from masts kilometres away,
+        measure 15-33 dB on the reference unit, and a terminal at street level
+        that far away is weaker than they are.
+
+        ``all`` sounds for everything verified, as up to 0.11.1.
+        """
+        mode = str(self.cfg.get('alert_range', 'city') or 'city').lower()
+        if mode == 'close':
+            return float(self.cfg.get('uplink_near_close_db', 38.0))
+        if mode == 'all':
+            return float('-inf')
+        return float(self.cfg.get('uplink_near_city_db', 28.0))
 
     def confirmed_channels(self):
         """Uplink channels whose alert is already up.
@@ -440,7 +464,7 @@ class UplinkAlarm:
                 out.add(f)
         return out
 
-    def update(self, verified, watched=(), now=None, trusted=()):
+    def update(self, verified, watched=(), now=None, trusted=(), level_offset_db=0.0):
         """``verified`` are the PhyResults that passed; ``watched`` is every
         channel actually examined in this dwell, hit or not.
 
@@ -487,6 +511,7 @@ class UplinkAlarm:
                            int(self.cfg.get('uplink_confirm_visits_unknown', 10)))
         hold = max(0.0, float(self.cfg.get('uplink_alert_hold_s', 12.0)))
         max_age = max(10.0, float(self.cfg.get('uplink_state_max_age_s', 90.0)))
+        near_db = self.near_threshold_db()
 
         hits = {int(round(float(r.freq_hz))): r for r in verified}
         seen = {int(round(float(f))) for f in watched} | set(hits)
@@ -507,6 +532,9 @@ class UplinkAlarm:
             tr.note_visit(now, float(r.snr_db) if r is not None else None)
             if r is not None:
                 tr.note_hit(now, r.snr_db, r.quality, span_f)
+                tr.hit_level_db = float(r.snr_db) + float(level_offset_db)
+                if tr.hit_level_db >= near_db:
+                    tr.near_at = now
             else:
                 tr.forget_stale_hits(span_f)
         self.tracks.prune(now)
@@ -583,4 +611,7 @@ class UplinkAlarm:
             self.peaks = []
             self.streak = max([len(tr.hit_visits)
                                for tr in self.tracks.tracks.values()], default=0)
+        self.near = bool(self.confirmed) and any(
+            tr.confirmed and tr.near_at > 0.0 and now - tr.near_at <= hold
+            for tr in list(self.tracks.tracks.values()))
         return self.confirmed, self.level, list(self.peaks)

@@ -38,7 +38,8 @@ class RadioTrack:
 
     __slots__ = ('freq_hz', 'first_seen', 'last_seen', 'last_hit', 'hit_times',
                  'visits', 'hit_visits', 'snr_db', 'best_snr_db', 'quality',
-                 'confirmed', 'confirmed_at', 'trusted', 'provisional', 'proven')
+                 'confirmed', 'confirmed_at', 'trusted', 'provisional', 'proven',
+                 'hit_level_db', 'near_at')
 
     def __init__(self, freq_hz, now):
         self.freq_hz = float(freq_hz)
@@ -58,6 +59,10 @@ class RadioTrack:
         # whether it has ever earned the full alarm while this track lived.
         self.provisional = False
         self.proven = False
+        # The level of the latest hit at the antenna (the SNR with any gain
+        # back-off put back), and when a hit was last loud enough to be near.
+        self.hit_level_db = 0.0
+        self.near_at = 0.0
 
     # -- history -----------------------------------------------------------
     def note_visit(self, now, snr_db=None):

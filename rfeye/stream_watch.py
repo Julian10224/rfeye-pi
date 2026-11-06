@@ -205,6 +205,12 @@ class StreamTrigger:
         self.run_start = np.full(nch, -1, dtype=np.int64)
         self.run_last = np.full(nch, -1, dtype=np.int64)
         self.run_emitted = np.zeros(nch, dtype=bool)
+        # How far above its floor each open run has been at its loudest, and
+        # the same for each burst handed on, by (channel, start). A transmitter
+        # beside the antenna puts the ADC on its rails and lifts every channel
+        # of the window at once; this is what still says which one it is on.
+        self.run_peak = np.full(nch, -np.inf)
+        self._peaks = {}
         self.quiet_until = np.zeros(nch, dtype=np.int64)
         self.rows_seen = 0
         self.triggers = 0
@@ -216,7 +222,19 @@ class StreamTrigger:
         self.run_start[:] = -1
         self.run_last[:] = -1
         self.run_emitted[:] = False
+        self.run_peak[:] = -np.inf
         self._carry_lin = self._carry_lin[:0]
+
+    def peak_of(self, channel, start):
+        """How far above its floor the burst ``(channel, start)`` peaked, in dB."""
+        return float(self._peaks.get((int(channel), int(start)), 0.0))
+
+    def _emit(self, out, c, rs, end, peak):
+        out.append((int(c), rs, end))
+        self._peaks[(int(c), int(rs))] = float(peak)
+        if len(self._peaks) > 512:
+            for k in list(self._peaks)[:256]:
+                del self._peaks[k]
 
     def _row_power(self, iq):
         rows = len(iq) // self.hop
@@ -240,6 +258,7 @@ class StreamTrigger:
             self.run_start[:] = -1
             self.run_last[:] = -1
             self.run_emitted[:] = False
+            self.run_peak[:] = -np.inf
         data = np.concatenate((self._carry, iq)) if len(self._carry) else iq
         rows = len(data) // self.hop
         if rows <= 0:
@@ -305,35 +324,38 @@ class StreamTrigger:
             col = above[:, c]
             rs, rl = int(self.run_start[c]), int(self.run_last[c])
             emitted = bool(self.run_emitted[c])
+            pk = float(self.run_peak[c])
             for r in range(rows):
                 s = int(starts[r])
                 if col[r]:
                     if rs < 0:
                         if s < int(self.quiet_until[c]):
                             continue
-                        rs, emitted = s, False
+                        rs, emitted, pk = s, False, -np.inf
                     rl = s
+                    pk = max(pk, float(db[r, c] - self.floor[c]))
                     length = (rl - rs) // self.hop + 1
                     if not emitted and length >= self.max_rows:
-                        out.append((int(c), rs, rl + self.hop))
+                        self._emit(out, c, rs, rl + self.hop, pk)
                         emitted = True
                         self.quiet_until[c] = rl + self.hop + self.holdoff
                     if length >= self.absorb_rows:
                         # Never goes away: a carrier, not a burst. The rest of
                         # this block is judged against the new floor too.
                         self.floor[c] = float(db[r, c])
-                        rs, rl, emitted = -1, -1, False
+                        rs, rl, emitted, pk = -1, -1, False, -np.inf
                         col = col.copy()
                         col[r + 1:] = ((db[r + 1:, c] > self.floor[c] + self.trigger_db)
                                        & ~bad[r + 1:])
                 elif rs >= 0 and (s - rl) // self.hop > self.gap_rows:
                     length = (rl - rs) // self.hop + 1
                     if not emitted and length >= self.min_rows:
-                        out.append((int(c), rs, rl + self.hop))
+                        self._emit(out, c, rs, rl + self.hop, pk)
                         self.quiet_until[c] = rl + self.hop + self.holdoff
-                    rs, rl, emitted = -1, -1, False
+                    rs, rl, emitted, pk = -1, -1, False, -np.inf
             self.run_start[c], self.run_last[c] = rs, rl
             self.run_emitted[c] = emitted
+            self.run_peak[c] = pk
         self.triggers += len(out)
         return out
 

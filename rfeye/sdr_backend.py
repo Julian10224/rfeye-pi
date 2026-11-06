@@ -353,6 +353,9 @@ class SDRBackend:
         self.mobile_level=0.; self.site_level=0.
         self.activity_confidence=0.; self.mobile_confirmed=False
         self.alert_provisional=False; self.provisional_hit_at=0.
+        # Something is shown that is loud enough to be close; see
+        # UplinkAlarm.near and alert_range.
+        self.alert_near=False
         self.spectrum_freqs=np.array([],dtype=np.float64)
         self.spectrum_db=np.array([],dtype=np.float32)
         self.noise_floor_db=-100.; self.last_update=0.; self.demo_active=False
@@ -667,6 +670,8 @@ class SDRBackend:
                 # with one short beep per hit, not the running alarm.
                 'alert_provisional':bool(self.alert_provisional),
                 'provisional_hit_at':float(self.provisional_hit_at),
+                # Loud enough to be close (alert_range): what makes a sound.
+                'alert_near':bool(self.alert_near),
                 'freqs':self.spectrum_freqs.copy(),'spectrum':self.spectrum_db.copy(),
                 'noise':float(self.noise_floor_db),
                 'driver_path':str(self.driver_path),
@@ -859,9 +864,9 @@ class SDRBackend:
                   and now-self.last_good_scan<10.0)
         before=self.ladder.cap
         if self.ladder.tick(now,live):
-            self._power_log(now,'STEP UP %d%% -> %d%% after %d min without trouble'%(
+            self._power_log(now,'STEP UP %d%% -> %d%% after %d s without trouble'%(
                 round(before*100),round(self.ladder.cap*100),
-                round(self.ladder._step_s()/60.0)))
+                round(self.ladder.last_step_need_s or self.ladder._step_s())))
         # On its own clock. It used to share one with every other line, so a
         # unit that logged a dip every twenty seconds never wrote a minute
         # line at all -- and that is the unit whose duty, gain and
@@ -929,20 +934,52 @@ class SDRBackend:
         state=('CLEAR' if not confirmed
                else 'PROVISIONAL' if self.alarm.provisional else 'ALARM')
         lines=[]
+        near_db=self.alarm.near_threshold_db()
+        backoff=float(self._gain_backoff.get('up',0.0))
         for r in verified:
             tr=self.alarm.tracks.get(r.freq_hz,now,create=False)
-            lines.append('HIT CH %d %.4f MHz %.1f dB %.0f ms x%d duty %.2f %s%s seen=%d'%(
+            mirror=self._image_source(r.freq_hz)
+            lines.append('HIT CH %d %.4f MHz %.1f dB %.0f ms x%d duty %.2f %s%s seen=%d %s'%(
                 carrier_number(r.freq_hz,self.cfg),float(r.freq_hz)/1e6,float(r.snr_db),
                 float(r.burst_ms_median),int(r.burst_count),float(r.duty),
                 'partner' if (tr is not None and tr.trusted) else 'band',
                 (' weak' if getattr(r,'shape_waived',False) else '')
                 +(' line' if getattr(r,'carrier_line',False) else ''),
-                len(tr.hit_times) if tr is not None else 0))
+                len(tr.hit_times) if tr is not None else 0,
+                # Near or far by alert_range: whether this one made a sound.
+                'near' if float(r.snr_db)+backoff>=near_db else 'far')
+                +((' image-of CH %d'%carrier_number(mirror,self.cfg)) if mirror else ''))
         if state!=self._alert_logged:
             lines.append('ALERT %s -> %s'%(self._alert_logged,state))
             self._alert_logged=state
         if lines:
             self._hits_write(now,lines)
+
+    def _image_source(self,freq_hz):
+        """The known downlink carrier an uplink hit could be the mirror image of.
+
+        The R820T/R828D mixes with its LO 3.57 MHz above the frequency asked
+        for, so a signal 7.14 MHz above the tuner centre folds into the
+        window mirrored -- and from the upper uplink windows that is the
+        bottom of the C2000 downlink band, 390-392 MHz. A traffic carrier with
+        a call on it is one slot in four, exactly what a terminal sends. How
+        well the tuner rejects it has not been measured on these dongles, so
+        nothing is decided on this yet: hits.log says ``image-of CH n`` when
+        the mirror of a hit lands on a downlink carrier this unit knows, and
+        the next drive's log says whether those are the alarms near masts.
+        """
+        try:
+            c=float(self.dwell_centre_hz or 0.0)
+            if c<=0.0 or c>=387.5e6:
+                return None
+            src=2.0*c+float(self.cfg.get('tuner_image_offset_hz',7_140_000.0))-float(freq_hz)
+            tol=float(self.cfg.get('tetra_channel_spacing_hz',25000.0))*0.6
+            for f in self.sites.entries:
+                if abs(float(f)-src)<=tol:
+                    return float(f)
+        except Exception:
+            pass
+        return None
 
     def _recover_sdr_usb(self):
         """Force-re-enumerate a wedged RTL-SDR -- and only a wedged one.
@@ -1172,7 +1209,9 @@ class SDRBackend:
             self._evidence_at[key]=float(now)
             kind=str(key).split(':')[0]
             keep=int(self.cfg.get('evidence_keep',12))
-            if kind!='overload':
+            if kind=='hit':
+                keep=max(1,keep*2//3)            # what sounded, next
+            elif kind!='overload':
                 keep=min(keep,max(1,keep//3))    # the rails come first
             stem=''
             if keep>0 and iq is not None and len(iq):
@@ -1652,6 +1691,18 @@ class SDRBackend:
                 out.append(r)
         self.last_verify_ms=(time.perf_counter()-t1)*1000.
         if role=='UPLINK':
+            # What raised an alarm, a minute apart at most. "It goes off when
+            # there is nothing" has two answers -- a real terminal further
+            # away than it seemed, or something that is not TETRA at all --
+            # and only the samples can tell them apart.
+            best=max((r for r in out if r.ok),key=lambda r: float(r.snr_db),default=None)
+            if best is not None:
+                self._keep_evidence(
+                    iq,centre,sr,time.time(),'hit',
+                    'HEARD CH %d %.4f MHz %.1f dB'%(
+                        carrier_number(best.freq_hz,self.cfg),float(best.freq_hz)/1e6,
+                        float(best.snr_db)),
+                    every_s=float(self.cfg.get('evidence_hit_every_s',60.0)))
             # Something strong that the waveform test turned down is either a
             # spur or a detector that is wrong, and only the samples can say
             # which. One per channel per hour.
@@ -2248,7 +2299,7 @@ class SDRBackend:
                         if iq is not None:
                             blanks=ring.blanked(cursor,end)
                             for c,s,e in trig.feed(iq,cursor,blanks):
-                                pending.append((s,e,c))
+                                pending.append((s,e,c,trig.peak_of(c,s)))
                             if not blanks and mono-level_at>=1.0:
                                 level_at=mono
                                 before=self._gain_for('up')
@@ -2267,14 +2318,27 @@ class SDRBackend:
                     # the same stretch share its one FFT.
                     while pending:
                         pending.sort()
-                        s,e,_=pending[0]
+                        s,e,_,_=pending[0]
                         a=max(ring.oldest(),(s+e)//2-snip//2)
                         b=a+snip
                         if b>ring.written:
                             break
                         take=[p for p in pending if p[0]>=a and p[1]<=b] or [pending[0]]
                         pending=[p for p in pending if p not in take]
-                        chans=sorted({c for _,_,c in take})[:maxch]
+                        # The loudest first, not the lowest-numbered. A
+                        # transmitter beside the antenna puts the ADC on its
+                        # rails and lifts every channel of the window, so
+                        # dozens trigger at once; up to 0.11.1 the eight with
+                        # the lowest frequencies were analysed and the rest
+                        # dropped -- and the vehicle's own channel was almost
+                        # never among them. Driven through this code with a
+                        # handset burst strong enough to clip: no alert, its
+                        # channel never tested. Its own channel is the one
+                        # that stands highest above its floor.
+                        loud={}
+                        for _,_,c,pk in take:
+                            loud[c]=max(loud.get(c,-1e9),pk)
+                        chans=sorted(loud,key=lambda c:-loud[c])[:maxch]
                         chunk=ring.read(a,b)
                         if chunk is None:
                             self.stream_drops+=b-a
@@ -2334,8 +2398,11 @@ class SDRBackend:
         verified=[r for r in watch_results if r.ok]
         if watched is None:
             watched=[r.freq_hz for r in watch_results]
+        # The level a hit is judged near or far by is what reached the
+        # antenna, so a gain the overload guard has taken off is put back.
         confirmed,level,peaks=self.alarm.update(
-            verified,watched,now,trusted=self.sites.uplink_partners(now))
+            verified,watched,now,trusted=self.sites.uplink_partners(now),
+            level_offset_db=float(self._gain_backoff.get('up',0.0)))
         self._log_hits(now,verified,confirmed)
         locked=self.sites.locked(now)
 
@@ -2379,6 +2446,7 @@ class SDRBackend:
             self.mobile_confirmed=bool(confirmed)
             self.alert_provisional=bool(confirmed and self.alarm.provisional)
             self.provisional_hit_at=float(self.alarm.provisional_hit_at)
+            self.alert_near=bool(confirmed and self.alarm.near)
             self.last_phy=phy_rows
             self.last_update=now; self.status='LIVE'; self.error=''
             self.demo_active=False; self.last_good_scan=now; self.scan_failures=0
@@ -2547,6 +2615,7 @@ class SDRBackend:
                     self.mobile_level=0.; self.site_level=0.
                     self.activity_confidence=0.; self.mobile_confirmed=False
                     self.alert_provisional=False
+                    self.alert_near=False
                     self.alarm.reset()
                     self.spectrum_freqs=np.array([],dtype=np.float64)
                     self.spectrum_db=np.array([],dtype=np.float32)

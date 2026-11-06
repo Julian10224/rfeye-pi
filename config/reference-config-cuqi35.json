@@ -1,6 +1,6 @@
 {
   "allow_cli_sdr_fallback": false,
-  "app_version": "0.11.1",
+  "app_version": "0.11.2",
   "audio_mode": "adaptive",
   "auto_demo_if_no_sdr": false,
   "brightness": 1.0,
@@ -161,5 +161,8 @@
   "snapshot_phy_rows": 96,
   "uplink_unknown_confirm_dwells": 1,
   "uplink_single_hit_full_db": 14.0,
+  "alert_range": "city",
+  "uplink_near_city_db": 28.0,
+  "uplink_near_close_db": 38.0,
   "phy_uplink_sensitive_percentile": 100.0
 }

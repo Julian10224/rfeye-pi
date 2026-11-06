@@ -62,7 +62,8 @@ jobs:
           grep -q 'boot.log' rfeye/app.py
           grep -q 'frame_error_streak' rfeye/app.py
           grep -q 'FRAME_ERROR_RESTART_FRAMES' rfeye/app.py
-          grep -q 'SETTINGS_COUNT=8' rfeye/compact_ui_draw.py
+          # Nine rows since 0.11.2 (Alert range), the last still clear of the footer.
+          grep -q 'SETTINGS_COUNT=9' rfeye/compact_ui_draw.py
           # 0.9.10: the Power row. ECO ships as the default because the
           # detector's UI load kept a Pi 3 B+ busy enough to matter on a
           # marginal 5 V rail, measured 85% -> 39% of a core. Switching it
@@ -140,7 +141,9 @@ jobs:
           # 0.9.11: a live under-voltage takes max power back off, and a
           # locked network no longer stops the band being swept -- one lock
           # used to mean one watched uplink channel for the whole session.
-          grep -q 'Max power switched off' rfeye/app.py
+          # ...until 0.11.2: the ladder backs the radio off on what the
+          # supply shows, and a dip no longer switches drive mode off.
+          ! grep -q 'Max power switched off' rfeye/app.py
           grep -q 'site_rescan_s' rfeye/sdr_backend.py rfeye/config.py
           # 0.9.18: the queue refill is gated on its timer only, never on
           # an empty priority list -- in either state. One stale candidate
@@ -431,6 +434,15 @@ jobs:
           # 0.10.9: the panel's SPI clock has a harmonic at 383.333 MHz. The
           # frame waits for the capture and the capture for the frame.
           grep -q 'def claim_panel' rfeye/sdr_backend.py
+          # 0.11.2: the loudest triggered channels are analysed first, and
+          # only what is loud enough to be close makes a sound.
+          grep -q 'def peak_of' rfeye/stream_watch.py
+          grep -q 'chans=sorted(loud,key=lambda c:-loud\[c\])' rfeye/sdr_backend.py
+          grep -q 'def near_threshold_db' rfeye/tetra_detector.py
+          grep -q 'alert_near' rfeye/app.py rfeye/compact_ui_draw.py
+          grep -q '"alert_range"' rfeye/compact_ui_controls.py
+          grep -q 'def check_near_and_far' scripts/detector-selftest.py
+          grep -q 'power_ladder_dip_return_s' rfeye/power.py rfeye/config.py
           grep -q 'def _begin_capture' rfeye/sdr_backend.py
           grep -q 'self._begin_capture()' rfeye/sdr_backend.py
           grep -q 'claim(hold_s=' rfeye/app.py
@@ -627,6 +639,8 @@ jobs:
           assert c['uplink_sweep_band'] is True, 'the band is swept, not just the partners'
           assert c['uplink_unknown_confirm_dwells']==1, 'one hit shows, as on a Blu Eye'
           assert c['uplink_single_hit_full_db']==14.0
+          assert c['alert_range']=='city', 'far is shown, not sounded'
+          assert c['uplink_single_hit_full_db'] < c['uplink_near_city_db'] < c['uplink_near_close_db']
           assert c['phy_uplink_min_snr_db']==5.0
           assert c['phy_shape_min_snr_db']==12.0
           assert c['phy_uplink_min_snr_db'] < c['phy_min_snr_db'] < c['phy_shape_min_snr_db']

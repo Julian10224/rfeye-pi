@@ -106,6 +106,10 @@ class PowerLadder:
         # radio does not stop them.
         self.last_dip = 0.0
         self.dip_from = 0.0
+        # The step a dip took the radio down from, to go straight back to
+        # after power_ladder_dip_return_s of calm (-1: none). See tick().
+        self.return_to = -1
+        self.last_step_need_s = 0.0
         self.floor_dips = []
         self.weak_supply = False
         self.path = Path(state_path) if state_path else None
@@ -197,6 +201,7 @@ class PowerLadder:
         # The share the radio really had, for a dongle that goes a moment later.
         self.dip_from = self.cap if in_use is None else min(self.cap, float(in_use))
         if self.index > safe:
+            self.return_to = max(self.return_to, self.index)
             self.index = safe
             self.last_change = now
             self._save(now)
@@ -238,6 +243,8 @@ class PowerLadder:
         debounce = max(0.0, float(self.cfg.get('power_ladder_debounce_s', 30.0)))
         if self.last_drop and 0.0 <= now - self.last_drop < debounce:
             return False
+        # A failure climbs back a step at a time, whatever a dip had promised.
+        self.return_to = -1
         # The rail sagging and the dongle going a moment later are one
         # incident, and it belongs to the step the radio was on before the
         # dip took it down -- not to the safe step the dip left it on.
@@ -304,13 +311,34 @@ class PowerLadder:
         dt = max(0.0, min(dt, 30.0))
         if self.at_top():
             self.stable_s = 0.0
+            self.return_to = -1
             return False
         if not live:
             return False
         self.stable_s += dt
-        if self.stable_s < self._step_s() or self.blocked(now):
+        # After a dip, straight back to where it found the radio once the rail
+        # has held for power_ladder_dip_return_s -- not a step every five
+        # minutes. A dip is a hint, not a failure of the step (see dip()), and
+        # since 0.11.0 the radio only streams above 85%: climbing back from
+        # 30% one step at a time took half an hour, all of it in dwells that
+        # hear each channel a few per cent of the time. That is what "it
+        # finds nothing for a while" was after every dip. A lost dongle still
+        # climbs back one step at a time (event() clears this).
+        back = self.return_to if self.return_to > self.index else -1
+        need = (max(30.0, float(self.cfg.get('power_ladder_dip_return_s', 120.0)))
+                if back >= 0 else self._step_s())
+        self.last_step_need_s = need
+        if self.stable_s < need or self.blocked(now):
             return False
-        self.index += 1
+        if back >= 0:
+            target = back
+            if self.ceiling and now < self.ceiling_until:
+                target = min(target, max(self.index + 1,
+                                         self._index_at_or_above(self.ceiling) - 1))
+            self.index = max(self.index + 1, target)
+            self.return_to = -1
+        else:
+            self.index += 1
         self.stable_s = 0.0
         self.last_change = now
         # Held the step that failed for a full step without trouble: the

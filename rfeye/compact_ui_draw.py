@@ -12,7 +12,9 @@ SETTINGS_TOP=62
 # "Made by" footer at y=463 with room to spare.
 SETTINGS_STEP=44
 SETTINGS_HEIGHT=40
-SETTINGS_COUNT=8
+# Nine since 0.11.2: "Alert range". The ninth row ends at y=454, still clear
+# of the footer.
+SETTINGS_COUNT=9
 # The slider is centred on the panel and kept clear of both edges: at
 # X1=298 the 100% end sat 22px from the glass and a finger reached the
 # enclosure wall before it reached maximum, so the row could not be driven
@@ -85,7 +87,11 @@ def _network_line(snap, status):
         return "SDR NOT CONNECTED",RED
     state=str(snap.get("detector_state","SEARCHING"))
     if state=="ALERT":
-        return "C2000 ACTIVITY NEARBY",RED
+        # Only what is loud enough to be close is "nearby"; the rest of the
+        # cell is shown, quietly (alert_range, 0.11.2).
+        if snap.get("alert_near",True):
+            return "C2000 ACTIVITY NEARBY",RED
+        return "C2000 ACTIVITY FAR",YELLOW
     if snap.get("network_locked"):
         return "C2000 LOCKED",GREEN
     return "SEARCHING FOR C2000",YELLOW
@@ -181,6 +187,8 @@ def draw_settings(app):
         ("Demo","ON" if app.cfg.get("demo_mode") else "OFF","toggle"),
         ("Brightness",f'{int(round(float(app.cfg.get("brightness",1.0))*100))}%',"brightness_slider"),
         ("Max power","OFF" if app.cfg.get("low_power_mode",True) else "ON","toggle"),
+        # Which signals make a sound (0.11.2): ALL, CITY or CLOSE.
+        ("Alert range",str(app.cfg.get("alert_range","city")).upper(),"value"),
         ("Record RF",(f'REC {max(0,int(round(float(getattr(app,"rf_record_end",0.0))-time.monotonic())))}s' if bool(getattr(app,"rf_recording",False)) else (getattr(app,"rf_record_message","SAVE") if time.monotonic()<float(getattr(app,"rf_record_message_until",0.0)) else "SAVE")),"action"),
         ("Recordings","OPEN","action"),
         ("Wi-Fi",app._wifi_text(),"status"),

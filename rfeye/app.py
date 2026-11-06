@@ -637,37 +637,36 @@ class App:
 
     # -- supply notice -----------------------------------------------------
     def _power_notice_update(self, snap):
-        """Raise the notice when the 5 V rail sags, and back off the load.
+        """Say once that the 5 V rail sags, and leave the load to the ladder.
 
-        Max power is the setting most likely to have caused the sag, so a live
-        under-voltage drops it before anything else: complaining about a
-        supply while continuing to load it as hard as possible would be an odd
-        way to help. That is a change the user asked for and did not make, so
-        the notice comes back to say so even if it has already been dismissed
-        once this session.
+        Up to 0.11.1 a live under-voltage also switched Max power off and
+        saved that, and brought the notice back every time it did. On a unit
+        whose rail dips every few seconds that meant the notice over the
+        screen again and again, and drive mode -- the default since 0.11.0,
+        and the only mode in which the radio streams -- gone within a minute
+        of every start, without anyone having asked: the unit was back to
+        hearing each channel 9% of the time. The power ladder (power.py) was
+        already doing the backing off, on what the supply actually shows, and
+        the two disagreed.
+
+        So the notice is shown once per start, never over an alert, and
+        changes nothing. The Supply row on the debug page and the status line
+        keep saying it for as long as it is true.
         """
         if self.power_notice_open and self._power_notice_left() <= 0.0:
             self.power_notice_open = False
             self.power_notice_done = True
         if not snap.get("power_warning"):
             return
-        reverted = False
-        if not bool(self.cfg.get("low_power_mode", True)):
-            self.cfg["low_power_mode"] = True
-            try:
-                save_config(self.cfg)
-            except Exception:
-                pass
-            reverted = True
-            self.power_notice_done = False
         if self.power_notice_done or self.power_notice_open:
             return
+        if snap.get("mobile_confirmed"):
+            return                       # not over the bars someone is reading
         detail = str(snap.get("power_detail") or "").strip()
         self.power_notice_lines = [
             "5V rail below 4.63 V",
             detail or "measured by the Pi firmware",
-            "Max power switched off" if reverted
-            else "Scanning continues in the background",
+            "Shown once - scanning continues",
         ]
         self.power_notice_open = True
         self.power_notice_at = time.monotonic()
@@ -1127,6 +1126,15 @@ class App:
         if not peaks:
             return
 
+        # Far away is shown and not sounded (0.11.2), as a Blu Eye's City
+        # mode does below its threshold. Until then every verified terminal
+        # of the cell beeped -- the field report was "it goes off when there
+        # is nothing" -- and a vehicle beside the receiver sounded no
+        # different from one on the other side of town. A snapshot that does
+        # not say (a recording made before 0.11.2) sounds as it always did.
+        if not snap.get("alert_near", True):
+            return
+
         # One weak hit on a channel no locked site vouches for: one short
         # beep per hit, as a Blu Eye gives for a single pulse, not the running
         # alarm. A second hit, a strong one or a locked site's channel turns
@@ -1270,7 +1278,9 @@ class App:
             else:
                 sdr_text, sdr_col = "SDR: NOT CONNECTED", RED
         elif snap.get("detector_state") == "ALERT":
-            sdr_text, sdr_col = "C2000 ACTIVITY NEARBY", RED
+            sdr_text, sdr_col = (("C2000 ACTIVITY NEARBY", RED)
+                                 if snap.get("alert_near", True)
+                                 else ("C2000 ACTIVITY FAR", YELLOW))
         elif snap.get("network_locked"):
             n = int(snap.get("site_locked_count", 0) or 0)
             sdr_text, sdr_col = f"C2000 NETWORK LOCKED ({n})", GREEN
