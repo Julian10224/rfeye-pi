@@ -927,10 +927,15 @@ def check_radio_duty_limit():
             check("ECO limits the radio to a fraction of the time",
                   0.2 <= eco <= 0.8, "%.2f" % eco)
             check("Max power lifts the limit", full > eco, "%.2f vs %.2f" % (full, eco))
+            # One lost dongle is ridden out since 0.11.3; one that keeps
+            # going is what backs the radio off.
             b.ladder.event(now, "SDR lost", in_use=eco)
+            check("losing the dongle once changes nothing", b._duty_limit(now) == eco)
+            b.ladder.event(now + 100.0, "SDR lost", in_use=eco)
+            b.ladder.event(now + 200.0, "SDR lost", in_use=eco)
             backed = b._duty_limit(now)
-            check("and losing the dongle backs it off further", backed < eco,
-                  "%.2f" % backed)
+            check("and losing the dongle again and again backs it off further",
+                  backed < eco, "%.2f" % backed)
             b.ladder.index = len(b.ladder.rungs) - 1
 
             # The pause really is computed from measured streaming time.
@@ -1168,27 +1173,30 @@ def check_priority_lanes():
 
 
 def check_power_ladder():
-    """The radio backs off when the supply sags, and earns its share back.
+    """The radio keeps listening through a dip, and backs off when the dongle keeps going.
 
     Until 0.10.2 the rail was only read after the dongle had already gone, and
-    what was read -- the since-boot under-voltage bit -- never clears. One dip
-    pinned the radio at 30% until a reboot, while a unit that had not dipped
-    yet ran at its full share right up to the moment it lost the dongle,
-    which a field unit then did about ten minutes into every drive.
+    what was read -- the since-boot under-voltage bit -- never clears. The
+    ladder that replaced it then took the radio down for every dip and every
+    lost dongle, and since the radio only streams above 85% each of those
+    cost minutes of hearing each channel a few per cent of the time. Since
+    0.11.3 a dip is written down, a dongle that is lost and back is ridden
+    out, and only losses that keep coming step the ladder down.
     """
-    print(chr(10) + "30. the power ladder steps down on trouble and climbs back on calm")
+    print(chr(10) + "30. the power ladder: dips are noted, repeated losses step it down")
     from power import PowerLadder, supply_text
     import sdr_backend as sb
     from sdr_backend import _CapturePump
     with tempfile.TemporaryDirectory() as d:
-        cfg = dict(DEFAULTS)
+        # The stepping itself, with nothing ridden out.
+        cfg = dict(DEFAULTS, power_ladder_loss_allow=0)
         path = os.path.join(d, "ladder.json")
         lad = PowerLadder(cfg, path, boot_id="boot-a")
         t = 1_000_000.0
         check("a fresh unit is not held back", lad.cap == 1.0)
-        check("trouble drops straight to the safe step, not one at a time",
-              lad.event(t, "SDR lost", in_use=0.45) and abs(lad.cap - 0.30) < 1e-9,
-              "%.2f" % lad.cap)
+        check("a loss that counts drops straight to the safe step, not one at a time",
+              lad.event(t, "SDR lost", in_use=0.45) and abs(lad.cap - 0.30) < 1e-9
+              and not lad.tolerated, "%.2f" % lad.cap)
         check("the dongle going and the rail dipping a second later are one incident",
               lad.dip(t + 1.0, "under-voltage", in_use=0.30) == "same"
               and abs(lad.cap - 0.30) < 1e-9 and lad.incidents == 1)
@@ -1229,7 +1237,6 @@ def check_power_ladder():
         check("an app restart in the same boot carries on where it was",
               abs(again.cap - lad.cap) < 1e-9, "%.2f vs %.2f" % (again.cap, lad.cap))
 
-        # What a lost dongle taught outlives a reboot; what a dip did does not.
         lost = os.path.join(d, "lost.json")
         y = PowerLadder(cfg, lost, boot_id="boot-l")
         y.event(t, "SDR lost", in_use=0.45)
@@ -1237,45 +1244,6 @@ def check_power_ladder():
         check("after a reboot the step the dongle was lost on is still off limits",
               abs(y2.cap - 0.40) < 1e-9 and y2.blocked(t + 60.0),
               "%.2f" % y2.cap)
-
-        boot = os.path.join(d, "boot.json")
-        x = PowerLadder(cfg, boot, boot_id="boot-c")
-        check("a dip before the radio started is noted and costs nothing",
-              x.boot_dip(t) and x.cap == 1.0 and x.ceiling == 0.0, "%.2f" % x.cap)
-        x2 = PowerLadder(cfg, boot, boot_id="boot-c")
-        check("an app restart in the same boot does not note it twice",
-              not x2.boot_dip(t + 100.0))
-
-        # An under-voltage is a hint, not a failure of the step it came on.
-        dips = os.path.join(d, "dips.json")
-        z = PowerLadder(cfg, dips, boot_id="boot-d")
-        check("a dip takes the radio to the safe step",
-              z.dip(t, "rail low", in_use=0.45) == "drop" and abs(z.cap - 0.30) < 1e-9)
-        check("and puts no step off limits",
-              z.ceiling == 0.0 and z.strikes == 0 and not z.blocked(t + 1.0))
-        check("a dip at the safe step takes nothing more",
-              z.dip(t + 40.0, "rail low", in_use=0.30) == "floor"
-              and abs(z.cap - 0.30) < 1e-9, "%.2f" % z.cap)
-        z3 = PowerLadder(cfg, dips, boot_id="boot-e")
-        check("and none of it is carried into the next boot", z3.cap == 1.0,
-              "%.2f" % z3.cap)
-        z.dip(t + 80.0, "rail low", in_use=0.30)
-        check("three dips at the safe step: limiting the radio is not the cure",
-              z.dip(t + 120.0, "rail low", in_use=0.30) == "weak" and z.weak_supply
-              and z.cap == 1.0, "%.2f" % z.cap)
-        check("after which a dip is no longer acted on",
-              z.dip(t + 200.0, "rail low", in_use=0.45) == "ignored" and z.cap == 1.0)
-        check("but a lost dongle still is",
-              z.event(t + 300.0, "SDR lost", in_use=0.45)
-              and abs(z.cap - 0.30) < 1e-9 and abs(z.ceiling - 0.45) < 1e-9)
-
-        w = PowerLadder(cfg, None, boot_id="boot-w")
-        w.dip(t, "rail low", in_use=0.45)
-        check("a dongle lost a moment after a dip fails the step it was on before it",
-              w.event(t + 2.0, "SDR lost", in_use=0.30)
-              and abs(w.ceiling - 0.45) < 1e-9 and abs(w.cap - 0.30) < 1e-9
-              and w.incidents == 1,
-              "ceiling %.2f cap %.2f incidents %d" % (w.ceiling, w.cap, w.incidents))
 
         f = PowerLadder(cfg, None, boot_id="boot-f")
         f.event(t, "SDR lost", in_use=0.45)
@@ -1291,26 +1259,78 @@ def check_power_ladder():
               f.ceiling_until - f.last_drop <= 3600.0 + 1.0,
               "%.0f s after %d strikes" % (f.ceiling_until - f.last_drop, f.strikes))
 
-        # The state file of a unit that ran 0.10.2-0.10.7 on a weak supply.
-        old = os.path.join(d, "old.json")
-        with open(old, "w") as fh:
-            fh.write('{"cap": 0.22, "ceiling": 0.22, "ceiling_until": %f, '
-                     '"strikes": 43, "last_failed": 0.22, "last_drop": %f, '
-                     '"incidents": 219, "last_why": "rail below 4.63 V"}'
-                     % (t + 14400.0, t))
-        o = PowerLadder(cfg, old, boot_id="boot-o")
-        check("strikes earned from under-voltage under the old rules are not believed",
-              o.cap == 1.0 and o.strikes == 0 and o.ceiling == 0.0,
-              "cap %.2f strikes %d" % (o.cap, o.strikes))
+        # As shipped: a dongle that is lost and back is ridden out.
+        cfg = dict(DEFAULTS)
+        r = PowerLadder(cfg, None, boot_id="boot-r")
+        check("the first lost dongle costs the radio nothing",
+              r.event(t, "SDR lost", in_use=1.0) and r.tolerated and r.cap == 1.0
+              and r.ceiling == 0.0, "%.2f" % r.cap)
+        check("nor the second",
+              r.event(t + 120.0, "SDR lost", in_use=1.0) and r.tolerated and r.cap == 1.0)
+        check("the third in ten minutes does: it keeps happening",
+              r.event(t + 240.0, "SDR lost", in_use=1.0) and not r.tolerated
+              and abs(r.cap - 0.30) < 1e-9 and r.ceiling == 1.0,
+              "cap %.2f ceiling %.2f" % (r.cap, r.ceiling))
+        r2 = PowerLadder(cfg, None, boot_id="boot-r2")
+        r2.event(t, "SDR lost", in_use=1.0)
+        r2.event(t + 700.0, "SDR lost", in_use=1.0)
+        check("losses further apart than that are each ridden out",
+              r2.event(t + 1400.0, "SDR lost", in_use=1.0) and r2.tolerated
+              and r2.cap == 1.0)
+
+        boot = os.path.join(d, "boot.json")
+        x = PowerLadder(cfg, boot, boot_id="boot-c")
+        check("a dip before the radio started is noted and costs nothing",
+              x.boot_dip(t) and x.cap == 1.0 and x.ceiling == 0.0, "%.2f" % x.cap)
+        x2 = PowerLadder(cfg, boot, boot_id="boot-c")
+        check("an app restart in the same boot does not note it twice",
+              not x2.boot_dip(t + 100.0))
+
+        # An under-voltage is written down. It moves nothing.
+        z = PowerLadder(cfg, os.path.join(d, "dips.json"), boot_id="boot-d")
+        check("a dip is noted and the radio keeps its share",
+              z.dip(t, "rail low", in_use=1.0) == "noted" and z.cap == 1.0
+              and z.ceiling == 0.0 and z.incidents == 1, "%.2f" % z.cap)
+        check("one a few seconds later is the same incident",
+              z.dip(t + 5.0, "rail low", in_use=1.0) == "same" and z.incidents == 1)
+        z.dip(t + 40.0, "rail low", in_use=1.0)
+        check("three in half an hour: a weak supply, said once",
+              z.dip(t + 80.0, "rail low", in_use=1.0) == "weak" and z.weak_supply
+              and z.cap == 1.0)
+        check("and still nothing is taken after that",
+              z.dip(t + 200.0, "rail low", in_use=1.0) == "noted" and z.cap == 1.0)
+        w = PowerLadder(cfg, None, boot_id="boot-w")
+        w.dip(t, "rail low", in_use=1.0)
+        check("a dongle lost a moment after a dip is one incident, and ridden out",
+              w.event(t + 2.0, "SDR lost", in_use=1.0) and w.tolerated
+              and w.cap == 1.0 and w.incidents == 1,
+              "cap %.2f incidents %d" % (w.cap, w.incidents))
+
+        # State files from releases with other rules are not believed.
+        for name, body in (
+            ("0.10.2-0.10.7, strikes from under-voltage",
+             '{"cap": 0.22, "ceiling": 0.22, "ceiling_until": %f, "strikes": 43, '
+             '"last_failed": 0.22, "last_drop": %f, "incidents": 219}' % (t + 14400.0, t)),
+            ("0.10.8-0.11.2, a share one dip or one loss took",
+             '{"schema": 2, "boot_id": "boot-o", "cap": 0.3, "ceiling": 1.0, '
+             '"ceiling_until": %f, "strikes": 1, "last_failed": 1.0, "last_drop": %f}'
+             % (t + 1800.0, t)),
+        ):
+            old = os.path.join(d, "old.json")
+            with open(old, "w") as fh:
+                fh.write(body)
+            o = PowerLadder(cfg, old, boot_id="boot-o")
+            check("a state file from %s is not believed" % name,
+                  o.cap == 1.0 and o.strikes == 0 and o.ceiling == 0.0,
+                  "cap %.2f strikes %d" % (o.cap, o.strikes))
 
         # The backend: the limit, the pipeline, and the dongle going.
         air = FakeAir(downlinks=[391_187_500.0])
         os.makedirs(os.path.join(d, "a"))
-        b = make_backend(air, os.path.join(d, "a", "sites.json"))
+        b = make_backend(air, os.path.join(d, "a", "sites.json"), low_power_mode=True)
         try:
             now = time.time()
-            eco = b._duty_limit(now)
-            b.ladder.event(now, "test", in_use=eco)
+            b.ladder.index = b.ladder._index_at_or_below(0.30)
             check("the radio is held to the ladder",
                   abs(b._duty_limit(now) - 0.30) < 1e-9, "%.2f" % b._duty_limit(now))
             b.cfg["low_power_mode"] = False
@@ -1326,8 +1346,6 @@ def check_power_ladder():
             b._pump.stop()
             b._pump = None
 
-            # A clean ladder: the one above has just taken an incident, and
-            # anything within its debounce is rightly the same one.
             b.ladder = PowerLadder(b.cfg, None, boot_id="t")
             ok = b._scan_cycle()
             check("a working dongle scans", ok and bool(b.last_good_scan))
@@ -1351,17 +1369,30 @@ def check_power_ladder():
                 raise RuntimeError("librtlsdr read failed: boom")
             b._samples = gone
             b._scan_cycle()
-            check("losing a working dongle steps the ladder down",
-                  abs(b.ladder.cap - 0.30) < 1e-9, "%.2f" % b.ladder.cap)
+            check("losing a working dongle once is ridden out",
+                  b.ladder.cap == 1.0 and b.ladder.incidents == 1 and b.ladder.tolerated,
+                  "%.2f" % b.ladder.cap)
             b._scan_cycle()
             b._scan_cycle()
-            check("while it stays gone nothing more is taken",
+            check("while it stays gone it is still the one incident",
                   b.ladder.incidents == 1, "%d" % b.ladder.incidents)
             b._samples = good
             b._scan_cycle()
+            check("and when it is back the radio still has its share",
+                  b.ladder.cap == 1.0 and not b._sdr_lost_at)
+            for _ in range(2):
+                b.ladder.last_loss -= 100.0          # a while later, again
+                b._samples = gone
+                b._scan_cycle()
+                b._samples = good
+                b._scan_cycle()
+            check("a dongle that keeps going steps the ladder down",
+                  abs(b.ladder.cap - 0.30) < 1e-9 and not b.ladder.tolerated,
+                  "%.2f" % b.ladder.cap)
             log = open(os.path.join(d, "a", "power.log")).read()
-            check("power.log says what happened, and when it came back",
-                  "SDR lost" in log and "DROP" in log and "SDR back" in log, log[-200:])
+            check("power.log says which was which, and when it came back",
+                  "ridden out" in log and "DROP SDR lost" in log and "SDR back" in log,
+                  log[-300:])
         finally:
             b.running = False
 
@@ -1392,32 +1423,32 @@ def check_power_ladder():
                   "%.2f" % b2.ladder.cap)
             b2._power_checked = 0.0
             b2._power_tick(t0 + 40.0)
-            check("and the since-boot bit alone never does",
+            check("and the since-boot bit alone is not an incident",
                   b2.ladder.incidents == 0 and b2.ladder.cap == 1.0,
                   "%d" % b2.ladder.incidents)
             word[0] = "0x50005"
             b2._power_checked = 0.0
             b2._power_tick(t0 + 80.0)
-            check("the rail low right now takes the radio to the safe step",
-                  b2.ladder.incidents == 1 and abs(b2.ladder.cap - 0.30) < 1e-9,
+            check("the rail low right now is written down, and the radio keeps its share",
+                  b2.ladder.incidents == 1 and b2.ladder.cap == 1.0
+                  and b2._duty_limit(t0 + 80.0) >= float(DEFAULTS["stream_min_duty"]),
                   "%d, %.2f" % (b2.ladder.incidents, b2.ladder.cap))
             text = supply_text(b2.snapshot())
-            check("and the debug page says so", "LOW NOW" in text and "cap 30%" in text,
-                  text)
+            check("and the debug page says so", "LOW NOW" in text, text)
             check("in 22 characters", len(text) <= 22, "%d" % len(text))
             for k in (120.0, 160.0, 200.0):
                 b2._power_checked = 0.0
                 b2._power_tick(t0 + k)
-            check("a rail that stays low at the safe step stops costing the radio",
+            check("a rail that keeps dipping is a weak supply -- and still not a limit",
                   b2.ladder.weak_supply and b2.ladder.cap == 1.0
                   and b2.snapshot()["power_weak"], "%.2f" % b2.ladder.cap)
             text = supply_text(b2.snapshot())
-            check("and the page says what is wrong instead",
+            check("and the page says what is wrong",
                   text.startswith("WEAK SUPPLY") and len(text) <= 22, text)
             log = open(os.path.join(d, "b", "power.log")).read()
             check("power.log tells the three apart",
-                  "NOTE under-voltage before start" in log and "DROP rail below" in log
-                  and "SUPPLY WEAK" in log, log[-300:])
+                  "NOTE under-voltage before start" in log and "DIP rail below" in log
+                  and "SUPPLY WEAK" in log and "DROP" not in log, log[-300:])
         finally:
             sb.shutil.which, sb.subprocess.run = real_which, real_run
             b2.running = False
@@ -1769,7 +1800,10 @@ def check_stream_trigger():
             out += tr.feed(iq[a:a + blk], a, blanks)
         return out
 
-    for slots, snr in ((1, 12.0), (0.5, 9.0)):
+    # What a terminal really sends: 231 symbols in a slot, and 103 -- 5.72 ms
+    # -- in the subslot of a random-access burst. Up to 0.11.2 the short one
+    # here was the 127 symbols of a whole subslot, which no terminal sends.
+    for slots, snr in ((231 / 255.0, 12.0), (103 / 255.0, 10.0), (1, 12.0), (0.5, 9.0)):
         iq = sim.make_capture([(sim.control_burst(1.0, sr, seed=3, n_slots=slots,
                                                   start_frac=0.55,
                                                   freq_offset_hz=300_000.0), 1.0)],
@@ -1837,7 +1871,7 @@ def check_streaming():
             check("ECO does not: streaming is the whole of the radio's time",
                   not b._stream_ready(now))
             b.cfg["low_power_mode"] = False
-            b.ladder.event(now, "test", in_use=1.0)
+            b.ladder.index = b.ladder._index_at_or_below(0.30)
             check("nor does a supply the ladder is holding back",
                   not b._stream_ready(now), "cap %.2f" % b.ladder.cap)
             b.ladder.index = len(b.ladder.rungs) - 1
@@ -1934,9 +1968,17 @@ def check_streaming():
             check("a broken stream falls back to dwells, not to NO SDR",
                   ok1 and ok2 and b.snapshot()["status"] == "LIVE",
                   b.snapshot()["error"])
-            check("  and stops trying for a while after the second time",
-                  b._stream_off_until > time.time() + 60
+            check("  and stops trying for a minute after the second time",
+                  time.time() + 45 < b._stream_off_until < time.time() + 75
                   and not b._stream_ready(time.time()))
+            # ...twice as long if it breaks again straight after, up to
+            # stream_retry_s. It was ten minutes at once: ten minutes of
+            # dwells for what is usually one USB hiccup.
+            b._stream_off_until = 0.0
+            b._scan_cycle(); b._ensure_sdr = lambda: fake; b._scan_cycle()
+            check("  and twice as long if it breaks again",
+                  time.time() + 100 < b._stream_off_until < time.time() + 135,
+                  "%.0f s" % (b._stream_off_until - time.time()))
             log = open(os.path.join(d, "power.log")).read()
             check("  which power.log says", "STREAM off for" in log)
             b._stream_off_until = 0.0
@@ -2186,13 +2228,18 @@ def check_near_and_far():
     r = PhyResult(freq_hz=381_187_500.0, role="UPLINK", ok=True, snr_db=25.0, quality=0.6)
     al.update([r], [r.freq_hz], 1000.0)
     check("25 dB is far in the city", al.confirmed and not al.near)
+    r30 = PhyResult(freq_hz=381_187_500.0, role="UPLINK", ok=True, snr_db=30.0, quality=0.6)
     al = UplinkAlarm(cfg)
-    al.update([r], [r.freq_hz], 1000.0, level_offset_db=4.0)
-    check("  but 25 dB with 4 dB of gain backed off is near", al.near)
+    al.update([r30], [r30.freq_hz], 1000.0)
+    check("  30 dB is near", al.near)
     cfg["alert_range"] = "close"
     al = UplinkAlarm(cfg)
-    al.update([r], [r.freq_hz], 1000.0, level_offset_db=4.0)
+    al.update([r30], [r30.freq_hz], 1000.0)
     check("  and far again when only close counts", not al.near)
+    cfg["alert_range"] = "all"
+    al = UplinkAlarm(cfg)
+    al.update([r], [r.freq_hz], 1000.0)
+    check("  with the range on all, everything is near", al.near)
     cfg["alert_range"] = "city"
     al = UplinkAlarm(cfg)
     loud = PhyResult(freq_hz=381_187_500.0, role="UPLINK", ok=True, snr_db=40.0, quality=0.6)
@@ -2224,16 +2271,85 @@ def check_near_and_far():
     from power import PowerLadder
     lad = PowerLadder(dict(DEFAULTS), None, boot_id="near-far")
     t = 5_000_000.0
-    lad.dip(t, "rail low", in_use=1.0)
-    for k in range(1, 130):
-        lad.tick(t + k, True)
-    check("after a dip the radio is back at full share in two minutes",
-          lad.cap == 1.0, "%.2f" % lad.cap)
-    lad.event(t + 200.0, "SDR lost", in_use=1.0)
-    for k in range(1, 130):
-        lad.tick(t + 200.0 + k, True)
-    check("  but after a lost dongle it climbs a step at a time",
-          abs(lad.cap - 0.30) < 1e-9, "%.2f" % lad.cap)
+    check("a dip does not take the radio out of the stream",
+          lad.dip(t, "rail low", in_use=1.0) == "noted" and lad.cap == 1.0,
+          "%.2f" % lad.cap)
+
+
+def check_downlink_takes_a_turn():
+    """0.11.3: downlink work takes the place of a short visit, not a gap of its own.
+
+    A downlink dwell is 1.6-3.3 s on a Pi 3 B+. A band pass used to put one in
+    every gap of the stream's rotation -- main window 8 s, downlink, elsewhere
+    2 s, downlink, elsewhere 2 s, downlink -- so for the twenty-five seconds a
+    pass takes, every two minutes, the control channel was listened to less
+    than half the time. Traced in the Pi emulation: a police car whose loudest
+    bursts fell in that stretch was first seen at its sixth.
+    """
+    print(chr(10) + "37. downlink work takes the place of a short visit")
+    sr = 2_016_000
+    main_c, far_main = 391_187_500.0, 393_637_500.0
+    with tempfile.TemporaryDirectory() as d:
+        b = make_backend(FakeAir(), os.path.join(d, "sites.json"), stream_mode=True,
+                         low_power_mode=False, stream_hold_s=0.6,
+                         stream_hold_other_s=0.5, stream_hold_max_s=0.6)
+        try:
+            now = time.time()
+            for f, q in ((main_c, 0.8), (far_main, 0.3)):
+                b.sites.entries[int(f)] = {
+                    "hits": 9, "misses": 0, "quality": q, "last_ok": now + 60,
+                    "first_seen": now, "ok_total": 9, "cont": 0.9}
+            seq = b._stream_windows(now)
+            first = seq[0][0]
+            check("two sites give a main window and short visits elsewhere",
+                  len({c for c, _ in seq}) >= 3)
+            rng = np.random.default_rng(7)
+            n = sr
+            iq = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 6.0
+                  ).astype(np.complex64)
+            fake = StreamingFake(iq, sr)
+            b._ensure_sdr = lambda: fake
+            b.sdr = fake
+            events = []
+            real_stream = b._stream_work
+
+            def stream(t):
+                r = real_stream(t)
+                events.append("M" if b.stream_centre_hz == first else "s")
+                return r
+
+            def site(t):
+                events.append("D")
+                time.sleep(0.35)             # a dwell takes time
+                b._site_queue = [main_c]      # ...and the pass is not over
+                return []
+            b._stream_work = stream
+            b._site_work = site
+            b._site_queue = [main_c]
+            b._stream_turn = 0
+            for _ in range(14):
+                b._scan_cycle()
+            order = "".join(events)
+            rounds = [r for r in order.split("M")[1:-1]]
+            check("a round holds at most one downlink dwell",
+                  all(r.count("D") <= 1 for r in rounds), order)
+            check("and it takes the place of a short visit",
+                  all(len(r) <= 2 for r in rounds if "D" in r), order)
+            check("before the visit and after it by turns, so neither window always pays",
+                  any(r.startswith("D") for r in rounds)
+                  and any(r.endswith("D") and len(r) == 2 for r in rounds), order)
+            # Without a pass running, both short visits come back.
+            b._site_work = lambda t: []
+            b._site_queue = []
+            b._site_verify_at = time.time() + 3600
+            del events[:]
+            for _ in range(6):
+                b._scan_cycle()
+            order = "".join(events)
+            check("with no downlink work, the rotation is the whole rotation",
+                  "Mss" in order and "D" not in order, order)
+        finally:
+            b.running = False
 
 
 def main():
@@ -2455,6 +2571,7 @@ def main():
     check_screened_idle_carrier_keeps_its_lock()
     check_control_channel_first()
     check_near_and_far()
+    check_downlink_takes_a_turn()
 
     print()
     if FAILURES:

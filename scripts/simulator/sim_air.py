@@ -163,8 +163,15 @@ class Air:
         self._noise = ((self.rng.standard_normal(n) + 1j * self.rng.standard_normal(n))
                        * (NOISE / math.sqrt(2))).astype(np.complex64)
         print("simulator: making TETRA waveforms...", flush=True)
-        self._burst1 = sim.control_burst(0.024, SR, seed=3, n_slots=1, start_frac=0.1)
-        self._burst05 = sim.control_burst(0.024, SR, seed=4, n_slots=0.5, start_frac=0.1)
+        # What a terminal sends (EN 300 392-2, 9.4.4): a normal uplink burst
+        # of 231 symbols in a slot, and a control burst of 103 -- 5.72 ms --
+        # in the subslot of a random access. Until 0.11.3 these were a whole
+        # slot (255) and a whole subslot (127), which no terminal sends, and
+        # the detector's length gates had been set against them.
+        self._burst1 = sim.control_burst(0.024, SR, seed=3, n_slots=231 / 255.0,
+                                         start_frac=0.1)
+        self._burst05 = sim.control_burst(0.024, SR, seed=4, n_slots=103 / 255.0,
+                                          start_frac=0.1)
         # Whole frames, so the loops join without a jump in the slot rhythm.
         dur = 36 * FRAME_S
         self._call = sim.tetra_carrier(dur, SR, role="UPLINK", seed=7)

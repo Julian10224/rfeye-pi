@@ -1,6 +1,6 @@
-# RF Eye 0.11.2 for Raspberry Pi
+# RF Eye 0.11.3 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.11.2 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.11.3 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.11.2 appliance path:
+The installer reproduces the working 0.11.3 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.11.2
+## User interface in 0.11.3
 
 The compact profile contains:
 
@@ -461,6 +461,151 @@ scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
 
+### The whole code, checked against what a terminal really sends (0.11.3)
+
+A read of every module for faults, without a unit on the desk. Seven were
+found and reproduced before they were fixed; the first is the one that decides
+whether a vehicle's first burst is recognised.
+
+**1. The real control burst was half missed.** Every exchange a terminal
+starts -- a registration, a position report, the request for a call -- begins
+with a control uplink burst. EN 300 392-2 (9.4.4) gives it 103 symbols,
+5.72 ms, inside a 7.08 ms subslot; a normal uplink burst is 231 symbols in a
+14.17 ms slot. The simulator's "subslot" burst was the whole subslot, 127
+symbols, and its slot burst the whole slot, so every test passed -- while the
+length gates in `tetra_phy` had been set against exactly those: a burst had
+to stay up for seven 0.89 ms envelope boxes (6.2 ms) and to hold 96 symbols.
+Through the stream's trigger and the 65 ms waveform test, 24 positions each:
+
+| control burst, 103 symbols | 0.11.2 | 0.11.3 |
+| --- | --- | --- |
+| 30 dB | 91% | 100% |
+| 20 dB | 95% | 100% |
+| 14 dB | 75% | 100% |
+| 10 dB | 50% | 87% |
+
+Three separate causes. The run-length gate (`MIN_BURST_S`, now five boxes) and
+the symbol count (`MIN_BURST_SYMBOLS`, 80) sat a box above the real burst. And
+at any level one burst in fifteen came back with *no* modulation score at all:
+`carrier_boxes`, which keeps a terminal's linearisation carrier out of the
+symbol-rate test, judged the half-empty box at the edge of the burst -- three
+or four symbols that happened to turn the same way -- to be a carrier, and
+took it and both neighbours out: 48 of the 103 symbols. It now only judges a
+box that is full of signal.
+
+Letting shorter bursts in must not let noise in, and measuring that turned up
+a fourth fault: the decoy symbol rates were asked for the same *number* of
+symbols as 18 kbaud, so on a short burst the 13.1 kbaud decoy had too few,
+returned "nothing to measure" and dropped out of the comparison. They are now
+asked for the same *stretch of signal*. With that, and a higher floor for
+bursts under 160 symbols (`phy_min_dqpsk_m_short` 0.28; a hundred symbols of
+noise average their fourth moment to 0.15, real bursts at 10 dB to 0.47):
+
+| 5.7 ms of ..., at 9 / 16 / 30 dB, 60 tests each | 0.11.2 | 0.11.3 |
+| --- | --- | --- |
+| noise 20 or 25 kHz wide | 3 of 360 | 0 |
+| FSK, 4FSK, FM, a carrier | 0 | 0 |
+| pi/4-DQPSK at 16 kbaud | 24 of 180 | 0 |
+| pi/4-DQPSK at 19 and 24 kbaud | 7 of 360 | 1 |
+| pi/4-DQPSK at 17 kbaud | 29 of 180 | 16 |
+
+The last row is what 103 symbols cannot settle: 17 kbaud against 18 is six
+symbols of slip. Nothing transmits it in 380-385 MHz. In a 0.52 s dwell (ECO,
+or the stream's fallback) the floor for a control burst is 14 dB rather than
+10, because the peak hold runs over 146 rows of noise instead of 18.
+`scripts/tetra-phy-selftest.py` asserts all of this with real burst lengths,
+and the PC simulator's vehicles send them.
+
+**2. Drive mode drew the screen twenty times a second.** Max power is the
+default since 0.11.0, and `_fps()` gave it the full `ui_fps` unconditionally:
+the main page drawn, checksummed and -- nothing having changed -- thrown away,
+twenty times a second. This README measured that loop at 85% of a core
+against 9% at the idle rate when ECO was introduced. It is Python holding the
+interpreter lock, and the stream's trigger and waveform test need most of a
+core of a 900 MHz Pi 3 B+ themselves. The PC emulation of a Pi could not see
+it, because a PC draws a frame far more than fifteen times faster than a Pi.
+Now the idle rate (3 fps) applies in both modes, the active rate (8) during
+an alert or a recording, and the full rate only with a hand on the panel. The
+backend wakes the frame loop the moment an alert rises or clears
+(`SDRBackend.wake`), so an alert does not wait for an idle frame.
+
+**3. One dip or one lost dongle cost minutes of listening.** The radio only
+streams above 85% of the time; everything below is dwells that hear each
+channel a few per cent of the time. 0.11.2 still took the radio to 30% for
+every under-voltage (back after two calm minutes) and for every lost dongle
+(the step off limits for half an hour) -- for a dongle that is back on the bus
+in five seconds. On the reference unit the dips came at 22% as often as at
+40%, so limiting the radio was not what the rail needed. Since 0.11.3:
+
+| | |
+| --- | --- |
+| an under-voltage | written to `power.log` (`DIP`), counted, shown; the radio keeps its share |
+| three in half an hour | `WEAK SUPPLY` on the debug page -- a supply to fix, still not a limit |
+| a lost dongle, the first two in ten minutes | ridden out: `ridden out (1 in 10 min; the radio keeps its share)` |
+| a third inside ten minutes | the ladder as before: 30%, the step off limits for half an hour, an hour if it fails there again |
+| a stream that breaks twice with the dongle still there | dwells for one minute, then two, four ... up to ten (it was ten at once) |
+| a `power-state.json` from 0.10.8-0.11.2 | not believed |
+
+**4. A red fault frame out of nowhere.** `snapshot()` runs on the panel's
+thread and asked the site registry for its candidates while the scan thread
+could be adding a carrier: "dictionary changed size during iteration", one
+`RF EYE FAULT` frame and a line in `crash.log`. The registry is read from a
+copy now.
+
+**5. The bars said nothing about a vehicle coming closer.** The top of the
+bar was 26 dB, from when the tuner's AGC flattened every strong signal to
+21-25 dB. With the fixed gain a vehicle beside the antenna measures 35-44 dB,
+so everything near enough to sound already stood at full scale and sounded
+the same triple beep. `ui_level_strong_db` is 44: across town is one to four
+green segments, the CITY threshold (28 dB) the sixth, red 34 dB and up -- and
+the beeps follow: double from 22 dB, triple from 33. A held alert also keeps
+the bar it had; five seconds into a gap it used to be redrawn from the
+waveform score, and a far-off terminal's bar jumped from one segment to six.
+
+**6. A band pass took the receiver off the control channel.** Once a site is
+locked the downlink is swept again every two minutes, and a downlink dwell is
+1.6-3.3 s on a Pi 3 B+. The stream put one in every gap of its rotation --
+main window 8 s, downlink, elsewhere 2 s, downlink, elsewhere 2 s, downlink
+-- so for the twenty-five seconds a pass takes the control channel was
+listened to less than half the time. Traced in the Pi emulation, a police
+car whose loudest bursts fell in that stretch was first seen at its sixth.
+A round of the rotation now holds one downlink dwell at most, and it takes
+the place of a short visit elsewhere: the one after it and the one before it
+by turns, so a neighbouring site's control channel is not the one that
+always pays (`MDsMsDMDs...` in scenario 37).
+
+**7. Smaller.** 0.11.2 added the gain the overload guard had taken off to a
+hit's level before judging near or far, which counted it twice -- a few steps
+of gain take signal and noise down together. A recording copied the whole
+snapshot eight times a second whether or not the detector had published
+anything. And the PC simulator's air process could die on a segment shorter
+than an echo's delay.
+
+**The drive, at Pi speed.** `scripts/simulator/field_test.py` runs the real
+application slowed to a Pi 3 B+ against simulated C2000 air, a vehicle every
+twenty seconds through fading. With real burst lengths in the air:
+
+| vehicles in the unit's own cell | 0.11.2 | 0.11.3 |
+| --- | --- | --- |
+| seen on the first recognisable burst | 6 of 14 | 41 of 60 |
+| within two | 11 of 14 | 54 of 60 |
+| at all | 14 of 14 | 58 of 60 |
+
+(Two runs of 0.11.2 and eight of this release while it was being finished;
+one run is nine vehicles or five, and single runs ranged from 5 of 9 to 8 of
+9 on the first burst, so the table is a direction, not a figure. 0.11.1's
+"10 of 15 on the first burst" was measured with bursts no terminal sends.)
+No run of either produced a false alarm or lost a sample, and the load was
+48-65% of one emulated core for both; one run of this release read 112% and
+four repeats did not reproduce it. A vehicle in a cell the unit is not
+camped on is still mostly missed -- 1 of 2, or neither -- because one dongle
+hears a third of the band at a time.
+
+
+What this release still cannot say is the thing only the road can: no
+confirmed C2000 vehicle has yet been logged by a unit. `hits.log` and
+`evidence/` are there for exactly that.
+
 ### Beside the car it sounds, across town it is only shown (0.11.2)
 
 Field report on 0.11.1: *it often goes off when there is nothing, it does not
@@ -539,7 +684,8 @@ it climbed back one step every five minutes -- and since 0.11.0 it only
 streams above 85%, so after every dip it spent half an hour in dwells that
 hear each channel a few per cent of the time. After a dip (not a lost dongle)
 it now goes straight back to where it was once the rail has held for
-`power_ladder_dip_return_s` (2 min). A lost dongle still climbs a step at a
+`power_ladder_dip_return_s` (2 min; since 0.11.3 a dip no longer moves the
+radio at all, see above). A lost dongle still climbs a step at a
 time. What no release can fix is the rail itself: on the reference unit with
 the good antenna it sags below 4.63 V several times a minute, and every time
 the dongle drops off the USB bus it is gone for seconds.
@@ -1799,7 +1945,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.11.2 uses a **TMB12A03 active buzzer**:
+RF Eye 0.11.3 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -1948,7 +2094,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.11.2**.
+`VERSION` and `rfeye/config.py` identify this release as **0.11.3**.
 
 Build the OTA package with:
 
@@ -1980,6 +2126,10 @@ the second one, and it is what lets the governor clock back down instead of
 sitting at full speed indefinitely.
 
 ### The idle frame rate
+
+(Since 0.11.3 the idle rate applies in drive mode as well; see "The whole
+code, checked" above. Drive mode had been drawing at the full rate all the
+time since it became the default.)
 
 Since 0.9.14 the economical mode draws the main page at 3 fps rather than 8
 whenever nobody is looking at it. The appliance spends nearly its whole life in

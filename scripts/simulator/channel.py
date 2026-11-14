@@ -126,7 +126,10 @@ class Path:
         y = np.zeros(n, dtype=np.complex64)
         for i, (delay, amp, fade) in enumerate(self.taps):
             d = int(round(delay * sr))
-            xs = x if d == 0 else np.concatenate((np.zeros(d, x.dtype), x[:n - d]))
+            # [:n], not x[:n - d]: a segment shorter than the tap's delay made
+            # that a negative slice and the lengths disagree (seen as a crash
+            # of the air process a few seconds into a field test).
+            xs = x if d == 0 else np.concatenate((np.zeros(d, x.dtype), x))[:n]
             g = fade(t)
             if i == 0 and self.k is not None:
                 los = np.exp(1j * (2 * np.pi * self.los_doppler * t + self.los_phase))

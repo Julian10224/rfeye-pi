@@ -103,7 +103,7 @@ class SiteRegistry:
         now = time.time() if now is None else float(now)
         window = max(30.0, float(self.cfg.get('site_silence_window_s', 180.0)))
         return any(now - float(e['last_ok']) <= window
-                   for e in self.entries.values() if int(e['hits']) > 0)
+                   for e in list(self.entries.values()) if int(e['hits']) > 0)
 
     # -- persistence -------------------------------------------------------
     def _path(self):
@@ -163,7 +163,7 @@ class SiteRegistry:
                 'detector_profile_version': int(
                     self.cfg.get('detector_profile_version', 0)),
                 'saved_at': time.time(),
-                'sites': {str(f): dict(v) for f, v in self.entries.items()},
+                'sites': {str(f): dict(v) for f, v in list(self.entries.items())},
             }
             tmp = p.with_suffix('.tmp')
             tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
@@ -238,7 +238,11 @@ class SiteRegistry:
         need = max(2, int(self.cfg.get('site_lock_hits', 3)))
         stale = max(60.0, float(self.cfg.get('site_lock_stale_s', SITE_LOCK_STALE_S)))
         out = []
-        for f, e in self.entries.items():
+        # A copy: the panel's thread asks this (snapshot) while the scan
+        # thread may be adding a carrier, and iterating the live dict then
+        # raised "dictionary changed size during iteration" -- one red fault
+        # frame on the panel and a line in crash.log.
+        for f, e in list(self.entries.items()):
             if int(e['hits']) >= need and now - float(e['last_ok']) <= stale:
                 out.append({'freq_hz': float(f), 'quality': float(e['quality']),
                             'hits': int(e['hits']), 'last_ok': float(e['last_ok'])})
@@ -251,7 +255,7 @@ class SiteRegistry:
         need = max(2, int(self.cfg.get('site_lock_hits', 3)))
         out = [{'freq_hz': float(f), 'hits': int(e['hits']),
                 'last_ok': float(e['last_ok'])}
-               for f, e in self.entries.items() if int(e['hits']) < need]
+               for f, e in list(self.entries.items()) if int(e['hits']) < need]
         out.sort(key=lambda x: (x['hits'], x['last_ok']), reverse=True)
         return out
 
@@ -464,7 +468,7 @@ class UplinkAlarm:
                 out.add(f)
         return out
 
-    def update(self, verified, watched=(), now=None, trusted=(), level_offset_db=0.0):
+    def update(self, verified, watched=(), now=None, trusted=()):
         """``verified`` are the PhyResults that passed; ``watched`` is every
         channel actually examined in this dwell, hit or not.
 
@@ -532,7 +536,11 @@ class UplinkAlarm:
             tr.note_visit(now, float(r.snr_db) if r is not None else None)
             if r is not None:
                 tr.note_hit(now, r.snr_db, r.quality, span_f)
-                tr.hit_level_db = float(r.snr_db) + float(level_offset_db)
+                # The level against the noise, as measured. 0.11.2 added the
+                # gain the overload guard had taken off, which counted it
+                # twice: a few steps of gain take signal and noise down
+                # together, so the ratio had not moved.
+                tr.hit_level_db = float(r.snr_db)
                 if tr.hit_level_db >= near_db:
                     tr.near_at = now
             else:

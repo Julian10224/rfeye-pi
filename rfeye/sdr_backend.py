@@ -445,6 +445,17 @@ class SDRBackend:
         # disturbed are blanked instead (claim_panel).
         self._streaming=False; self._stream_ring=None
         self._stream_turn=0; self._stream_strikes=0; self._stream_off_until=0.0
+        self._stream_backoff_s=0.0
+        # How many short visits elsewhere there have been since the last hold
+        # on the main window (the strongest site's control channel), and how
+        # often downlink work has taken the place of one; see _scan_cycle.
+        self._stream_since_main=0
+        self._site_slot=0
+        self._site_this_round=False
+        # Called (from the scan thread) when something the panel shows has
+        # changed -- an alert rising or clearing, a new hit -- so the UI can
+        # idle at a low frame rate and still answer at once. Set by the app.
+        self.wake=None
         self._stream_followed=False
         self._stream_why=''
         self.stream_triggers=0; self.stream_drops=0; self.stream_centre_hz=0.0
@@ -844,29 +855,25 @@ class SDRBackend:
                     self._power_log(now,'NOTE %s: the radio was not running, '
                                     'so it is not limited for it'%why)
                 continue
-            # A dip is a hint, not a failure of the step it came on -- see
-            # PowerLadder.dip. Only a lost dongle is that, in _scan_cycle.
+            # A dip is written down and nothing is taken for it (0.11.3): the
+            # radio's share is not what pulls the rail down, and every step
+            # down is paid for in listening. See PowerLadder.dip. Only a
+            # dongle that keeps being lost moves the ladder, in _scan_cycle.
             what=self.ladder.dip(now,why,in_use=in_use)
-            if what=='drop':
-                self._power_log(now,'DROP %s at %d%% -> cap %d%%'%(
-                    why,round(in_use*100),round(self.ladder.cap*100)))
-            elif what=='floor':
-                self._power_log(now,'%s at %d%%: already at the safe share, '
-                                'nothing more to give'%(why,round(in_use*100)))
+            if what=='noted':
+                self._power_log(now,'DIP %s at %d%% (radio not limited for it)'%(
+                    why,round(in_use*100)))
             elif what=='weak':
-                self._power_log(now,'SUPPLY WEAK: %s even at %d%% -- limiting the '
-                                'radio does not stop it, so the radio is no longer '
-                                'limited for it this boot (cap %d%%)'%(
-                    why,round(in_use*100),round(self.ladder.cap*100)))
-            elif what=='same':
-                self._power_log(now,'%s (same incident)'%why)
+                self._power_log(now,'SUPPLY WEAK: %s, %d times in half an hour -- '
+                                'a supply to fix; the radio keeps its share'%(
+                    why,int(self.cfg.get('power_ladder_floor_dips',3))))
         live=bool(self.status=='LIVE' and self.last_good_scan
                   and now-self.last_good_scan<10.0)
         before=self.ladder.cap
         if self.ladder.tick(now,live):
             self._power_log(now,'STEP UP %d%% -> %d%% after %d s without trouble'%(
                 round(before*100),round(self.ladder.cap*100),
-                round(self.ladder.last_step_need_s or self.ladder._step_s())))
+                round(self.ladder._step_s())))
         # On its own clock. It used to share one with every other line, so a
         # unit that logged a dip every twenty seconds never wrote a minute
         # line at all -- and that is the unit whose duty, gain and
@@ -935,7 +942,6 @@ class SDRBackend:
                else 'PROVISIONAL' if self.alarm.provisional else 'ALARM')
         lines=[]
         near_db=self.alarm.near_threshold_db()
-        backoff=float(self._gain_backoff.get('up',0.0))
         for r in verified:
             tr=self.alarm.tracks.get(r.freq_hz,now,create=False)
             mirror=self._image_source(r.freq_hz)
@@ -947,7 +953,7 @@ class SDRBackend:
                 +(' line' if getattr(r,'carrier_line',False) else ''),
                 len(tr.hit_times) if tr is not None else 0,
                 # Near or far by alert_range: whether this one made a sound.
-                'near' if float(r.snr_db)+backoff>=near_db else 'far')
+                'near' if float(r.snr_db)>=near_db else 'far')
                 +((' image-of CH %d'%carrier_number(mirror,self.cfg)) if mirror else ''))
         if state!=self._alert_logged:
             lines.append('ALERT %s -> %s'%(self._alert_logged,state))
@@ -974,7 +980,7 @@ class SDRBackend:
                 return None
             src=2.0*c+float(self.cfg.get('tuner_image_offset_hz',7_140_000.0))-float(freq_hz)
             tol=float(self.cfg.get('tetra_channel_spacing_hz',25000.0))*0.6
-            for f in self.sites.entries:
+            for f in list(self.sites.entries):
                 if abs(float(f)-src)<=tol:
                     return float(f)
         except Exception:
@@ -2155,7 +2161,14 @@ class SDRBackend:
         self._stream_strikes+=1
         self._stream_why=str(why)[:60]
         if self._stream_strikes>=2:
-            retry=max(30.,float(self.cfg.get('stream_retry_s',600.0)))
+            # A minute the first time, doubling to stream_retry_s. It was ten
+            # minutes straight away -- ten minutes of dwells, each channel
+            # heard a few per cent of the time, for what is usually one USB
+            # hiccup on a rail that dipped.
+            most=max(30.,float(self.cfg.get('stream_retry_s',600.0)))
+            first=max(10.,float(self.cfg.get('stream_retry_first_s',60.0)))
+            retry=min(most,max(first,self._stream_backoff_s*2.0))
+            self._stream_backoff_s=retry
             self._stream_off_until=now+retry
             self._stream_strikes=0
             self._power_log(now,'STREAM off for %d s, dwelling instead: %s'%(
@@ -2189,12 +2202,20 @@ class SDRBackend:
                   +sorted(self.sites.uplink_partners(now)))
             centre,_=self._stream_place([heard[0]]+(near or self._uplink_band_channels()))
         self._stream_followed=centre is not None
+        was_main=True
         if centre is None:
             seq=self._stream_windows(now)
             if not seq:
                 return None
             centre,hold=seq[self._stream_turn%len(seq)]
             self._stream_turn+=1
+            # The rotation starts with the main window whenever there is one.
+            was_main=(centre==seq[0][0])
+        if was_main:
+            self._stream_since_main=0
+            self._site_this_round=False
+        else:
+            self._stream_since_main+=1
         members=self._stream_members(centre,now)
         if not members:
             return None
@@ -2386,6 +2407,7 @@ class SDRBackend:
                 everything.extend(results)
                 self._publish(time.time(),results,[],watched=watched)
             self._stream_strikes=0
+            self._stream_backoff_s=0.0
             return everything
         except Exception as e:
             self._streaming=False
@@ -2396,13 +2418,11 @@ class SDRBackend:
     def _publish(self,now,watch_results,site_results,watched=None,t0=None,cycle_s=None):
         """Hand what was just measured to the alarm and to the panel."""
         verified=[r for r in watch_results if r.ok]
+        was_confirmed=bool(self.mobile_confirmed)
         if watched is None:
             watched=[r.freq_hz for r in watch_results]
-        # The level a hit is judged near or far by is what reached the
-        # antenna, so a gain the overload guard has taken off is put back.
         confirmed,level,peaks=self.alarm.update(
-            verified,watched,now,trusted=self.sites.uplink_partners(now),
-            level_offset_db=float(self._gain_backoff.get('up',0.0)))
+            verified,watched,now,trusted=self.sites.uplink_partners(now))
         self._log_hits(now,verified,confirmed)
         locked=self.sites.locked(now)
 
@@ -2426,7 +2446,17 @@ class SDRBackend:
             # a gap is. Falling to an empty list here stopped the buzzer
             # the moment the vehicle drew breath, instead of letting the
             # alert age out over uplink_alert_hold_s.
-            shown=[self._peak_row(r) for r in peaks[:nshow]]
+            #
+            # And it keeps the bar it had. These rows used to be rebuilt from
+            # the hit itself, whose "level" is the waveform score -- so five
+            # seconds into the gap a far-off terminal's bar jumped from one
+            # green segment to six.
+            shown=[]
+            for r in peaks[:nshow]:
+                tr=self.alarm.tracks.get(r.freq_hz,now,create=False)
+                row=tr.as_dict(now,weak,strong) if tr is not None else self._peak_row(r)
+                row['channel']=carrier_number(row['freq_hz'],self.cfg)
+                shown.append(row)
         # Every channel the dwell measured, not the first twelve. A
         # dwell covers up to 48, so a recording of a drive past a
         # vehicle kept a quarter of the evidence -- and the quarter
@@ -2458,6 +2488,11 @@ class SDRBackend:
         if self._sdr_lost_at:
             self._power_log(now,'SDR back after %.0f s'%(time.time()-self._sdr_lost_at))
             self._sdr_lost_at=0.
+        if verified or bool(confirmed)!=was_confirmed:
+            wake=self.wake
+            if wake is not None:
+                try: wake()
+                except Exception: pass
         return confirmed
 
     def _scan_cycle(self):
@@ -2513,6 +2548,29 @@ class SDRBackend:
                     fresh=max(10.,float(self.cfg.get('site_candidate_fresh_s',120.0)))
                     warm=any(now-c['last_ok']<=fresh for c in self.sites.candidates(now))
                     run_site=due or bool(self._site_queue) or not locked_now or warm
+                    # ...and it takes the place of one short visit elsewhere
+                    # rather than coming on top of them (0.11.3). A downlink
+                    # dwell is 1.6-3.3 s on a Pi 3 B+, and a band pass put one
+                    # in every gap: main 8 s, downlink, elsewhere 2 s,
+                    # downlink, elsewhere 2 s, downlink -- nine seconds away
+                    # from the control channel out of every seventeen, for
+                    # the twenty-five seconds a pass takes, every two minutes.
+                    # Traced in the Pi emulation: a police car whose loudest
+                    # bursts fell in that stretch was first seen at its sixth.
+                    #
+                    # So one downlink dwell per round of the rotation, and
+                    # the short visit next to it is skipped -- the one after
+                    # it and the one before it by turns, so a neighbouring
+                    # site's control channel is not the one that always
+                    # pays. Only with a control channel known: without one
+                    # every window is as good as another, and the lock that
+                    # names one is what the downlink dwell is there to get.
+                    seq=self._stream_windows(now) if self.sites.control_partners(now) else []
+                    if seq:
+                        short=any(c!=seq[0][0] for c,_ in seq)
+                        want=(self._site_slot%2) if short else 0
+                        if self._site_this_round or self._stream_since_main!=want:
+                            run_site=False
                 elif locked_now:
                     # One cycle in site_pass_share, not one in two. Measured on
                     # the field unit, the band pass was taking 9 of 22 cycles
@@ -2539,7 +2597,16 @@ class SDRBackend:
                     share=2 if warm else max(2,int(self.cfg.get('site_search_share',5)))
                     run_site=(self._site_share%share==0)
                 if run_site:
+                    t_site=time.monotonic()
                     site_results=self._site_work(now)
+                    if (streamed is not None and time.monotonic()-t_site>0.3
+                            and self.sites.control_partners(now)):
+                        # That was one short visit's worth of time away.
+                        self._site_slot+=1
+                        self._site_this_round=True
+                        seq=self._stream_windows(time.time())
+                        if seq and seq[self._stream_turn%len(seq)][0]!=seq[0][0]:
+                            self._stream_turn+=1
 
             now=time.time()
             # The 380-385 MHz sweep that used to run here fed the spectrum
@@ -2596,11 +2663,18 @@ class SDRBackend:
                 why='SDR lost: '+('off the USB bus' if gone else err[:60])
                 in_use=self._duty_limit(t)
                 self._sdr_lost_at=t
-                if self.ladder.event(t,why,in_use=in_use):
-                    self._power_log(t,'DROP %s at %d%% -> cap %d%%'%(
-                        why,round(in_use*100),round(self.ladder.cap*100)))
-                else:
+                if not self.ladder.event(t,why,in_use=in_use):
                     self._power_log(t,'%s (same incident)'%why)
+                elif self.ladder.tolerated:
+                    # Back in seconds, and listening is what the unit is for:
+                    # the first few are ridden out. See PowerLadder.event.
+                    self._power_log(t,'%s at %d%% -- ridden out (%d in %d min; '
+                                    'the radio keeps its share)'%(
+                        why,round(in_use*100),len(self.ladder.losses),
+                        round(float(self.cfg.get('power_ladder_loss_window_s',600.0))/60.0)))
+                else:
+                    self._power_log(t,'DROP %s at %d%% -> cap %d%% (it keeps happening)'%(
+                        why,round(in_use*100),round(self.ladder.cap*100)))
             if ('timeout' in low or 'short read' in low or 'stuck' in low) and 'open failed' not in low:
                 self._recover_sdr_usb()
             power=self._power_warning() or self._power_history

@@ -236,10 +236,13 @@ def _record_rf_worker(app, duration):
     samples=[]; last_update=None; alerted=False
     try:
         while time.monotonic() < end_mono:
-            item=_record_payload_snapshot(app)
-            stamp=item.get("source_last_update",0.0)
-            if stamp != last_update:
-                samples.append(item); last_update=stamp
+            # Only when the detector has published something new. Building
+            # the payload copies every result row, and doing that eight times
+            # a second took time from the scan thread during exactly the
+            # minute someone is recording a vehicle.
+            if float(getattr(app.backend,"last_update",0.0) or 0.0) != last_update:
+                item=_record_payload_snapshot(app)
+                samples.append(item); last_update=item.get("source_last_update",0.0)
                 if (item.get("detector") or {}).get("mobile_confirmed"):
                     alerted=True
             time.sleep(0.12)

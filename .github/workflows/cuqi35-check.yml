@@ -228,8 +228,11 @@ jobs:
           # field failure on its own.
           grep -q '"phy_uplink_sensitive_percentile": 100.0' rfeye/config.py
           grep -q 'hi = float(np.percentile(e_db, 99))' rfeye/tetra_phy.py
-          grep -q 'runs = \[r for r in runs if r >= 0.4 \* SLOT_S\]' rfeye/tetra_phy.py
-          grep -q 'int(math.ceil(96.0 \* sps))' rfeye/tetra_phy.py
+          # ...and since 0.11.3 against what is sent in a subslot, not the
+          # subslot: a control burst is 103 symbols, 5.72 ms.
+          grep -q 'runs = \[r for r in runs if r >= MIN_BURST_S\]' rfeye/tetra_phy.py
+          ! grep -q '0.4 \* SLOT_S' rfeye/tetra_phy.py
+          grep -q 'int(math.ceil(need \* sps))' rfeye/tetra_phy.py
           ! grep -q 'np.percentile(e_db, 95)' rfeye/tetra_phy.py
           ! grep -q '0.6 \* SLOT_S' rfeye/tetra_phy.py
           # The toggle is gone and the mode is forced on, so a unit that saved
@@ -423,7 +426,7 @@ jobs:
           grep -q 'for f in self._uplink_band_channels():' rfeye/sdr_backend.py
           grep -q 'what=self.ladder.dip(now,why,in_use=in_use)' rfeye/sdr_backend.py
           grep -q 'def dip' rfeye/power.py
-          grep -q 'STATE_SCHEMA = 2' rfeye/power.py
+          grep -q 'STATE_SCHEMA = 3' rfeye/power.py
           grep -q 'MAX_HOLD_S = 3600.0' rfeye/power.py
           grep -q 'def carrier_boxes' rfeye/tetra_phy.py
           grep -q "checks.pop('flatness')" rfeye/tetra_phy.py
@@ -442,7 +445,27 @@ jobs:
           grep -q 'alert_near' rfeye/app.py rfeye/compact_ui_draw.py
           grep -q '"alert_range"' rfeye/compact_ui_controls.py
           grep -q 'def check_near_and_far' scripts/detector-selftest.py
-          grep -q 'power_ladder_dip_return_s' rfeye/power.py rfeye/config.py
+          # 0.11.3: the whole code checked. A real control burst is 103
+          # symbols and was half missed; a dip no longer moves the ladder and
+          # a dongle lost once is ridden out; drive mode idles the frame loop;
+          # the site registry is safe to read from the panel's thread.
+          grep -q 'CONTROL_BURST_SYMBOLS = 103' rfeye/tetra_phy.py
+          grep -q 'MIN_BURST_SYMBOLS = 80' rfeye/tetra_phy.py
+          grep -q 'def carrier_boxes(bb, n_boxes, on=None)' rfeye/tetra_phy.py
+          grep -q 'phy_min_dqpsk_m_short' rfeye/tetra_phy.py rfeye/config.py
+          grep -q 'real %d-symbol burst' scripts/tetra-phy-selftest.py
+          grep -q 'n_slots=103 / 255.0' scripts/simulator/sim_air.py
+          ! grep -q 'power_ladder_dip_return_s' rfeye/power.py rfeye/config.py
+          grep -q 'power_ladder_loss_allow' rfeye/power.py rfeye/config.py
+          grep -q 'self.tolerated = True' rfeye/power.py
+          grep -q 'ridden out' rfeye/sdr_backend.py
+          grep -q 'stream_retry_first_s' rfeye/sdr_backend.py rfeye/config.py
+          grep -q 'def _hands_on' rfeye/app.py
+          grep -q 'self.backend.wake = self.ui_wake.set' rfeye/app.py
+          grep -q 'for f, e in list(self.entries.items()):' rfeye/tetra_detector.py
+          grep -q 'self._site_this_round' rfeye/sdr_backend.py
+          grep -q 'def check_downlink_takes_a_turn' scripts/detector-selftest.py
+          grep -q 'np.concatenate((np.zeros(d, x.dtype), x))\[:n\]' scripts/simulator/channel.py
           grep -q 'def _begin_capture' rfeye/sdr_backend.py
           grep -q 'self._begin_capture()' rfeye/sdr_backend.py
           grep -q 'claim(hold_s=' rfeye/app.py
@@ -611,6 +634,7 @@ jobs:
           assert c['phy_max_flatness_db']==14.0
           assert c['phy_max_centre_error_hz']==8000.0
           assert c['phy_min_dqpsk_m']==0.20
+          assert c['phy_min_dqpsk_m_short']==0.28, 'a hundred symbols of noise reach 0.20'
           assert c['phy_min_dqpsk_phase_spread']==0.50
           assert c['phy_min_dqpsk_selectivity']==1.35
           assert c['phy_downlink_min_duty']==0.15
@@ -666,6 +690,8 @@ jobs:
           assert c['phy_screen_margin_db']==2.0
           assert c['track_hot_s']==60.0
           assert c['ui_level_strong_db'] > c['ui_level_weak_db']
+          assert c['ui_level_strong_db'] > c['uplink_near_close_db'], \
+              'what sounds must not already stand at full scale'
           assert c['uplink_confirm_visits_unknown']==30
           assert c['uplink_track_run']==2
           assert c['sdr_duty_idle'] < c['sdr_duty_eco']

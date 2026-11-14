@@ -140,6 +140,7 @@ DEFAULTS = {
     "phy_max_flatness_db": 14.0,
     "phy_max_centre_error_hz": 8000.0,
     "phy_min_dqpsk_m": 0.20,
+    "phy_min_dqpsk_m_short": 0.28,
     "phy_min_dqpsk_phase_spread": 0.50,
     "phy_min_dqpsk_selectivity": 1.35,
     "phy_downlink_min_duty": 0.15,
@@ -223,10 +224,13 @@ DEFAULTS = {
     "power_ladder_retry_s": 1800.0,
     "power_ladder_debounce_s": 30.0,
     "power_ladder_floor_dips": 3,
-    # After a dip (not a lost dongle) the radio goes straight back to where
-    # it was once the rail has held this long (0.11.2), instead of climbing a
-    # step every power_ladder_step_s: the stream only runs above 85%.
-    "power_ladder_dip_return_s": 120.0,
+    # A lost dongle is back in about five seconds, and every step down is
+    # paid for in listening (the stream only runs above 85%). The first
+    # power_ladder_loss_allow losses inside power_ladder_loss_window_s are
+    # therefore ridden out (0.11.3); only when they keep coming does the
+    # ladder step down. An under-voltage no longer moves it at all.
+    "power_ladder_loss_allow": 2,
+    "power_ladder_loss_window_s": 600.0,
     "power_ladder_floor_window_s": 1800.0,
     "power_ladder_persist": True,
     # The kernel's under-voltage alarm is a file read, so it is watched every
@@ -286,6 +290,8 @@ DEFAULTS = {
     "stream_buf_num": 12,
     "stream_stall_s": 2.5,
     "stream_retry_s": 600.0,
+    # ...but a minute the first time, doubling up to that (0.11.3).
+    "stream_retry_first_s": 60.0,
     # How many per-channel results a snapshot carries. One dwell measures
     # up to 48 channels; at 12 a recording kept a quarter of what the
     # receiver saw, which is how a drive past a vehicle could be analysed
@@ -418,7 +424,14 @@ DEFAULTS = {
     # recognised (phy_uplink_min_snr_db). At 8 dB a detection between 5 and
     # 8 dB would have shown no bar and made no sound.
     "ui_level_weak_db": 5.0,
-    "ui_level_strong_db": 26.0,
+    # The top of the bar. It was 26 dB, from when the tuner's AGC flattened
+    # every strong signal to 21-25 dB. With the fixed gain a vehicle beside
+    # the antenna measures 35-44 dB and the masts 15-33, so everything that
+    # was near enough to sound (alert_range) already stood at full scale and
+    # the bars said nothing about a vehicle coming closer. At 44 dB a segment
+    # is 3.9 dB: across town is one to four green segments, the CITY
+    # threshold (28 dB) is the sixth, and red is 34 dB and up.
+    "ui_level_strong_db": 44.0,
 
     "tetra_channel_spacing_hz": 25_000.0,
     "tetra_raster_offset_hz": 12_500.0,
@@ -537,7 +550,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.11.2",
+    "app_version": "0.11.3",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }

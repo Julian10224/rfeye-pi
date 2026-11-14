@@ -150,6 +150,9 @@ class App:
         # slower response.
         self.ui_wake = threading.Event()
         self.ui_wake_at = 0.0
+        # The backend cuts the idle wait short when an alert rises or clears.
+        self.backend.wake = self.ui_wake.set
+        self._alerting = False
         self.ui_signature = None
         self._dim_overlay = None
         self._dim_alpha = -1
@@ -247,6 +250,9 @@ class App:
         """
         if time.monotonic() - float(getattr(self, "ui_wake_at", 0.0)) < UI_WAKE_S:
             return True
+        # An alert: the beeps are timed by the frame loop.
+        if getattr(self, "_alerting", False):
+            return True
         if self.page != "main":
             return True
         if getattr(self, "power_notice_open", False):
@@ -255,15 +261,40 @@ class App:
             return True
         return False
 
+    def _hands_on(self):
+        """Is someone actually using the panel -- a finger, a menu, a notice?"""
+        if time.monotonic() - float(getattr(self, "ui_touch_at", 0.0)) < UI_WAKE_S:
+            return True
+        return self.page != "main" or bool(getattr(self, "power_notice_open", False))
+
     def _fps(self):
-        """Frame rate for this frame, so the low power setting applies at once."""
-        if not bool(self.cfg.get("low_power_mode", False)):
-            return max(1, int(self.cfg.get("ui_fps", 20)))
+        """Frame rate for this frame, so a change of mode applies at once.
+
+        The idle rate applies in drive mode as well since 0.11.3. Drive mode
+        (Max power) is the default since 0.11.0, and it ran the frame loop at
+        the full ui_fps all the time: twenty times a second the main page was
+        drawn, checksummed and -- nothing having changed -- thrown away.
+        Measured on the reference unit that loop is 85% of a core at 20 fps
+        against 9% at the idle rate, and it is Python holding the interpreter
+        lock: the stream's trigger and waveform test, which need most of a
+        core of a Pi 3 B+ themselves, had to share it. The PC emulation of a
+        Pi could not show that, because a PC draws a frame far more than
+        fifteen times faster than a Pi does.
+
+        So: the idle rate when nobody is looking, the active rate while
+        something is happening (an alert, a recording), and the full rate
+        only in drive mode with a hand on the panel. The backend wakes the
+        loop the moment there is something new to show or sound
+        (SDRBackend.wake), so idling costs an alert nothing.
+        """
+        full = max(1, int(self.cfg.get("ui_fps", 20)))
         active = max(1, int(self.cfg.get("low_power_ui_fps", 8)))
         idle = max(1, int(self.cfg.get("low_power_idle_ui_fps", 3)))
-        if idle >= active or self._ui_busy():
+        if self._ui_busy():
+            if (not bool(self.cfg.get("low_power_mode", False))) and self._hands_on():
+                return max(active, full)
             return active
-        return idle
+        return min(idle, active)
 
     def run(self):
         boot_note("ui-loop v%s profile=%s %dx%d" % (
@@ -346,6 +377,7 @@ class App:
             pygame.mouse.set_visible(False)
             self.last_mouse_motion = 0.0
         snap = self.backend.snapshot()
+        self._alerting = bool(snap.get("mobile_confirmed"))
         # A change the screen would show is a reason to be quick again --
         # an alert above all, which must not wait out an idle frame.
         signature = (snap.get("status"), snap.get("detector_state"),

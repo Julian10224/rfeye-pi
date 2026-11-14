@@ -509,9 +509,29 @@ def _check_idle_frame_rate(a):
         a._frame()
         assert a._fps() == active, "a change on screen wakes the loop"
 
-        # Max power is unchanged by any of this.
+        # Drive mode idles too, since 0.11.3. It ran the loop at the full
+        # rate all the time -- 85% of a core on the reference unit, drawing a
+        # page that had not changed -- and the stream needs that core.
         a.cfg["low_power_mode"] = False
-        assert a._fps() == int(a.cfg["ui_fps"])
+        a.ui_wake_at = time.monotonic() - appmod.UI_WAKE_S - 1.0
+        a.ui_touch_at = time.monotonic() - appmod.UI_WAKE_S - 1.0
+        a.page = "main"; a._alerting = False
+        assert a._fps() == idle, ("drive mode must idle when nobody is looking", a._fps())
+        a._alerting = True
+        assert a._fps() == active, "an alert runs at the active rate: the beeps are timed by it"
+        a._alerting = False
+        a.ui_wake_at = a.ui_touch_at = time.monotonic()
+        assert a._fps() == int(a.cfg["ui_fps"]), "a hand on the panel gets the full rate"
+        a.ui_wake_at = a.ui_touch_at = time.monotonic() - appmod.UI_WAKE_S - 1.0
+        a.page = "settings"
+        assert a._fps() == int(a.cfg["ui_fps"]), "and so does a menu"
+        a.page = "main"
+        # The backend wakes the loop, so idling costs an alert nothing.
+        assert getattr(a.backend, "wake", None) is not None, "the backend can wake the UI"
+        a.ui_wake.clear()
+        a.backend.wake()
+        assert a.ui_wake.is_set()
+        a.ui_wake.clear()
     finally:
         a.cfg["low_power_mode"] = keep_mode
         a.page = keep_page

@@ -144,8 +144,11 @@ def control_burst(duration_s, sample_rate, seed=0, n_slots=1, start_frac=0.4,
     rejects it and sensitive mode accepts it. Used to prove exactly that.
 
     ``n_slots`` may be fractional: 0.5 is the subslot of a random-access
-    burst, the shortest transmission ETSI EN 300 392-2 defines, and the one
-    a terminal sends first when it registers.
+    burst. What a terminal actually puts in it is shorter still -- a control
+    burst of 103 symbols, ``103 / 255`` of a slot, 5.72 ms -- and a normal
+    uplink burst is 231 symbols, ``231 / 255``; the rest is ramp and guard.
+    Those two are what the detector has to recognise, and until 0.11.3
+    nothing here was ever asked to make them.
 
     ``gap_frames`` is how many 56.7 ms frames apart the bursts are. It
     defaults to 1 because that is what a mobile actually does -- it owns one

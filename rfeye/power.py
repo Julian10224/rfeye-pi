@@ -32,6 +32,14 @@ and when the rail goes on dipping there anyway the ladder says so once and
 stops limiting the radio for it. A dip before the radio has even started says
 nothing about the radio and costs nothing.
 
+0.11.3 finished that thought, because of what streaming changed. Since 0.11.0
+the radio only streams above 85% of the time, and everything below it is
+dwells that hear each uplink channel a few per cent of the time -- so every
+step this ladder takes down is paid for in the one thing the unit is for. An
+under-voltage therefore no longer moves it at all: it is counted, written
+down and shown. And a dongle that is lost and back five seconds later is
+ridden out; only when the losses keep coming does the ladder step down.
+
 Kept free of the radio and of the Pi so the rules can be tested on their own.
 """
 from __future__ import annotations
@@ -56,8 +64,10 @@ STRIKE_MEMORY_S = 12 * 3600.0
 MAX_HOLD_S = 3600.0
 
 # What the state file has to say it is before it is believed. Files written
-# before 0.10.8 carry ceilings and strikes earned from under-voltage alone.
-STATE_SCHEMA = 2
+# before 0.10.8 carry ceilings and strikes earned from under-voltage alone,
+# and files written before 0.11.3 a share that a single dip or a single lost
+# dongle had taken away.
+STATE_SCHEMA = 3
 
 
 def _boot_id():
@@ -105,13 +115,13 @@ class PowerLadder:
         # at the safe step, and whether this boot has shown that limiting the
         # radio does not stop them.
         self.last_dip = 0.0
-        self.dip_from = 0.0
-        # The step a dip took the radio down from, to go straight back to
-        # after power_ladder_dip_return_s of calm (-1: none). See tick().
-        self.return_to = -1
-        self.last_step_need_s = 0.0
         self.floor_dips = []
         self.weak_supply = False
+        # Lost dongles: when the last one was (for the debounce), the recent
+        # ones, and whether the latest was ridden out rather than acted on.
+        self.last_loss = 0.0
+        self.losses = []
+        self.tolerated = False
         self.path = Path(state_path) if state_path else None
         self._load()
 
@@ -167,94 +177,88 @@ class PowerLadder:
 
     # -- what moves it -----------------------------------------------------
     def dip(self, now, why='', in_use=None):
-        """The rail sagged while the radio was running.
+        """The rail sagged while the radio was running: counted, nothing taken.
 
-        Not the same thing as the dongle failing, and no longer treated as
-        one. A dip takes the radio to the safe step, where five calm minutes
-        buy each step back -- and that is all it does: no step is put off
-        limits for it and nothing is carried into the next boot.
+        Up to 0.11.2 a dip took the radio down to the safe step. Two things
+        were wrong with that. On the one unit where it was measured the dips
+        came at 22% exactly as they had at 40%, so the radio's share was not
+        what was pulling the rail down -- and since 0.11.0 the radio only
+        streams above 85%, so every dip bought minutes of dwells that hear
+        each channel a few per cent of the time, in exchange for nothing. A
+        rail that dips and a dongle that stays on the bus is a supply to fix,
+        not a reason to stop listening.
 
-        A dip that arrives when the radio is already at the safe step or under
-        it is the supply saying something else: the radio has given what it
-        can and the rail sags regardless. ``power_ladder_floor_dips`` of those
-        inside ``power_ladder_floor_window_s`` and the ladder stops limiting
-        the radio for under-voltage for the rest of this boot, and gives back
-        what it took. A lost dongle still counts, exactly as before.
+        ``power_ladder_floor_dips`` of them inside
+        ``power_ladder_floor_window_s`` mark the supply as weak, which is what
+        the debug page then says. A lost dongle is a different matter: see
+        ``event``.
 
-        Returns what it did: ``'drop'``, ``'floor'`` (at the safe step
-        already, counted), ``'weak'`` (that count just ran out), ``'same'``
-        (part of the incident already being handled) or ``'ignored'``.
+        Returns ``'noted'``, ``'weak'`` (the count just ran out) or ``'same'``
+        (part of the incident already written down).
         """
         now = float(now)
-        if self.weak_supply:
-            return 'ignored'
         debounce = max(0.0, float(self.cfg.get('power_ladder_debounce_s', 30.0)))
-        last = max(self.last_dip, self.last_drop)
+        last = max(self.last_dip, self.last_loss)
         if last and 0.0 <= now - last < debounce:
-            self.stable_s = 0.0
             return 'same'
         self.last_dip = now
-        self.stable_s = 0.0
         self.incidents += 1
         self.last_why = str(why)
-        safe = self._index_at_or_below(float(self.cfg.get('power_ladder_drop_to', 0.30)))
-        # The share the radio really had, for a dongle that goes a moment later.
-        self.dip_from = self.cap if in_use is None else min(self.cap, float(in_use))
-        if self.index > safe:
-            self.return_to = max(self.return_to, self.index)
-            self.index = safe
-            self.last_change = now
-            self._save(now)
-            return 'drop'
         window = max(60.0, float(self.cfg.get('power_ladder_floor_window_s', 1800.0)))
         need = max(1, int(self.cfg.get('power_ladder_floor_dips', 3)))
         self.floor_dips = [t for t in self.floor_dips if 0.0 <= now - t < window] + [now]
-        if len(self.floor_dips) < need:
-            self._save(now)
-            return 'floor'
-        self.weak_supply = True
-        self.floor_dips = []
-        # Give back what was taken for it: everything up to the step the
-        # dongle itself was last lost on, if that is still off limits.
-        top = len(self.rungs) - 1
-        if self.ceiling and now < self.ceiling_until:
-            top = max(self.index, self._index_at_or_above(self.ceiling) - 1)
-        if top > self.index:
-            self.index = top
-            self.last_change = now
+        what = 'noted'
+        if not self.weak_supply and len(self.floor_dips) >= need:
+            self.weak_supply = True
+            what = 'weak'
         self._save(now)
-        return 'weak'
+        return what
 
     def event(self, now, why='', in_use=None):
-        """The dongle itself failed: drop to a safe step.
+        """The dongle itself was lost. The first ones are ridden out.
 
         ``in_use`` is the share the radio was actually held to when it
-        happened. That step, and anything above it, is then off limits for a
-        while -- half an hour the first time, doubling if it fails there again
-        up to an hour -- which is what stops the "fine, drop, recover, drop"
-        cycle.
+        happened.
 
-        Returns True when this is a new incident, False when it is more of the
-        one already being handled: an under-voltage and the dongle dropping a
-        second later are one event, not two steps down.
+        A dongle that drops off the bus is back in about five seconds. Up to
+        0.11.2 one such drop took the radio to 30% and put the step it was on
+        off limits for half an hour -- and the radio only streams above 85%,
+        so a five-second glitch cost half an hour of hearing each channel a
+        few per cent of the time. Listening is what the unit is for: a loss
+        every few minutes still leaves it hearing nine tenths of the time.
+
+        So the first ``power_ladder_loss_allow`` losses inside
+        ``power_ladder_loss_window_s`` change nothing. Only when they keep
+        coming -- the supply or the dongle really cannot carry this share --
+        does the ladder step down as it always did: to the safe step, the
+        step it failed on off limits for half an hour, an hour if it fails
+        there again.
+
+        Returns True for a new incident (``tolerated`` says which kind) and
+        False for more of the one already being handled.
         """
         now = float(now)
-        self.stable_s = 0.0
         debounce = max(0.0, float(self.cfg.get('power_ladder_debounce_s', 30.0)))
-        if self.last_drop and 0.0 <= now - self.last_drop < debounce:
+        if self.last_loss and 0.0 <= now - self.last_loss < debounce:
             return False
-        # A failure climbs back a step at a time, whatever a dip had promised.
-        self.return_to = -1
-        # The rail sagging and the dongle going a moment later are one
-        # incident, and it belongs to the step the radio was on before the
-        # dip took it down -- not to the safe step the dip left it on.
         after_dip = bool(self.last_dip and 0.0 <= now - self.last_dip < debounce)
-        was = max(self.cap, self.dip_from) if after_dip else self.cap
+        self.last_loss = now
+        if not after_dip:
+            self.incidents += 1
+        self.last_why = str(why)
+        window = max(60.0, float(self.cfg.get('power_ladder_loss_window_s', 600.0)))
+        allow = max(0, int(self.cfg.get('power_ladder_loss_allow', 2)))
+        self.losses = [t for t in self.losses if 0.0 <= now - t < window] + [now]
+        if in_use is not None and len(self.losses) <= allow:
+            self.tolerated = True
+            self._save(now)
+            return True
+        self.tolerated = False
+        self.losses = []
+        self.stable_s = 0.0
         drop_to = self._index_at_or_below(float(self.cfg.get('power_ladder_drop_to', 0.30)))
         if in_use is not None:
-            if after_dip:
-                in_use = max(float(in_use), was)
-            failed = self.rungs[self._index_at_or_above(min(float(in_use), was))]
+            failed = self.rungs[self._index_at_or_above(min(float(in_use), self.cap))]
             again = (abs(failed - self.last_failed) < 1e-6 and self.last_drop
                      and 0.0 <= now - self.last_drop < STRIKE_MEMORY_S)
             self.strikes = self.strikes + 1 if again else 1
@@ -264,14 +268,10 @@ class PowerLadder:
         # Straight to the safe step -- or, when the radio failed while already
         # at or below it, one further down: a supply that still fails at 30%
         # needs less, not the same again.
-        held = self._index_at_or_below(was)
-        new = min(drop_to, held - 1 if in_use is not None else held)
+        new = min(drop_to, self.index - 1 if in_use is not None else self.index)
         self.index = max(0, new)
         self.last_drop = now
         self.last_change = now
-        if not after_dip:
-            self.incidents += 1
-        self.last_why = str(why)
         self._save(now)
         return True
 
@@ -311,34 +311,13 @@ class PowerLadder:
         dt = max(0.0, min(dt, 30.0))
         if self.at_top():
             self.stable_s = 0.0
-            self.return_to = -1
             return False
         if not live:
             return False
         self.stable_s += dt
-        # After a dip, straight back to where it found the radio once the rail
-        # has held for power_ladder_dip_return_s -- not a step every five
-        # minutes. A dip is a hint, not a failure of the step (see dip()), and
-        # since 0.11.0 the radio only streams above 85%: climbing back from
-        # 30% one step at a time took half an hour, all of it in dwells that
-        # hear each channel a few per cent of the time. That is what "it
-        # finds nothing for a while" was after every dip. A lost dongle still
-        # climbs back one step at a time (event() clears this).
-        back = self.return_to if self.return_to > self.index else -1
-        need = (max(30.0, float(self.cfg.get('power_ladder_dip_return_s', 120.0)))
-                if back >= 0 else self._step_s())
-        self.last_step_need_s = need
-        if self.stable_s < need or self.blocked(now):
+        if self.stable_s < self._step_s() or self.blocked(now):
             return False
-        if back >= 0:
-            target = back
-            if self.ceiling and now < self.ceiling_until:
-                target = min(target, max(self.index + 1,
-                                         self._index_at_or_above(self.ceiling) - 1))
-            self.index = max(self.index + 1, target)
-            self.return_to = -1
-        else:
-            self.index += 1
+        self.index += 1
         self.stable_s = 0.0
         self.last_change = now
         # Held the step that failed for a full step without trouble: the
@@ -382,6 +361,7 @@ class PowerLadder:
                 self.index = self._index_at_or_below(float(d.get('cap', 1.0)))
                 self.weak_supply = bool(d.get('weak_supply', False))
                 self.last_dip = float(d.get('last_dip', 0.0) or 0.0)
+                self.last_loss = float(d.get('last_loss', 0.0) or 0.0)
             elif self.ceiling:
                 # A new boot starts as high as the step the dongle was lost on
                 # allows, not wherever the last drive's dips had left it. The
@@ -400,6 +380,7 @@ class PowerLadder:
             tmp.write_text(json.dumps({
                 'schema': STATE_SCHEMA, 'boot_id': self.boot_id,
                 'weak_supply': bool(self.weak_supply), 'last_dip': self.last_dip,
+                'last_loss': self.last_loss,
                 'cap': self.cap, 'ceiling': self.ceiling,
                 'ceiling_until': self.ceiling_until, 'strikes': self.strikes,
                 'last_failed': self.last_failed, 'last_drop': self.last_drop,

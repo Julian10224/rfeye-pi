@@ -394,6 +394,91 @@ def sensitive_uplink():
             FAILURES.append("sensitive: %s-slot burst at %d dB missed %d of 8 "
                             "positions (%s)" % (n_slots, snr, len(missed),
                                                 "; ".join(missed)))
+    # What a terminal really sends (EN 300 392-2, 9.4.4): a control burst of
+    # 103 symbols, 5.72 ms, in its 7.08 ms subslot -- the random-access burst
+    # every exchange starts with -- and a normal burst of 231 in a slot. The
+    # rows above use a whole subslot (127 symbols) and a whole slot (255), and
+    # until 0.11.3 so did everything else here. The length gates had been set
+    # against those: a burst had to stay up for seven 0.89 ms boxes and hold 96
+    # symbols, and the real control burst -- six boxes, 103 symbols less an
+    # edge -- was recognised 50% of the time at 10 dB, 75% at 14, and failed
+    # one time in fifteen at any level because the box at its edge was taken
+    # for a carrier. 24 positions each, on the stream's 65 ms captures -- where
+    # a vehicle's first burst is judged in drive mode -- and on a dwell. A
+    # dwell is the harder of the two for a short burst: the peak hold runs
+    # over 146 rows of noise instead of 18, so its floor for a control burst
+    # is 14 dB where the stream's is 10 (8 of 24 at 10 dB, and not asserted).
+    for n_sym, snr, least, least_dwell in (
+            (103, 30, 24, 24), (103, 20, 24, 24), (103, 14, 24, 24), (103, 10, 19, None),
+            (231, 20, 24, 24), (231, 10, 24, 24), (231, 8, 21, 14)):
+        for length, label, least in ((1 << 17, "65 ms", least), (1 << 20, "dwell", least_dwell)):
+            if least is None:
+                continue
+            d2 = length / SR
+            got = 0
+            why = []
+            for k in range(24):
+                start = 0.15 + 0.6 * ((k * 0.6180339) % 1.0)
+                iq = phy.Channelizer(sim.make_capture(
+                    [(sim.control_burst(d2, SR, seed=1500 + k, n_slots=n_sym / 255.0,
+                                        start_frac=start, freq_offset_hz=90_000.0), 1.0)],
+                    d2, SR, snr_db=snr, seed=1560 + k), SR)
+                r = phy.analyse(iq, 90_000.0, role="UPLINK", freq_hz=380_100_000.0,
+                                limits=sens, decim=56)
+                got += int(r.ok)
+                if not r.ok:
+                    why.append(r.reason)
+            ROWS.append(("sensitive: real %d-symbol burst %d dB, %s" % (n_sym, snr, label),
+                         "UPLINK", True, r))
+            if got < least:
+                FAILURES.append("sensitive: a real %d-symbol burst at %d dB in a %s "
+                                "capture was recognised %d of 24 times, need %d (%s)"
+                                % (n_sym, snr, label, got, least, "; ".join(sorted(set(why)))))
+    # And what is that short and not TETRA must not pass for it: 5.7 ms of
+    # keyed noise as wide as a carrier, and of pi/4-DQPSK at another rate, at
+    # a level where the shape tests are waived and at two where they are not.
+    # A hundred symbols of noise average their fourth moment to about 0.15
+    # and reached the 0.20 floor often enough to matter; phy_min_dqpsk_m_short
+    # is the answer. Noise and FSK must never pass. The same modulation at
+    # another symbol rate is the hardest case there is -- ninety symbols of it
+    # -- and is held to "never when the shape can be measured, and at most
+    # once in twelve at 9 dB" (0.11.2: 8 of 20 at every level). 17 kbaud is
+    # left out on purpose: 103 symbols cannot tell it from 18, and nothing
+    # transmits either in this band.
+    def keyed_decoy(make, start):
+        sig = make()
+        tt = np.arange(len(sig), dtype=np.float64) / SR
+        on = (tt >= start) & (tt < start + 0.00572)
+        return (sig * on).astype(np.complex64)
+
+    d2 = (1 << 17) / SR
+    short_decoys = [
+        ("keyed noise 20 kHz", lambda sd: sim.band_noise(d2, SR, 20_000.0, 90_000.0, sd)),
+        ("keyed noise 25 kHz", lambda sd: sim.band_noise(d2, SR, 25_000.0, 90_000.0, sd)),
+        ("keyed pi/4-DQPSK 16 kbaud", lambda sd: sim.dqpsk_carrier(
+            d2, SR, 16000.0, seed=sd, freq_offset_hz=90_000.0)),
+        ("keyed pi/4-DQPSK 24 kbaud", lambda sd: sim.dqpsk_carrier(
+            d2, SR, 24000.0, seed=sd, freq_offset_hz=90_000.0)),
+        ("keyed FSK", lambda sd: sim.fsk_data(d2, SR, freq_offset_hz=90_000.0)),
+    ]
+    for name, make in short_decoys:
+        passed = []
+        for snr in (9, 16, 30):
+            for k in range(12):
+                seed = 1700 + 17 * k + snr
+                sig = keyed_decoy(lambda: make(seed), d2 * (0.3 + 0.3 * ((k * 0.618) % 1.0)))
+                r = phy.analyse(phy.Channelizer(sim.make_capture(
+                    [(sig, 1.0)], d2, SR, snr_db=snr, seed=seed + 5), SR), 90_000.0,
+                    role="UPLINK", freq_hz=380_100_000.0, limits=sens, decim=56)
+                if r.ok:
+                    passed.append("%d dB" % snr)
+        ROWS.append(("sensitive short: " + name, "UPLINK", False, r))
+        allowed = 1 if "DQPSK" in name else 0
+        weak = [x for x in passed if x == "9 dB"]
+        if len(passed) > len(weak) or len(weak) > allowed:
+            FAILURES.append("sensitive: 5.7 ms of %s accepted as TETRA (%s)"
+                            % (name, ", ".join(passed)))
+
     # Until 0.10.3 `(2, 12)` was the stated floor: at 12 dB a *single* burst
     # was not separable from noise by the occupied-bandwidth measurement. That
     # was true of the measurement and not of the signal -- its modulation was

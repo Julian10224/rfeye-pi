@@ -49,6 +49,30 @@ FRAME_RATE_HZ = 1.0 / FRAME_S                                  # 17.6471 Hz
 SLOT_RATE_HZ = 1.0 / SLOT_S                                    # 70.5882 Hz
 
 CHANNEL_SPACING_HZ = 25000.0
+
+# What a terminal actually sends (EN 300 392-2, 9.4.4). The control uplink
+# burst -- the random-access burst every exchange starts with, and what a
+# vehicle nobody is talking on sends when it registers or reports in -- carries
+# 103 symbols, 5.72 ms, in a 7.08 ms subslot; the rest of the subslot is ramp
+# and guard. A normal uplink burst carries 231, 12.83 ms, in a 14.17 ms slot.
+#
+# Up to 0.11.2 the length gates below were set against the *subslot*: a burst
+# had to stay up for 0.4 slots (5.67 ms, counted in 0.89 ms boxes, so in
+# practice seven of them, 6.2 ms) and to hold 96 symbols. The simulator made
+# its "subslot" burst 127 symbols long, so every test passed -- and a real
+# 103-symbol burst was recognised 50% of the time at 10 dB, 75% at 14 dB and
+# never better than 95%, failing ``on_air`` or the symbol count by a box.
+# The first burst of a vehicle is the one that matters most.
+CONTROL_BURST_SYMBOLS = 103
+NORMAL_BURST_SYMBOLS = 231
+# The fewest keyed-up symbols the modulation test will judge, and the shortest
+# run of the envelope that counts as a burst: both a box or so under the real
+# control burst, so one lost at an edge does not lose the burst.
+MIN_BURST_SYMBOLS = 80
+MIN_BURST_S = 0.30 * (SYMBOLS_PER_SLOT / SYMBOL_RATE_HZ)
+# Below this many keyed-up symbols a burst is judged as a short one: see
+# phy_min_dqpsk_m_short. Between a control burst (103) and a normal one (231).
+SHORT_BURST_SYMBOLS = 160
 OCCUPIED_BW_HZ = SYMBOL_RATE_HZ * (1.0 + RRC_ROLLOFF)          # 24.3 kHz
 
 # Control hypotheses.  Not TETRA rates and not simple ratios of 18000, so a
@@ -470,7 +494,7 @@ def power_envelope(bb, rate, hop_s=1.0 / 1125.0):
     return p.astype(np.float64), float(rate) / box
 
 
-def carrier_boxes(bb, n_boxes):
+def carrier_boxes(bb, n_boxes, on=None):
     """Which envelope boxes hold a bare carrier rather than modulation.
 
     One number per box: how nearly every sample-to-sample phase step in it is
@@ -479,6 +503,14 @@ def carrier_boxes(bb, n_boxes):
     and scores about a half; noise scores next to nothing. Used to keep a
     terminal's linearisation carrier out of the symbol-rate test -- see the
     flatness note in ``analyse``.
+
+    ``on`` is the keyed-up mask. Only a box that is full of signal can be
+    judged: the first and last box of a burst hold a few symbols of it and
+    silence, and three or four symbols that happen to turn the same way score
+    as a carrier. Until 0.11.3 that edge box and its two neighbours were then
+    taken out of the mask -- 48 of the 103 symbols a control burst has -- and
+    a strong, clean burst came back with no modulation score at all, one time
+    in fifteen.
     """
     bb = np.asarray(bb)
     n_boxes = int(n_boxes)
@@ -489,7 +521,13 @@ def carrier_boxes(bb, n_boxes):
     d = x[:, 1:] * np.conj(x[:, :-1])
     coherent = np.abs(np.sum(d, axis=1))
     total = np.sum(np.abs(d), axis=1) + 1e-20
-    return (coherent / total) > 0.9
+    cw = (coherent / total) > 0.9
+    if on is not None:
+        on = np.asarray(on, dtype=bool)[:n_boxes]
+        if len(on) == n_boxes and np.any(on):
+            power = np.mean(np.abs(x) ** 2, axis=1)
+            cw &= power >= 0.5 * float(np.median(power[on]))
+    return cw
 
 
 def _line_power(x, t, f0, harmonics):
@@ -565,12 +603,12 @@ def tdma_timing(env, rate, harmonics=5, snr_db=0.0, min_snr_db=8.0,
     if start is not None:
         runs.append((n - start) / float(rate))
     # Ignore flicker shorter than a real burst.  This used to be 0.6 slots,
-    # which is longer than a subslot (0.5) -- so the shortest burst ETSI
-    # defines, the random-access burst a mobile sends to register, was thrown
-    # away by the very filter whose comment said it kept it.  0.4 slots is
-    # 5.7 ms: it still drops single-box envelope flicker (0.9 ms) by a wide
-    # margin, and it keeps the 7.1 ms subslot.
-    runs = [r for r in runs if r >= 0.4 * SLOT_S]
+    # which is longer than a subslot (0.5), and then 0.4 slots, 5.67 ms --
+    # which looked like it kept the 7.1 ms subslot and did not keep what is
+    # sent in one: a control burst is 103 symbols, 5.72 ms, and a run is
+    # counted in boxes of 0.89 ms, so it needed seven of them. MIN_BURST_S is
+    # five boxes; single-box envelope flicker is still far below it.
+    runs = [r for r in runs if r >= MIN_BURST_S]
 
     if runs:
         slots = np.asarray(runs, dtype=np.float64) / SLOT_S
@@ -612,6 +650,14 @@ def dqpsk_moments(bb, rate, baud, mask=None, timing_phases=8,
     nsym = int((len(bb) - 4) / sps)
     if nsym < 96:
         return (1.0, 1.0, 0.0)
+    # How many symbols there must be to judge -- as a length of signal, so it
+    # is the same stretch whatever symbol rate is being tried. Counted in
+    # symbols of the rate under test it was not: a control burst holds 103
+    # symbols at 18 kbaud but only 75 at the 13.1 kbaud decoy, which then
+    # returned "nothing to measure", scored zero and dropped out of the
+    # comparison -- so the shortest bursts were being told apart from two
+    # decoys instead of four, and sometimes from none.
+    need = max(24, int(math.ceil(MIN_BURST_SYMBOLS * float(baud) / SYMBOL_RATE_HZ)))
 
     valid = None
     if mask is not None:
@@ -626,12 +672,12 @@ def dqpsk_moments(bb, rate, baud, mask=None, timing_phases=8,
         valid = np.repeat(m, rep)[:len(bb)]
         if len(valid) < len(bb):
             valid = np.concatenate([valid, np.zeros(len(bb) - len(valid), bool)])
-        # Enough keyed-up samples to carry the 96 symbols a timing phase needs
+        # Enough keyed-up samples to carry the symbols a timing phase needs
         # below, and no more.  A flat 256 was a hidden second opinion on how
-        # short a burst may be: at 36 kS/s a 7.1 ms subslot burst is 255
-        # samples, so the shortest real TETRA transmission failed here by one
-        # sample, before any modulation was measured.
-        if int(np.count_nonzero(valid)) < int(math.ceil(96.0 * sps)):
+        # short a burst may be, and so was 96 symbols: a control burst has
+        # 103, and the mask loses a box at an edge as often as not. See
+        # MIN_BURST_SYMBOLS.
+        if int(np.count_nonzero(valid)) < int(math.ceil(need * sps)):
             return (1.0, 1.0, 0.0)
 
     best = (1.0, 1.0, 0.0)
@@ -644,12 +690,12 @@ def dqpsk_moments(bb, rate, baud, mask=None, timing_phases=8,
         if valid is not None:
             keep = valid[i0] & valid[i0 + 1]
             y = y[keep]
-            if len(y) < 96:
+            if len(y) < need:
                 continue
         d = y[1:] * np.conj(y[:-1])
         mag = np.abs(d)
         good = mag > (1e-3 * float(np.median(mag)) + 1e-20)
-        if int(np.count_nonzero(good)) < 96:
+        if int(np.count_nonzero(good)) < need:
             continue
         u = d[good] / mag[good]
         m4 = float(abs(np.mean(u ** 4)))
@@ -793,6 +839,21 @@ LIMITS = {
     'phy_max_flatness_db': 14.0,
     'phy_max_centre_error_hz': 8000.0,
     'phy_min_dqpsk_m': 0.20,
+    # The same score for a burst of fewer than SHORT_BURST_SYMBOLS symbols. A
+    # hundred symbols of anything average their fourth moment to about 0.15,
+    # and 5.7 ms of keyed 20-25 kHz noise reached 0.20 with the decoys low
+    # enough one time in a hundred (2 of 240). Measured on 200 simulated
+    # control bursts and 240 such noise bursts:
+    #
+    #                          5%     median   95%
+    #     control burst 10 dB  0.35   0.47     0.61
+    #     control burst 14 dB  0.58   0.65     0.76
+    #     keyed noise, any     0.10   0.15     0.24
+    #
+    # 0.28 sits above nineteen in twenty of the noise bursts -- which also
+    # have to beat the decoy rates -- and under all but one in twenty of the
+    # weakest bursts that can be recognised at all.
+    'phy_min_dqpsk_m_short': 0.28,
     'phy_min_dqpsk_phase_spread': 0.50,
     'phy_min_dqpsk_selectivity': 1.35,
     'phy_downlink_min_duty': 0.15,
@@ -1012,18 +1073,24 @@ def analyse(channelizer, freq_offset_hz, role='UPLINK', limits=None,
         # hold a carrier, and one either side for the ramp between the two,
         # are left out; what remains has to be TETRA by itself, and a channel
         # that holds nothing but a carrier is left with nothing.
-        cw = carrier_boxes(bb, len(mask))
+        cw = carrier_boxes(bb, len(mask), on=mask)
         if np.any(cw):
             cw = cw | np.roll(cw, 1) | np.roll(cw, -1)
             mask = np.asarray(mask, dtype=bool) & ~cw
+    need_m = lim['phy_min_dqpsk_m']
+    if mask is not None and sensitive:
+        box = max(1, len(bb) // max(1, len(mask)))
+        keyed = int(np.count_nonzero(mask)) * box * SYMBOL_RATE_HZ / float(rate)
+        if keyed < SHORT_BURST_SYMBOLS:
+            need_m = max(need_m, lim['phy_min_dqpsk_m_short'])
     mod = modulation_scores(bb, rate, mask=mask, timing_phases=timing_phases,
-                            min_m=0.0 if full else lim['phy_min_dqpsk_m'])
+                            min_m=0.0 if full else need_m)
     res.dqpsk_m = mod['dqpsk_m']
     res.dqpsk_phase_spread = mod['dqpsk_phase_spread']
     res.dqpsk_decoy_max = mod['dqpsk_decoy_max']
     res.dqpsk_selectivity = mod['dqpsk_selectivity']
 
-    checks['symbol_rate'] = res.dqpsk_m >= lim['phy_min_dqpsk_m']
+    checks['symbol_rate'] = res.dqpsk_m >= need_m
     checks['four_phase'] = (res.dqpsk_phase_spread
                             >= lim['phy_min_dqpsk_phase_spread'])
     checks['rate_selectivity'] = (res.dqpsk_selectivity
