@@ -214,6 +214,8 @@ class StreamTrigger:
         self.quiet_until = np.zeros(nch, dtype=np.int64)
         self.rows_seen = 0
         self.triggers = 0
+        # How far the whole window was lifted in the last block, in dB.
+        self.common_db = 0.0
 
     def reset_floor(self):
         """Learn the floor again, e.g. after the gain has changed."""
@@ -306,10 +308,31 @@ class StreamTrigger:
             self.floor = np.median(np.concatenate(self._warm), axis=0)
             self._warm = []
 
-        above = (db > (self.floor[None, :] + self.trigger_db)) & ~bad[:, None]
+        # What every channel does at once is not a burst on any of them. A
+        # terminal transmits on one 25 kHz channel; the receiver's own noise
+        # moves on all sixty-eight together. Found on the reference unit on
+        # 15 November: with the processor busy -- and the analysis itself is
+        # what keeps it busy -- the noise in the whole window rose and fell by
+        # a few dB for milliseconds at a time, each channel was compared with
+        # its own floor, and whichever happened to cross it triggered: 600
+        # triggers a minute on an empty band, every one an eighth of a second
+        # of a Pi 3 B+, the stream seconds behind and 25 million samples
+        # dropped in a minute. A capture taken with the processor idle showed
+        # a clean band. So the lift the channels have in common -- the median
+        # over the window, when it is up -- is taken off first. A transmitter
+        # beside the antenna still stands tens of dB above that.
+        rel = db - self.floor[None, :]
+        if rel.shape[1] >= 8:
+            common = np.maximum(np.median(rel, axis=1), 0.0)
+        else:
+            common = np.zeros(rows)
+        self.common_db = float(common.max()) if rows else 0.0
+        excess = rel - common[:, None]
+        above = (excess > self.trigger_db) & ~bad[:, None]
 
-        # The floor learns from what is not above it, a little per row.
-        quiet = ~above & ~bad[:, None]
+        # The floor learns from what is not above it, a little per row --
+        # and not from rows the whole window was lifted in.
+        quiet = ~above & ~bad[:, None] & (common < 0.5 * self.trigger_db)[:, None]
         cnt = quiet.sum(axis=0)
         if np.any(cnt):
             mean = np.where(cnt > 0, np.sum(np.where(quiet, db, 0.0), axis=0)
@@ -333,7 +356,7 @@ class StreamTrigger:
                             continue
                         rs, emitted, pk = s, False, -np.inf
                     rl = s
-                    pk = max(pk, float(db[r, c] - self.floor[c]))
+                    pk = max(pk, float(excess[r, c]))
                     length = (rl - rs) // self.hop + 1
                     if not emitted and length >= self.max_rows:
                         self._emit(out, c, rs, rl + self.hop, pk)
@@ -345,8 +368,8 @@ class StreamTrigger:
                         self.floor[c] = float(db[r, c])
                         rs, rl, emitted, pk = -1, -1, False, -np.inf
                         col = col.copy()
-                        col[r + 1:] = ((db[r + 1:, c] > self.floor[c] + self.trigger_db)
-                                       & ~bad[r + 1:])
+                        col[r + 1:] = ((db[r + 1:, c] - self.floor[c] - common[r + 1:]
+                                        > self.trigger_db) & ~bad[r + 1:])
                 elif rs >= 0 and (s - rl) // self.hop > self.gap_rows:
                     length = (rl - rs) // self.hop + 1
                     if not emitted and length >= self.min_rows:

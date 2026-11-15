@@ -140,11 +140,17 @@ def _check_config_migration():
                 with open(path) as fh:
                     assert json.load(fh)["phy_min_dqpsk_m"] == 0.31, name
         # Power profile 1 (0.11.0): drive mode reaches every installed unit
-        # once -- each of them has low_power_mode saved -- and a unit that is
-        # put back on ECO after that keeps ECO.
+        # once -- each of them has low_power_mode saved. Profile 2 (0.11.4)
+        # does it once more: up to 0.11.1 the app itself switched ECO back on
+        # at every under-voltage and saved it, so a unit found on ECO at
+        # profile 1 was put there by the app, not by anyone's choice (the
+        # reference unit: no stream since the day it was introduced). From
+        # profile 2 on, a unit that is put on ECO keeps ECO.
         for saved, want in (({"low_power_mode": True}, False),
-                            ({"low_power_mode": True, "power_profile_version": 1}, True),
-                            ({"low_power_mode": False, "power_profile_version": 1}, False)):
+                            ({"low_power_mode": True, "power_profile_version": 1}, False),
+                            ({"low_power_mode": False, "power_profile_version": 1}, False),
+                            ({"low_power_mode": True, "power_profile_version": 2}, True),
+                            ({"low_power_mode": False, "power_profile_version": 2}, False)):
             with tempfile.TemporaryDirectory() as d:
                 path = os.path.join(d, "config.json")
                 with open(path, "w") as fh:
@@ -661,6 +667,16 @@ def _check_power_notice_countdown(a):
         # which is not what a countdown from 30 looks like.
         import math as _math
         assert _math.ceil(left) == int(limit), _math.ceil(left)
+        # What is drawn moves in steps of five (0.11.4): every new number is
+        # a frame, and a frame costs the stream a third of a second.
+        import inspect as _inspect
+        assert "5 * math.ceil(left / 5.0)" in _inspect.getsource(appmod.App._draw_power_notice)
+        # And the notice is not a hand on the panel: it must not put the
+        # frame loop on the full rate for the half minute it is up.
+        keep_p, keep_t = a.page, a.ui_touch_at
+        a.page = "main"; a.ui_touch_at = 0.0
+        assert a._hands_on() is False
+        a.page, a.ui_touch_at = keep_p, keep_t
 
         # Halfway through it is still up and still counting.
         a.power_notice_at = time.monotonic() - (limit / 2.0)

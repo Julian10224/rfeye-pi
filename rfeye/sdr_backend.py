@@ -459,6 +459,8 @@ class SDRBackend:
         self._stream_followed=False
         self._stream_why=''
         self.stream_triggers=0; self.stream_drops=0; self.stream_centre_hz=0.0
+        # Weak triggers let go because the analysis was behind; see _stream_work.
+        self.stream_shed=0
         self.stream_channels=0
 
     # -- lifecycle ---------------------------------------------------------
@@ -735,6 +737,7 @@ class SDRBackend:
             'stream_channels':int(self.stream_channels),
             'stream_triggers':int(self.stream_triggers),
             'stream_drops':int(self.stream_drops),
+            'stream_shed':int(self.stream_shed),
             'stream_off_s':float(max(0.0,self._stream_off_until-time.time())),
                 'sdr_path':str(self.sdr_path),
                 'power_warning':str(self._power_flag),
@@ -888,12 +891,12 @@ class SDRBackend:
             else:
                 stream='on' if self._stream_ready(now) else 'no'
             self._power_log(now,'HB cap=%d%% limit=%d%% duty=%d%% hear=%.1f%% pipe=%s stream=%s '
-                            'trig=%d drop=%d temp=%s '
+                            'trig=%d drop=%d shed=%d temp=%s '
                             'uv=%d sdr=%s bus=%s next=%ds gain=%s clip=%.1f%% %s'%(
                 round(self.ladder.cap*100),round(in_use*100),
                 round(self.radio_duty(now)*100),100.0*self.band_heard,
                 'on' if self._pipeline_on(now) else 'off',stream,
-                self.stream_triggers,self.stream_drops,temp,self._uv_events,
+                self.stream_triggers,self.stream_drops,self.stream_shed,temp,self._uv_events,
                 str(self.status).replace(' ','_'),
                 'yes' if self._sdr_present() else 'no',
                 round(self.ladder.next_step_s(now)),
@@ -1131,7 +1134,8 @@ class SDRBackend:
         While the radio streams there is no gap to wait for. The frame goes
         out at once, and the samples that are on the air while it is on the
         wire are marked so the trigger ignores them: ui_quiet_stream_blank_s
-        (0.20 s) per frame, placed to the sample. Blanking whole USB buffers
+        (0.32 s since 0.11.4; measured, the line is there from 0.04 to 0.28 s
+        after this call) per frame, placed to the sample. Blanking whole USB buffers
         around a 0.35 s hold cost 0.48 s a frame, and with the bars moving
         during a detection that was half the listening time -- measured in
         the Pi emulation, half the bursts lost. The app also sends at most one
@@ -1145,7 +1149,7 @@ class SDRBackend:
                     ring=self._stream_ring
                     if ring is not None:
                         ring.blank_at(time.monotonic(),0.02,
-                                      float(self.cfg.get('ui_quiet_stream_blank_s',0.20)),
+                                      float(self.cfg.get('ui_quiet_stream_blank_s',0.32)),
                                       int(self.cfg.get('phy_sample_rate',2016000)))
                     return True
                 with self.air:
@@ -2249,6 +2253,8 @@ class SDRBackend:
         if control and not any(int(round(f)) in keys for f in control):
             hold_max=hold
         publish_s=max(0.2,float(cfg.get('stream_publish_s',1.0)))
+        shed_lag=int(sr*max(0.2,float(cfg.get('stream_shed_lag_s',1.0))))
+        shed_db=float(cfg.get('stream_shed_db',8.0))
         stall_s=max(0.5,float(cfg.get('stream_stall_s',2.5)))
         min_duty=float(cfg.get('stream_min_duty',0.85))
 
@@ -2321,6 +2327,15 @@ class SDRBackend:
                             blanks=ring.blanked(cursor,end)
                             for c,s,e in trig.feed(iq,cursor,blanks):
                                 pending.append((s,e,c,trig.peak_of(c,s)))
+                            # Behind by more than stream_shed_lag_s: let the
+                            # weak ones go. Each analysis is an eighth of a
+                            # second of a Pi 3 B+, and a stream that is seconds
+                            # behind ends up dropping samples wholesale -- the
+                            # strong burst of a vehicle close by among them.
+                            if pending and (ring.written-end)>shed_lag:
+                                keep=[p for p in pending if p[3]>=shed_db]
+                                self.stream_shed+=len(pending)-len(keep)
+                                pending=keep
                             if not blanks and mono-level_at>=1.0:
                                 level_at=mono
                                 before=self._gain_for('up')

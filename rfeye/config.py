@@ -64,8 +64,9 @@ DETECTOR_PROFILE_VERSION = 13
 
 # The radio profile, migrated separately from the detector's because it is a
 # user setting rather than a calibration. 1 (0.11.0) is drive mode by
-# default: see low_power_mode.
-POWER_PROFILE_VERSION = 1
+# default: see low_power_mode. 2 (0.11.4) is the same again, for the units
+# 0.11.0 and 0.11.1 took it away from: see load_config.
+POWER_PROFILE_VERSION = 2
 
 DEFAULTS = {
     "detector_profile_version": DETECTOR_PROFILE_VERSION,
@@ -289,6 +290,10 @@ DEFAULTS = {
     "stream_buf_len": 131072,
     "stream_buf_num": 12,
     "stream_stall_s": 2.5,
+    # When the analysis is this far behind the radio, triggers weaker than
+    # stream_shed_db above the floor are let go (0.11.4).
+    "stream_shed_lag_s": 1.0,
+    "stream_shed_db": 8.0,
     "stream_retry_s": 600.0,
     # ...but a minute the first time, doubling up to that (0.11.3).
     "stream_retry_first_s": 60.0,
@@ -503,8 +508,18 @@ DEFAULTS = {
     # changed frame goes out at once and the trigger ignores the
     # ui_quiet_stream_blank_s it is on the wire for; and at most one changed
     # frame per ui_quiet_stream_frame_s is sent unless the panel is touched.
-    "ui_quiet_stream_blank_s": 0.20,
-    "ui_quiet_stream_frame_s": 1.0,
+    #
+    # Measured on the reference unit on 15 November (0.11.4), with the
+    # blanking off and the stream's own trigger as the instrument: the SPI
+    # line at 383.3375 MHz comes up 0.04-0.05 s after the app hands the frame
+    # over and stays for 225 ms -- to 0.28 s. The 0.20 s that had been
+    # blanked let the last 75 ms through, and every frame set off the trigger
+    # on carrier 3733 and its neighbours: about twelve wasted analyses a
+    # minute on a quiet band, 94 in a minute while the supply notice counted
+    # down. 0.32 s covers it with a margin, and a changed frame every two
+    # seconds instead of every one pays for the difference.
+    "ui_quiet_stream_blank_s": 0.32,
+    "ui_quiet_stream_frame_s": 2.0,
     "ui_refresh_s": 30.0,
     "power_notice_timeout_s": 30.0,
     "low_power_scan_pause_s": 1.5,
@@ -550,7 +565,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.11.3",
+    "app_version": "0.11.4",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
@@ -670,6 +685,15 @@ def load_config():
     # every save -- so the new default alone would reach no installed unit.
     # Once: after this a unit that is switched back to ECO, by hand or by the
     # app on a sagging rail, keeps ECO.
+    #
+    # Power profile 2 (0.11.4) does it once more. Up to 0.11.1 the app
+    # switched Max power off, and saved that, on every under-voltage -- and
+    # the reference unit's rail dips several times a minute. It was found on
+    # 15 November with low_power_mode true at profile 1: nobody had chosen
+    # ECO, the stream had not run since the day drive mode was introduced,
+    # and each uplink channel was being heard 9% of the time (limit=45%
+    # stream=no in power.log). The app no longer touches the setting
+    # (0.11.2), so from here on ECO is only ever someone's own choice.
     if int(saved.get("power_profile_version", 0) or 0) < POWER_PROFILE_VERSION:
         cfg["low_power_mode"] = DEFAULTS["low_power_mode"]
     cfg["power_profile_version"] = POWER_PROFILE_VERSION

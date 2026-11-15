@@ -1854,6 +1854,44 @@ def check_stream_trigger():
     got = feed(iq, blanks=[(int(0.50 * sr), int(0.62 * sr))])
     check("what the panel may have written over is not a burst", not got, str(got))
 
+    # What every channel does at once is not a burst on any of them (0.11.4).
+    # Measured on the reference unit: with the processor busy the noise in
+    # the whole window rises and falls by a few dB for milliseconds at a time,
+    # and comparing each channel with its own floor made 600 triggers a
+    # minute of that on an empty band -- the stream seconds behind, 25 million
+    # samples dropped in a minute. A terminal is on one channel.
+    rng = np.random.default_rng(77)
+    n = 4 * sr
+    noise = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 6.0).astype(np.complex64)
+    lift = np.ones(n, np.float32)
+    t0 = int(0.5 * sr)
+    stretches = []
+    while t0 < n - sr // 10:
+        ln = int(rng.uniform(0.006, 0.020) * sr)
+        lift[t0:t0 + ln] = 10 ** (rng.uniform(4.0, 7.0) / 20.0)
+        stretches.append(t0)
+        t0 += ln + int(rng.uniform(0.03, 0.12) * sr)
+    wobbly = noise * lift
+    tr = StreamTrigger(sr, offs, row_stride=stride)
+    got = []
+    for a in range(0, n, 131072):
+        got += tr.feed(wobbly[a:a + 131072], a)
+    check("the whole window rising and falling together triggers nothing",
+          len(got) == 0, "%d triggers from %d lifts of 4-7 dB" % (len(got), len(stretches)))
+    # ...and a burst on one channel is still found, in the middle of a lift.
+    at = stretches[len(stretches) // 2]
+    burst = sim.control_burst(4.0, sr, seed=5, n_slots=1, start_frac=(at + 2000) / n,
+                              freq_offset_hz=300_000.0)
+    chan = 6.0 * np.sqrt(2.0) * np.sqrt(25_000.0 / sr)
+    with_burst = (wobbly + burst[:n] * chan * 10 ** (16.0 / 20.0)).astype(np.complex64)
+    tr = StreamTrigger(sr, offs, row_stride=stride)
+    got = []
+    for a in range(0, n, 131072):
+        got += tr.feed(with_burst[a:a + 131072], a)
+    check("  and a burst on one channel in the middle of it is still found, alone",
+          [offs[c] for c, _, _ in got] == [300_000.0],
+          str([(offs[c], round(s_ / sr, 3)) for c, s_, _ in got]))
+
 
 def check_streaming():
     """Streaming, end to end: heard without a break, and dwells when it cannot."""
@@ -1936,11 +1974,13 @@ def check_streaming():
                   and time.monotonic() - t0 < 0.1)
             blank = ring.blanks[-1] if ring.blanks else (0, 0)
             check("  and only its time on the wire is blanked, to the sample",
-                  0.19 <= (blank[1] - blank[0]) / sr <= 0.25
+                  0.30 <= (blank[1] - blank[0]) / sr <= 0.40
                   and abs(blank[0] - (65536 - int(0.02 * sr))) < int(0.02 * sr),
                   "%s" % (blank,))
-            check("  and the app sends a streaming radio one changed frame a second",
-                  DEFAULTS["ui_quiet_stream_frame_s"] >= 0.5)
+            check("  for as long as the line was measured to be there (0.04-0.28 s)",
+                  DEFAULTS["ui_quiet_stream_blank_s"] >= 0.30)
+            check("  and the app sends a streaming radio a changed frame every two seconds",
+                  DEFAULTS["ui_quiet_stream_frame_s"] >= 2.0)
             b._streaming = False
             b._stream_ring = None
 

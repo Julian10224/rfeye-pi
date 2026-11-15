@@ -1,6 +1,6 @@
-# RF Eye 0.11.3 for Raspberry Pi
+# RF Eye 0.11.4 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.11.3 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.11.4 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.11.3 appliance path:
+The installer reproduces the working 0.11.4 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.11.3
+## User interface in 0.11.4
 
 The compact profile contains:
 
@@ -460,6 +460,80 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### On the unit at last: what the stream did on a real Pi (0.11.4)
+
+Everything since 0.11.0 had been built against a simulator. On 15 November a
+reference unit (Pi 3 B+ at its 900 MHz ceiling, RTL-SDR Blog V4 Lite, MHS35
+panel, a supply that sags below 4.63 V several times a minute) was back on
+line with 0.11.3 on it. Four things the simulator could not have shown.
+
+**The stream had never run.** `power.log` said `limit=45% stream=no
+hear=8.6%`: the unit was on ECO. Nobody had chosen that. Up to 0.11.1 the app
+switched Max power off, and saved it, at every under-voltage, so on this
+supply drive mode had lasted less than a minute after the release that
+introduced it -- and before 0.11.3 the ladder held the radio at 22% on top
+(`cap=22%` in the log of that morning). Each uplink channel was being heard
+2-9% of the time. Power profile 2 gives drive mode back once; the app no
+longer touches the setting, so from here on ECO is someone's own choice.
+With it on, measured on the unit: `duty=100% hear=25-30%`, the scan thread
+at 54-66% of a core, the frame loop at 7%, and the dongle stayed on the bus
+through every dip.
+
+**The receiver's own noise set the trigger off, six hundred times a
+minute.** After a reboot the same unit logged `trig=622 drop=13631488` in one
+minute and `trig=1541 drop=39845888` in the next, on an empty band, with not
+one hit. A capture taken with `rtl_sdr` showed nothing: no stretch of 5 ms
+more than 2.5 dB up in three seconds. The difference was the processor.
+With it busy -- throttled to 600 MHz by the under-voltage, and the analysis
+itself is what keeps it busy -- the noise in the whole 2 MHz window rises and
+falls by a few dB for milliseconds at a time. The trigger compared every
+channel with its own floor, so whichever of the 68 happened to cross it
+triggered; each trigger cost an eighth of a second of analysis, which made
+the processor busier still. The stream ran seconds behind and threw samples
+away by the million -- the strong burst of a vehicle close by among them.
+
+A terminal transmits on one 25 kHz channel; the receiver's noise moves on all
+of them together. `StreamTrigger` now takes off the lift the channels have in
+common (the median over the window, when it is up) before it compares, and
+does not learn its floors from rows that were lifted. On the unit, same place,
+same minute:
+
+| | 0.11.3 | 0.11.4 |
+| --- | --- | --- |
+| triggers on an empty band, headless | 203 in 46 s | 1 in 60 s |
+| samples dropped | 14.6 million (7 s) | 0 |
+| the app, first minute after start | `trig=622 drop=13631488` | `trig=7 drop=0` |
+
+A transmitter beside the antenna, which lifts every channel by splatter,
+still stands tens of dB above that median; scenario 36 covers it, and
+scenario 31 now has the whole window rising and falling by 4-7 dB forty
+times with a real burst in the middle of one lift (0.11.3: 732 triggers;
+0.11.4: the burst, alone). As a net under it, when the analysis is more than
+a second behind, triggers weaker than 8 dB are let go (`shed=` in the minute
+line).
+
+**A frame's SPI line outlasted its blanking.** With the blanking switched off
+and the trigger as the instrument, the line at 383.3375 MHz comes up 0.04-0.05 s
+after the app hands a frame over and stays 225 ms, to 0.28 s. The 0.20 s that
+was blanked let the last 75 ms through, and every frame triggered carrier
+3733 and its neighbours: twelve wasted analyses a minute at rest. It is
+0.32 s now, and a streaming radio gets a changed frame every two seconds
+instead of every one.
+
+**The supply notice counted the stream down.** On a rail that is low at
+start the notice opens with a button that counted `BEGREPEN (30)`, `(29)` ...
+a new frame every second for half a minute, each one a third of a second of
+listening, with the frame loop on its full rate because a notice counted as
+a hand on the panel: 94 triggers and two million samples dropped in the first
+minute after every start. It counts in fives and is not a hand on the panel.
+
+And what the unit had heard in the weeks before, in `hits.log`: real control
+bursts, `6 ms x1`, on carriers 3623, 3629, 3638 and 3677 at 7-26 dB -- at home,
+at night, nothing near. Those are the "alarms when there is nothing": other
+terminals of the cell. Every one of them is below the CITY threshold of 28 dB
+and would now be shown without a sound. A vehicle beside the antenna is still
+the measurement that is missing.
 
 ### The whole code, checked against what a terminal really sends (0.11.3)
 
@@ -1945,7 +2019,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.11.3 uses a **TMB12A03 active buzzer**:
+RF Eye 0.11.4 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -2094,7 +2168,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.11.3**.
+`VERSION` and `rfeye/config.py` identify this release as **0.11.4**.
 
 Build the OTA package with:
 

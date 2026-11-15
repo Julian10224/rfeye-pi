@@ -464,6 +464,17 @@ jobs:
           grep -q 'self.backend.wake = self.ui_wake.set' rfeye/app.py
           grep -q 'for f, e in list(self.entries.items()):' rfeye/tetra_detector.py
           grep -q 'self._site_this_round' rfeye/sdr_backend.py
+          # 0.11.4: measured on the unit. Drive mode is given back once (the
+          # app had taken it away), a frame is blanked for as long as its
+          # SPI line is there, and the supply notice counts in fives.
+          grep -q 'POWER_PROFILE_VERSION = 2' rfeye/config.py
+          grep -q '"ui_quiet_stream_blank_s": 0.32' rfeye/config.py
+          grep -q '5 \* math.ceil(left / 5.0)' rfeye/app.py
+          # ...and the trigger takes off what all channels have in common:
+          # the receiver's own noise set it off 600 times a minute.
+          grep -q 'common = np.maximum(np.median(rel, axis=1), 0.0)' rfeye/stream_watch.py
+          grep -q 'self.stream_shed+=len(pending)-len(keep)' rfeye/sdr_backend.py
+          grep -q 'the whole window rising and falling together triggers nothing' scripts/detector-selftest.py
           grep -q 'def check_downlink_takes_a_turn' scripts/detector-selftest.py
           grep -q 'np.concatenate((np.zeros(d, x.dtype), x))\[:n\]' scripts/simulator/channel.py
           grep -q 'def _begin_capture' rfeye/sdr_backend.py
@@ -712,7 +723,7 @@ jobs:
           assert c['sdr_device_index']==0
           assert c['startup_chime'] is True
           assert c['low_power_mode'] is False, 'drive mode is the shipped default since 0.11.0'
-          assert c['power_profile_version']==1
+          assert c['power_profile_version']==2
           assert c['low_power_ui_fps']==8
           assert c['low_power_scan_pause_s']==1.5
           assert c['low_power_locked_pause_s']==0.15

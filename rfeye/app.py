@@ -265,7 +265,9 @@ class App:
         """Is someone actually using the panel -- a finger, a menu, a notice?"""
         if time.monotonic() - float(getattr(self, "ui_touch_at", 0.0)) < UI_WAKE_S:
             return True
-        return self.page != "main" or bool(getattr(self, "power_notice_open", False))
+        # Not the supply notice: it opens by itself, thirty seconds after
+        # every start on a unit whose rail is low, and nobody is touching it.
+        return self.page != "main"
 
     def _fps(self):
         """Frame rate for this frame, so a change of mode applies at once.
@@ -482,7 +484,7 @@ class App:
         streaming = getattr(self.backend, "is_streaming", None)
         if (streaming is not None and not touching and streaming()
                 and not getattr(self, "ui_urgent", False)
-                and now - self._shown_at < float(self.cfg.get("ui_quiet_stream_frame_s", 1.0))):
+                and now - self._shown_at < float(self.cfg.get("ui_quiet_stream_frame_s", 2.0))):
             # A streaming radio has no gap to put a frame in: each one costs
             # its time on the SPI bus in listening. At most one a second,
             # then -- the bars still move, the buzzer is not held back at
@@ -743,8 +745,14 @@ class App:
         # this goes away, either because you said so or because it ran out.
         # Rounded up, so it opens on the full 30 rather than on 29; reaching
         # zero and the notice closing are the same moment.
+        #
+        # In steps of five since 0.11.4. A number that changes every second
+        # is a frame every second, and a frame costs the stream a third of a
+        # second of listening: seen on the reference unit, thirty frames in
+        # the first half minute after every start, the analysis a second
+        # behind and two million samples dropped.
         left = self._power_notice_left()
-        self._text("BEGREPEN (%d)" % math.ceil(left),
+        self._text("BEGREPEN (%d)" % (5 * math.ceil(left / 5.0)),
                    btn.centerx, btn.centery, self.font_m, WHITE, center=True)
 
     def _power_notice_tap(self, x, y):
