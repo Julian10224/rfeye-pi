@@ -1,6 +1,6 @@
-# RF Eye 0.11.4 for Raspberry Pi
+# RF Eye 0.11.5 for Raspberry Pi
 
-This repository contains the complete **RF Eye 0.11.4 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
+This repository contains the complete **RF Eye 0.11.5 reference appliance** for the MHS35/CUQI-style 3.5-inch SPI touchscreen.
 
 `main` is the only supported firmware/update branch. It contains the application, exact display/touch overlay, boot splash, systemd units, Labwc/Kanshi session, boot optimizations, NetworkManager policy and OTA package required to reproduce the working reference Raspberry Pi on a fresh Raspberry Pi OS installation.
 
@@ -36,7 +36,7 @@ Do not install a separate LCD-show/GoodTFT stack on top of this setup. RF Eye sh
 
 ## What a fresh install reproduces
 
-The installer reproduces the working 0.11.4 appliance path:
+The installer reproduces the working 0.11.5 appliance path:
 
 - `/opt/rfeye/rfeye/` receives the final runtime from this repository
 - `/opt/rfeye/start-rfeye.sh` is installed from `scripts/start-rfeye.sh`
@@ -84,7 +84,7 @@ The app waits for the Wayland socket before display initialization, so the user 
 
 The installer compiles the committed DTS and verifies SHA-256 `1727ca3c3161bd90db1cbc7a076dad692d34ee67c7acf70afab28fbf16fdec34`. If the result is not byte-for-byte identical to the reference overlay, installation stops instead of silently using a different display definition.
 
-## User interface in 0.11.4
+## User interface in 0.11.5
 
 The compact profile contains:
 
@@ -460,6 +460,57 @@ cycles on a five-carrier site and requires the alert inside that window;
 scenario 18 keeps a handset keyed for the whole test and requires the other
 carrier's uplink to be visited anyway. Scenario 17 fails with the 0.9.25
 dwell and passes with this one.
+
+### A vehicle that only registers: one burst, nobody talking (0.11.5)
+
+The question was whether RF Eye, like a Blu Eye, goes off on a vehicle's
+registrations -- so that nobody has to be talking. Two answers, one from the
+unit and one from a test, and the test found two faults.
+
+**What the unit has heard.** Every one of the 24 terminals in `hits.log` on the
+reference unit is exactly that: `6 ms x1`, `7 ms x2` -- control bursts of 103
+symbols on the uplink of a control channel, not one voice call among them
+(a call is `13 ms` bursts, slot after slot). Registrations, status and
+position reports are what this detector has been alerting on all along.
+
+**What had never been driven through it** is a single such burst on its own:
+one control burst of 5.72 ms in three seconds of noise, through the stream,
+the alarm and the sound logic, at six distances.
+
+| one registration burst | 0.11.4 | 0.11.5 |
+| --- | --- | --- |
+| far, 7 dB | shown, silent | shown, silent |
+| streets away, 17-24 dB | shown, silent -- but 3 of 800 lost | shown, silent |
+| near, 29 dB | sounds -- but 3 of 800 lost | sounds |
+| close, 39 dB | sounds | sounds |
+| beside the antenna, clipping | **reads 25-28 dB: silent 2 of 3** | sounds 3 of 3 |
+
+**The closer the car, the lower it read.** The ADC has eight bits; a vehicle
+within a street's length overfills them at any usable gain. A clipped burst
+throws energy onto every other channel of the window for as long as it
+lasts, and that is what its level is then measured against: 600 times the
+noise read 28 dB, 3000 times read 25 dB -- under the CITY threshold, so it was
+shown without a sound. A whole slot of a call averaged a few dB better and
+stayed above it, which is why scenario 36 had passed. The gain guard is no
+help: it steps down a second later, and a registration is over in six
+milliseconds. `SDRBackend._mark_overload` now asks the rails directly: when a
+quarter of the worst millisecond of a capture sits on them (and most of the
+capture does not), the strongest verified channel is the transmitter that
+did it, its level counts as 45 dB and the HIT line says `overload`.
+
+**One box taken for a carrier.** A terminal's linearisation carrier is kept
+out of the symbol-rate test box by box (0.89 ms each). pi/4-DQPSK that happens
+to step 45 degrees ten times running is a tone for as long as it lasts, and in
+the last, two-thirds-full box of a burst that is all there is. That box and
+its neighbour left the mask, 79 symbols remained where 80 are needed, and a
+clean 24 dB burst came back with no modulation score: 3 of 800 random bursts.
+A carrier now needs two boxes in a row; the shortest linearisation carrier
+fills three.
+
+Still open: 2 of 400 random 103-symbol bursts read under 14 kHz wide (a notch
+in so short a spectrum) and are turned down on `bandwidth`; and all of this
+is a simulation of a clipped ADC, not a vehicle on air. `hits.log` will say
+`overload` the first time one passes.
 
 ### On the unit at last: what the stream did on a real Pi (0.11.4)
 
@@ -2019,7 +2070,7 @@ Replay is offline and does not stop or reopen the live RTL-SDR backend. Since RF
 
 ## Buzzer wiring
 
-RF Eye 0.11.4 uses a **TMB12A03 active buzzer**:
+RF Eye 0.11.5 uses a **TMB12A03 active buzzer**:
 
 ```text
 TMB12A03 signal -> physical pin 37 (BCM GPIO26)
@@ -2168,7 +2219,7 @@ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start rfeye-user.service
 
 ## Release build
 
-`VERSION` and `rfeye/config.py` identify this release as **0.11.4**.
+`VERSION` and `rfeye/config.py` identify this release as **0.11.5**.
 
 Build the OTA package with:
 

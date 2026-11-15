@@ -475,6 +475,14 @@ jobs:
           grep -q 'common = np.maximum(np.median(rel, axis=1), 0.0)' rfeye/stream_watch.py
           grep -q 'self.stream_shed+=len(pending)-len(keep)' rfeye/sdr_backend.py
           grep -q 'the whole window rising and falling together triggers nothing' scripts/detector-selftest.py
+          # 0.11.5: a vehicle that only registers. A burst that clips the ADC
+          # is beside the antenna whatever level it reads, and one box that
+          # scores as a carrier is not a carrier.
+          grep -q 'def _mark_overload' rfeye/sdr_backend.py
+          grep -q '"uplink_overload_level_db": 45.0' rfeye/config.py
+          grep -q 'cw = cw & (left | right)' rfeye/tetra_phy.py
+          grep -q 'one registration burst beside the antenna, no call' scripts/detector-selftest.py
+          grep -q 'the last box of a burst was taken for a carrier' scripts/tetra-phy-selftest.py
           grep -q 'def check_downlink_takes_a_turn' scripts/detector-selftest.py
           grep -q 'np.concatenate((np.zeros(d, x.dtype), x))\[:n\]' scripts/simulator/channel.py
           grep -q 'def _begin_capture' rfeye/sdr_backend.py

@@ -953,7 +953,10 @@ class SDRBackend:
                 float(r.burst_ms_median),int(r.burst_count),float(r.duty),
                 'partner' if (tr is not None and tr.trusted) else 'band',
                 (' weak' if getattr(r,'shape_waived',False) else '')
-                +(' line' if getattr(r,'carrier_line',False) else ''),
+                +(' line' if getattr(r,'carrier_line',False) else '')
+                # The ADC was on its rails: the level is a floor, not a
+                # measurement. See _mark_overload.
+                +(' overload' if getattr(r,'overload',False) else ''),
                 len(tr.hit_times) if tr is not None else 0,
                 # Near or far by alert_range: whether this one made a sound.
                 'near' if float(r.snr_db)>=near_db else 'far')
@@ -1644,6 +1647,59 @@ class SDRBackend:
         self.last_dwell_role=role
         return out
 
+    def _mark_overload(self,iq,results):
+        """A burst that put the ADC on its rails is beside the antenna (0.11.5).
+
+        Near or far is decided on the level against the noise, and that level
+        stops rising exactly where it matters. The ADC has eight bits. A
+        vehicle's 3-10 W within a street's length is far more than they hold
+        at any usable gain, the burst is clipped, and what clipping throws off
+        lands on every other channel of the window for as long as the burst
+        lasts -- which is what the burst is then measured against. Driven
+        through the stream with one registration burst of 103 symbols and
+        nothing else (no call, the question this was written to answer):
+
+            40x the noise    29 dB   near, sounds
+            150x             39 dB   near, sounds
+            600x             28 dB   far in two runs of three -- silent
+            3000x            25 dB   far, silent, five runs of five
+
+        The closer the car, the lower it read, and under the CITY threshold of
+        28 dB it was shown without a sound: "nothing next to the police car".
+        A whole slot of 231 symbols averaged out a few dB better and stayed
+        just above the threshold, which is why scenario 36 had not seen it.
+        The gain guard does not help here: it steps down a second later, and
+        a registration is over in six milliseconds.
+
+        So the rails are asked directly. If in the worst millisecond of the
+        capture a quarter of the samples sit on them, and most of the capture
+        does not (a burst, not a receiver that is drowned all the time: that
+        is the gain guard's business), the strongest verified channel is the
+        transmitter that did it. It is marked, and its level is raised to
+        uplink_overload_level_db -- above every threshold alert_range has,
+        and a full bar: nearer than this the unit cannot tell.
+        """
+        best=max((r for r in results if r.ok),key=lambda r: float(r.snr_db),default=None)
+        if best is None:
+            return
+        try:
+            k=2048
+            n=len(iq)//k
+            if n<4:
+                return
+            x=iq[:n*k]
+            rail=((np.abs(x.real)>=126.5)|(np.abs(x.imag)>=126.5)).reshape(n,k).mean(axis=1)
+            worst=float(rail.max())
+            if worst<float(self.cfg.get('uplink_overload_rail',0.25)):
+                return
+            if float(np.median(rail))>0.5*worst:
+                return
+            best.overload=True
+            best.snr_db=max(float(best.snr_db),
+                            float(self.cfg.get('uplink_overload_level_db',45.0)))
+        except Exception:
+            pass
+
     def _analyse_capture(self,iq,centre,sr,members,role):
         """The waveform test on ``members`` of one capture, cheap screen first.
 
@@ -1701,6 +1757,7 @@ class SDRBackend:
                 out.append(r)
         self.last_verify_ms=(time.perf_counter()-t1)*1000.
         if role=='UPLINK':
+            self._mark_overload(iq,out)
             # What raised an alarm, a minute apart at most. "It goes off when
             # there is nothing" has two answers -- a real terminal further
             # away than it seemed, or something that is not TETRA at all --

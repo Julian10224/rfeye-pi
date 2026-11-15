@@ -2219,7 +2219,7 @@ def check_near_and_far():
                               start_frac=1.4 / dur, freq_offset_hz=off)
         return (iq + amp * b[:n]).astype(np.complex64)
 
-    def drive(amp, label, **cfg):
+    def drive(amp, label, nslots=1, middle=False, **cfg):
         with tempfile.TemporaryDirectory() as d:
             b = make_backend(FakeAir(), os.path.join(d, "sites.json"), stream_mode=True,
                              low_power_mode=False, stream_hold_s=2.6,
@@ -2229,7 +2229,13 @@ def check_near_and_far():
                 centre = b._stream_windows(now)[0][0]
                 mem = b._stream_members(centre, now)
                 target = mem[len(mem) * 3 // 4][0]       # high in the window
-                fake = StreamingFake(burst_capture(target - centre, amp), sr)
+                if middle:
+                    # Beside the window's centre, where the stream puts the
+                    # control channel of the cell -- and where what clipping
+                    # throws off lands closest to the burst itself.
+                    target = min(mem, key=lambda m: abs(m[0] - centre))[0]
+                fake = StreamingFake(burst_capture(target - centre, amp,
+                                                   nslots=nslots), sr)
                 b._ensure_sdr = lambda: fake
                 b.sdr = fake
                 b._site_work = lambda now: []
@@ -2252,6 +2258,56 @@ def check_near_and_far():
               and abs(s["peaks"][0]["freq_hz"] - target) < 1.0,
               str([p["freq_hz"] for p in s["peaks"]]))
         check("  and it is near, so it sounds", s["alert_near"])
+    # 0.11.5: a vehicle that only registers -- one control burst of 103
+    # symbols, 5.72 ms, and nobody talking. Clipped, it measured 25-28 dB,
+    # under the CITY threshold: the closer the car, the lower it read, and it
+    # was shown without a sound. The rails say what the level cannot.
+    reg = 103 / 255.0
+    for amp, label in ((600, "one registration burst beside the antenna, no call"),
+                       (3000, "  and right against it")):
+        s, target = drive(amp, label, nslots=reg, middle=True)
+        on = [p for p in s["peaks"] if abs(p["freq_hz"] - target) < 1.0]
+        check(label + ": alert on its own channel",
+              s["mobile_confirmed"] and bool(on), str([p["freq_hz"] for p in s["peaks"]]))
+        check("  it is near, so it sounds", s["alert_near"],
+              str([round(p["snr_db"], 1) for p in s["peaks"]]))
+        check("  and the bar is full",
+              bool(on) and on[0]["snr_db"] >= float(DEFAULTS["ui_level_strong_db"]),
+              str([round(p["snr_db"], 1) for p in on]))
+    s, target = drive(3000, "the same without asking the rails", nslots=reg,
+                      middle=True, uplink_overload_rail=2.0)
+    on = [p for p in s["peaks"] if abs(p["freq_hz"] - target) < 1.0]
+    check("  (its measured level is that of a transmitter streets away)",
+          s["mobile_confirmed"] and bool(on) and on[0]["snr_db"] < 33.0,
+          str([round(p["snr_db"], 1) for p in on]))
+    s, target = drive(22, "one registration burst some streets away", nslots=reg,
+                      middle=True)
+    check("one registration burst some streets away is shown, and silent",
+          s["mobile_confirmed"] and not s["alert_near"],
+          str([round(p["snr_db"], 1) for p in s["peaks"]]))
+
+    # A receiver that is drowned all the time is not a burst beside it.
+    from tetra_phy import PhyResult as _Phy
+    with tempfile.TemporaryDirectory() as d:
+        b = make_backend(FakeAir(), os.path.join(d, "sites.json"))
+        try:
+            n = 131072
+            quiet = (np.random.default_rng(3).standard_normal(n) * 9
+                     + 1j * np.random.default_rng(4).standard_normal(n) * 9).astype(np.complex64)
+            burst = quiet.copy()
+            burst[60000:71500] = 127.5 + 127.5j
+            drowned = np.full(n, 127.5 + 127.5j, np.complex64)
+            for iq, want, what in ((quiet, False, "nothing on the rails: not marked"),
+                                   (burst, True, "six milliseconds on the rails: marked"),
+                                   (drowned, False, "on the rails all the time: not marked")):
+                r = _Phy(freq_hz=381_187_500.0, role="UPLINK", ok=True, snr_db=26.0)
+                weak = _Phy(freq_hz=381_287_500.0, role="UPLINK", ok=True, snr_db=11.0)
+                b._mark_overload(iq, [weak, r])
+                check("  " + what, r.overload is want and not weak.overload
+                      and (r.snr_db >= 45.0) is want, "%.1f dB" % r.snr_db)
+        finally:
+            b.running = False
+
     s, target = drive(3, "a terminal across town")
     check("a terminal across town is shown", s["mobile_confirmed"])
     check("  and does not sound (alert_range city)", not s["alert_near"],

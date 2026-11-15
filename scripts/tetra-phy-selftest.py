@@ -603,6 +603,40 @@ def sensitive_uplink():
     if rs.shape_waived or "bandwidth" not in rs.checks:
         FAILURES.append("sensitive: a strong burst was let off its shape tests")
 
+    # 0.11.5: one box that scores as a carrier is not a carrier. The last box
+    # of a registration burst is two thirds full, and ten symbols that all
+    # step 45 degrees are a tone for as long as they last. Taken for a
+    # linearisation carrier, that box and its neighbour left the mask, and a
+    # clean 24 dB burst came back with no modulation score (3 of 800 random
+    # bursts; found driving a single registration through the stream).
+    rng = np.random.default_rng(977)
+    box, nb = 32, 73
+    bb = (rng.standard_normal(box * nb) + 1j * rng.standard_normal(box * nb))
+
+    def symbols(nsym, same=False):
+        deg = (np.full(nsym, 45.0) if same
+               else rng.choice([45.0, 135.0, -135.0, -45.0], nsym))
+        return 22.0 * np.exp(1j * np.cumsum(np.repeat(np.radians(deg) / 2.0, 2)))
+
+    body = symbols(6 * box // 2)
+    tail = symbols(10, same=True)
+    bb[31 * box:37 * box] += body
+    bb[37 * box:37 * box + len(tail)] += tail
+    on = np.zeros(nb, dtype=bool)
+    on[31:38] = True
+    cw = phy.carrier_boxes(bb.astype(np.complex64), nb, on=on)
+    if np.any(cw):
+        FAILURES.append("sensitive: the last box of a burst was taken for a carrier "
+                        "(boxes %s)" % list(np.flatnonzero(cw)))
+    # ...and a carrier that really is there, three boxes of it, still is.
+    t = np.arange(3 * box)
+    bb[20 * box:23 * box] += 22.0 * np.exp(2j * math.pi * 0.05 * t)
+    on[20:23] = True
+    cw = phy.carrier_boxes(bb.astype(np.complex64), nb, on=on)
+    if not (cw[20] and cw[21] and cw[22]) or cw[37]:
+        FAILURES.append("sensitive: three boxes of carrier not found, or the burst's "
+                        "last box with them (boxes %s)" % list(np.flatnonzero(cw)))
+
 
 def main():
     ap = argparse.ArgumentParser()

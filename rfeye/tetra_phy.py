@@ -527,6 +527,22 @@ def carrier_boxes(bb, n_boxes, on=None):
         if len(on) == n_boxes and np.any(on):
             power = np.mean(np.abs(x) ** 2, axis=1)
             cw &= power >= 0.5 * float(np.median(power[on]))
+    # A carrier is there for milliseconds; one box is 0.89 ms. A single box
+    # that scores as a carrier is modulation that happened to turn one way:
+    # pi/4-DQPSK steps by 45 or 135 degrees a symbol, and a stretch of nothing
+    # but 45-degree steps scores 0.92 -- over the limit. In a box that is two
+    # thirds full, the last one of a burst, that is ten symbols, and it
+    # happens: driven through the stream with one registration burst, 0.11.4
+    # turned down a clean 24 dB burst because its last box was taken for a
+    # carrier, went out of the mask with its neighbour, and left 79 symbols
+    # where 80 are needed (3 of 800 random bursts). Two boxes in a row cannot
+    # be that, and the shortest linearisation carrier fills three.
+    if len(cw) > 1:
+        left = np.concatenate(([False], cw[:-1]))
+        right = np.concatenate((cw[1:], [False]))
+        cw = cw & (left | right)
+    else:
+        cw = np.zeros_like(cw)
     return cw
 
 
@@ -795,6 +811,10 @@ class PhyResult:
     # channel and the flatness test was therefore not held against it. See
     # analyse().
     carrier_line: bool = False
+    # True when the receiver's ADC was on its rails while this was sent: a
+    # transmitter beside the antenna. Set by SDRBackend._mark_overload, which
+    # also explains why the level above cannot be trusted then.
+    overload: bool = False
     checks: dict = field(default_factory=dict)
 
     def as_dict(self):

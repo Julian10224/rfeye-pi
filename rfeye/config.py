@@ -336,6 +336,13 @@ DEFAULTS = {
     "alert_range": "city",
     "uplink_near_city_db": 28.0,
     "uplink_near_close_db": 38.0,
+    # A burst that puts the ADC on its rails is beside the antenna, whatever
+    # level it then measures (0.11.5): clipped, a registration burst read
+    # 25-28 dB -- less than one half as close -- and stayed silent. When a
+    # quarter of the worst millisecond is on the rails the strongest verified
+    # channel counts as this loud. See SDRBackend._mark_overload.
+    "uplink_overload_rail": 0.25,
+    "uplink_overload_level_db": 45.0,
     # 100 is a peak hold over the dwell's ~146 spectrum rows. 98 kept the top
     # three of them, and a single 14 ms TETRA slot is four -- so the level of
     # the shortest real transmission was averaged away before any test saw it.
@@ -565,7 +572,7 @@ DEFAULTS = {
     "show_brand_text": True,
     "touch_invert_x": False,
     "touch_invert_y": False,
-    "app_version": "0.11.4",
+    "app_version": "0.11.5",
     "update_manifest_url": "https://raw.githubusercontent.com/Julian10224/rfeye-pi/main/update/manifest.json",
     "title": "RF EYE",
 }
